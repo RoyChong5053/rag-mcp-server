@@ -212,7 +212,10 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 		return nil, fmt.Errorf("failed to embed chunks: %w", err)
 	}
 
-	// Create Qdrant points
+	// Create Qdrant points with deterministic uint IDs:
+	// high 32 bits = collection hash, low 32 bits = chunk hash.
+	// Re-indexing the same file upserts the same IDs (idempotent).
+	colHash := uint64(StringHash(collectionID)) << 32
 	points := make([]Point, len(chunks))
 	for i, chunk := range chunks {
 		payload := map[string]any{
@@ -226,7 +229,7 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 		}
 
 		points[i] = Point{
-			ID:      fmt.Sprintf("%s_%d", collectionID, i),
+			ID:      colHash | uint64(StringHash(chunk)),
 			Payload: payload,
 			Vector:  embeddings[i],
 		}
@@ -243,10 +246,19 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 		}
 	}
 
-	// Upsert points
-	if err := e.qdrant.UpsertPoints(collectionID, points); err != nil {
-		return nil, fmt.Errorf("failed to upsert points: %w", err)
+	// Upsert points in batches so large documents don't produce
+	// a single oversized HTTP request to Qdrant
+	const upsertBatchSize = 100
+	for start := 0; start < len(points); start += upsertBatchSize {
+		end := start + upsertBatchSize
+		if end > len(points) {
+			end = len(points)
+		}
+		if err := e.qdrant.UpsertPoints(collectionID, points[start:end]); err != nil {
+			return nil, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
+		}
 	}
+	log.Printf("Indexed %d chunks into collection '%s' (%d upsert batches)", len(chunks), collectionID, (len(points)+upsertBatchSize-1)/upsertBatchSize)
 
 	return &IndexResult{
 		ChunksIndexed: len(chunks),

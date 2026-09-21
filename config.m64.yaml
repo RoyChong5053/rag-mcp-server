@@ -1,0 +1,26 @@
+server:
+  host: "0.0.0.0"
+  port: 8199
+
+qdrant:
+  host: "192.168.10.1"
+  port: 6333
+
+oneapi:
+  base_url: "http://127.0.0.1:3000"
+  backup_url: ""
+  embed_model: "embedding"
+  rerank_model: "reranker"
+  # Fill in on the server after deploy; never commit real keys.
+  # See config.local.yaml (gitignored) pattern.
+  api_key: "REDACTED"
+
+chunking:
+  chunk_size: 500
+  overlap_percent: 30
+
+rerank:
+  enabled: true
+  recall: 30
+  query_max_chars: 2000
+  doc_max_chars: 1000

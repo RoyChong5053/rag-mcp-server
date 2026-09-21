@@ -45,6 +45,10 @@ type EmbeddingResponse struct {
 	} `json:"data"`
 }
 
+// embedBatchSize caps texts per embedding request so large documents
+// don't blow up into a single giant HTTP call (timeouts / 413s).
+const embedBatchSize = 32
+
 // CreateEmbeddings generates embeddings for the given texts
 func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
@@ -56,14 +60,36 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 		Input: texts,
 	}
 
-	// Try primary endpoint first
-	embeddings, err := c.callEndpoint(c.baseURL, req)
-	if err != nil && c.backupURL != "" {
-		// Fallback to backup endpoint
-		embeddings, err = c.callEndpoint(c.backupURL, req)
+	// Small input: single request (fast path, preserves old behavior)
+	if len(texts) <= embedBatchSize {
+		// Try primary endpoint first
+		embeddings, err := c.callEndpoint(c.baseURL, req)
+		if err != nil && c.backupURL != "" {
+			// Fallback to backup endpoint
+			embeddings, err = c.callEndpoint(c.backupURL, req)
+		}
+		return embeddings, err
 	}
 
-	return embeddings, err
+	// Large input: batch sequentially to avoid timeouts
+	all := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += embedBatchSize {
+		end := start + embedBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batchReq := EmbeddingRequest{Model: c.model, Input: texts[start:end]}
+		embeddings, err := c.callEndpoint(c.baseURL, batchReq)
+		if err != nil && c.backupURL != "" {
+			embeddings, err = c.callEndpoint(c.backupURL, batchReq)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("batch [%d:%d]: %w", start, end, err)
+		}
+		all = append(all, embeddings...)
+	}
+
+	return all, nil
 }
 
 func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([][]float32, error) {

@@ -3,7 +3,31 @@ package chunking
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
+
+// runeLen returns the number of runes (characters), not bytes.
+// ST's JS counts UTF-16 code units; runes are the closest correct Go equivalent
+// and — critically — never split a multi-byte character in half.
+func runeLen(s string) int {
+	return utf8.RuneCountInString(s)
+}
+
+// sliceRunes safely slices a string by rune indices [start:end).
+// Out-of-range indices are clamped; never produces invalid UTF-8.
+func sliceRunes(s string, start, end int) string {
+	runes := []rune(s)
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if start >= end {
+		return ""
+	}
+	return string(runes[start:end])
+}
 
 // SplitRecursive splits text into chunks, trying delimiters in priority order.
 // Matches Vector-Storage-5053's splitRecursive behavior exactly.
@@ -21,7 +45,7 @@ func SplitRecursive(text string, maxChunkSize int, delimiters []string) []string
 	if maxChunkSize <= 0 {
 		return []string{text}
 	}
-	if len(text) <= maxChunkSize {
+	if runeLen(text) <= maxChunkSize {
 		return []string{text}
 	}
 
@@ -49,9 +73,9 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 		return nil // delimiter not found
 	}
 
-	// Check if all parts fit within maxChunkSize
+	// Check if all parts fit within maxChunkSize (in runes, not bytes)
 	for _, part := range parts {
-		if len(part) > maxChunkSize {
+		if runeLen(part) > maxChunkSize {
 			return nil // this delimiter produces chunks that are too large
 		}
 	}
@@ -69,28 +93,31 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 	return chunks
 }
 
-// tryCharSplit splits text at every character boundary.
+// tryCharSplit splits text at every character boundary (rune-safe).
 func tryCharSplit(text string, maxChunkSize int) []string {
+	runes := []rune(text)
 	var chunks []string
-	for i := 0; i < len(text); i += maxChunkSize {
+	for i := 0; i < len(runes); i += maxChunkSize {
 		end := i + maxChunkSize
-		if end > len(text) {
-			end = len(text)
+		if end > len(runes) {
+			end = len(runes)
 		}
-		chunks = append(chunks, text[i:end])
+		chunks = append(chunks, string(runes[i:end]))
 	}
 	return chunks
 }
 
-// forceSplit splits text at maxChunkSize boundaries (absolute last resort).
+// forceSplit splits text at maxChunkSize boundaries, rune-safe
+// (absolute last resort).
 func forceSplit(text string, maxChunkSize int) []string {
+	runes := []rune(text)
 	var chunks []string
-	for i := 0; i < len(text); i += maxChunkSize {
+	for i := 0; i < len(runes); i += maxChunkSize {
 		end := i + maxChunkSize
-		if end > len(text) {
-			end = len(text)
+		if end > len(runes) {
+			end = len(runes)
 		}
-		chunks = append(chunks, text[i:end])
+		chunks = append(chunks, string(runes[i:end]))
 	}
 	return chunks
 }
@@ -113,20 +140,20 @@ func OverlapChunks(chunks []string, overlapSize int) []string {
 	for i, chunk := range chunks {
 		var prevOverlap, nextOverlap string
 
-		// Get overlap from previous chunk's end
+		// Get overlap from previous chunk's end (rune-safe)
 		if i > 0 && halfOverlap > 0 {
 			prev := chunks[i-1]
-			if len(prev) > halfOverlap {
-				prev = prev[len(prev)-halfOverlap:]
+			if runeLen(prev) > halfOverlap {
+				prev = sliceRunes(prev, runeLen(prev)-halfOverlap, runeLen(prev))
 			}
 			prevOverlap = TrimToStartSentence(prev)
 		}
 
-		// Get overlap from next chunk's start
+		// Get overlap from next chunk's start (rune-safe)
 		if i < len(chunks)-1 && halfOverlap > 0 {
 			next := chunks[i+1]
-			if len(next) > halfOverlap {
-				next = next[:halfOverlap]
+			if runeLen(next) > halfOverlap {
+				next = sliceRunes(next, 0, halfOverlap)
 			}
 			nextOverlap = TrimToEndSentence(next)
 		}

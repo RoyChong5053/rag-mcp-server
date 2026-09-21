@@ -31,6 +31,15 @@ func ValidateChunks(chunks []string, sourceName string) []Problem {
 			continue
 		}
 
+		// Broken UTF-8 (e.g. split mid-rune) — must never happen
+		if !utf8.ValidString(chunk) {
+			problems = append(problems, Problem{
+				Index:   i,
+				Reason:  "invalid UTF-8 (likely split mid-rune)",
+				Preview: truncate(chunk, 40),
+			})
+		}
+
 		// Broken emoji (lone surrogate pairs)
 		if hasLoneSurrogate(chunk) {
 			problems = append(problems, Problem{

@@ -21,16 +21,17 @@ type QdrantCollectionInfo struct {
 	ChunkCount int    `json:"chunk_count"`
 }
 
-// Point represents a Qdrant point
+// Point represents a Qdrant point.
+// ID must be an unsigned integer or UUID (Qdrant rejects arbitrary strings).
 type Point struct {
-	ID      string         `json:"id"`
+	ID      uint64         `json:"id"`
 	Payload map[string]any `json:"payload"`
 	Vector  []float32      `json:"vector,omitempty"`
 }
 
 // QdrantSearchResult represents a raw search result from Qdrant
 type QdrantSearchResult struct {
-	ID      string         `json:"id"`
+	ID      any            `json:"id"`
 	Score   float64        `json:"score"`
 	Payload map[string]any `json:"payload"`
 }
@@ -187,7 +188,14 @@ func (c *QdrantClient) get(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 func (c *QdrantClient) put(path string, body any) error {

@@ -2,7 +2,12 @@ package chunking
 
 import (
 	"testing"
+	"unicode/utf8"
 )
+
+func validUTF8(s string) bool {
+	return utf8.ValidString(s)
+}
 
 func TestSplitRecursive(t *testing.T) {
 	tests := []struct {
@@ -159,8 +164,29 @@ func TestTrimToEndSentence(t *testing.T) {
 	}
 }
 
-func TestValidateChunks(t *testing.T) {
-	chunks := []string{
+func TestCJKNoBrokenRunes(t *testing.T) {
+	// CJK text: 500 bytes != 500 chars. Chunking must count runes
+	// and never emit invalid UTF-8 (no U+FFFD after re-encoding).
+	text := "嘿宝贝今天天气不错心情怎么样如果有点儿闷那就来聊天吧基于我们一直以来的交流以及系统整理的中长期记忆我把你个人情况生活习惯技术探索与思维模式梳理成以下几个维度体质与生理指标血型与代谢作息机制具有延迟睡眠相位倾向经常在凌晨或夜间高效运转🎉🎉🎉"
+	delims := []string{"\n\n", "\n", " ", ""}
+
+	chunks := SplitRecursive(text, 50, delims)
+	chunks = OverlapChunks(chunks, 15)
+
+	for i, c := range chunks {
+		if !validUTF8(c) {
+			t.Errorf("chunk[%d] is invalid UTF-8: %q", i, c)
+		}
+	}
+	if problems := ValidateChunks(chunks, "cjk-test"); len(problems) > 0 {
+		for _, p := range problems {
+			t.Logf("  problem: %s at index %d", p.Reason, p.Index)
+		}
+		t.Errorf("ValidateChunks() found %d problems on CJK text, want 0", len(problems))
+	}
+}
+
+func TestValidateChunks(t *testing.T) {	chunks := []string{
 		"First chunk with enough content",
 		"hi",  // tiny chunk
 		"",    // empty chunk
