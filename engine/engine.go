@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -502,6 +503,46 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 	return res, nil
 }
 
+// StoreMemory indexes ad-hoc text for later semantic recall (the MCP
+// store_memory tool). It is the write-side counterpart of SearchDefault: an
+// omitted collection_id resolves to settings.default_collection, and having no
+// default is a loud error rather than a silent write to a random bucket.
+// Unlike a file-backed corpus this content lives only inside Qdrant.
+func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]string) (*IndexResult, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("text is required")
+	}
+	scope := strings.TrimSpace(collectionID)
+	if scope == "" {
+		scope = strings.TrimSpace(e.settings.Get().DefaultCollection)
+	}
+	if scope == "" {
+		return nil, fmt.Errorf("no collection_id given and no default_collection configured; pass collection_id or set a default in the management dashboard")
+	}
+	return e.IndexText(text, scope, metadata)
+}
+
+// EnsureCollection creates a collection in Qdrant if it does not exist yet, so
+// a fresh write target (e.g. a global memory bucket) can be set up from the
+// dashboard before anything is indexed into it.
+func (e *Engine) EnsureCollection(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("collection name is required")
+	}
+	exists, err := e.qdrant.CollectionExists(name)
+	if err != nil {
+		return fmt.Errorf("failed to check collection '%s': %w", name, err)
+	}
+	if exists {
+		return nil
+	}
+	if err := e.qdrant.CreateCollection(name); err != nil {
+		return fmt.Errorf("failed to create collection '%s': %w", name, err)
+	}
+	return nil
+}
+
 // PreviewChunks splits text without embedding: zero-token cost tuning.
 // Returns total count plus up to maxSamples leading chunks.
 func PreviewChunks(text string, size, overlap int, maxSamples int) (int, []string) {
@@ -668,6 +709,7 @@ func (e *Engine) DeleteMemory(collectionID string, filter map[string]any) (int, 
 
 // CollectionDetail merges live Qdrant stats with registry metadata.
 type CollectionDetail struct {
+	ID           int      `json:"id"`
 	Name         string   `json:"name"`
 	ChunkCount   int      `json:"chunk_count"`
 	Exists       bool     `json:"exists"`
@@ -725,13 +767,26 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		if !ok {
 			return nil, fmt.Errorf("collection '%s' not found in Qdrant or registry", name)
 		}
+		d.ID = CollectionNumID(d.Name)
 		return []CollectionDetail{*d}, nil
 	}
 	out := make([]CollectionDetail, 0, len(byName))
 	for _, d := range byName {
+		d.ID = CollectionNumID(d.Name)
 		out = append(out, *d)
 	}
+	// Deterministic order: map iteration above is random, which made the
+	// dashboard table reshuffle on every reload/manage click. Sort by name so
+	// rows stay put.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// CollectionNumID derives a stable, human-friendly numeric id from a
+// collection name. It is cosmetic (a row label in the dashboard) so it needs
+// no registry migration; it is not guaranteed unique.
+func CollectionNumID(name string) int {
+	return int(StringHash(name) % 100000)
 }
 
 // CollectionMetaUpdate holds optional metadata fields; nil means "leave unchanged".

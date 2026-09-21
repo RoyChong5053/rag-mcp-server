@@ -45,6 +45,24 @@ input[type=number] { width: 110px; }
 .job small { color: #888; }
 #index-panel { border: 1px solid #468; border-radius: 6px; padding: 10px; margin-top: 10px; display: none; }
 .warn { color: #e8a33d; font-size: 12px; }
+/* panels */
+.panel { border: 1px solid #2c333b; background: #14181d; border-radius: 10px; padding: 14px 16px; margin-top: 14px; }
+.panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.panel-head h2 { border: none; margin: 0; padding: 0; }
+.panel-head .spacer { flex: 1; }
+.panel.collections { border-color: #35506b; }
+.panel.collections .panel-head h2 { color: #9cc; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #8a949e; font-weight: 600; }
+tbody tr { transition: background .08s; }
+tbody tr:hover { background: #1a2028; }
+tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
+.col-id { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7fd6a6; background: #12211a; border: 1px solid #2c5137; border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+.cname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dim { color: #7c8791; }
+.num { text-align: right; font-variant-numeric: tabular-nums; color: #cfe; }
+.b-on { color: #8d8; border-color: #484; }
+.b-off { color: #777; }
+.b-orphan { color: #e8a33d; border-color: #a80; }
 </style>
 </head>
 <body>
@@ -52,8 +70,9 @@ input[type=number] { width: 110px; }
 <button onclick="backup()" title="download collections.json">backup registry</button>
 <div id="health">loading…</div>
 
-<h2>Search Defaults <span class="prov" style="font-weight:normal">— served to every frontend</span></h2>
-<div id="settings-panel">
+<div class="panel">
+  <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend</span></div>
+  <div id="settings-panel">
   <div class="row">
     <span>default collection <select id="s-col"></select></span>
     <span>top_k <input type="number" id="s-topk" min="1" max="100"></span>
@@ -65,10 +84,19 @@ input[type=number] { width: 110px; }
     <button onclick="saveSettings()">Save settings</button>
   </div>
   <div id="s-status" class="prov"></div>
+  </div>
 </div>
 
-<h2>Collections</h2>
-<table id="tbl"><thead><tr><th>Collection</th><th>Chunks</th><th>Enabled</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
+<div class="panel collections">
+  <div class="panel-head">
+    <h2>Collections</h2>
+    <span id="col-count" class="prov"></span>
+    <span class="spacer"></span>
+    <button onclick="newCollection()">＋ New</button>
+    <button onclick="load()">refresh</button>
+  </div>
+  <table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
+</div>
 
 <div id="detail">
   <h3 id="d-name"></h3>
@@ -95,13 +123,19 @@ input[type=number] { width: 110px; }
   <div id="killed"></div>
 </div>
 
-<h2>Data Bank <button onclick="loadFiles()">refresh</button></h2>
-<div class="row">
-  <input type="file" id="up-file">
-  <button onclick="upload()">Upload to staging/</button>
-  <span class="prov">raw files live under docs/ on the server — upload, or scp them yourself</span>
+<div class="panel">
+  <div class="panel-head">
+    <h2>Data Bank</h2>
+    <span class="prov">raw files live under docs/ on the server — upload, or scp them yourself</span>
+    <span class="spacer"></span>
+    <button onclick="loadFiles()">refresh</button>
+  </div>
+  <div class="row">
+    <input type="file" id="up-file">
+    <button onclick="upload()">Upload to staging/</button>
+  </div>
+  <table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table>
 </div>
-<table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table>
 
 <div id="index-panel">
   <b id="ip-file"></b>
@@ -115,13 +149,15 @@ input[type=number] { width: 110px; }
   <div id="ip-warn" class="warn"></div>
   <div class="row">
     <button onclick="preview()">Preview chunks (zero token)</button>
-    <button onclick="submitIndex()">Vectorize → background job</button>
+    <button onclick="submitIndex()">Vectorize Data → job</button>
   </div>
   <div id="preview-out"></div>
 </div>
 
-<h2>Audit log <button onclick="loadAudit()">refresh</button></h2>
-<pre id="audit"></pre>
+<div class="panel">
+  <div class="panel-head"><h2>Audit log</h2><span class="spacer"></span><button onclick="loadAudit()">refresh</button></div>
+  <pre id="audit"></pre>
+</div>
 
 <div id="side">
   <h2>Jobs</h2>
@@ -156,17 +192,24 @@ async function load() {
   document.getElementById('col-list').innerHTML = cols.map(c => '<option value="' + esc(c.name) + '">').join('');
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
+  document.getElementById('col-count').textContent = cols.length + ' total · ' + cols.filter(c => c.exists).length + ' in Qdrant';
   for (const c of cols) {
     const tr = document.createElement('tr');
     if (cur === c.name) tr.className = 'sel';
     if (!c.exists) tr.classList.add('orphan');
     if (c.exists && !c.enabled) tr.classList.add('disabled');
+    const status = !c.exists
+      ? '<span class="badge b-orphan">orphan</span>'
+      : (c.enabled ? '<span class="badge b-on">enabled</span>' : '<span class="badge b-off">disabled</span>');
     const prov = c.exists
-      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + '<br>' + esc(c.embed_model || '') + '<br><small>' + esc((c.source_sha256 || '').slice(0, 12)) + '</small>'
-      : 'orphan: no vectors';
-    tr.innerHTML = '<td>' + esc(c.name) + '<br><small style="color:#888">' + esc(c.display_name || '') + '</small></td>' +
-      '<td>' + (c.exists ? c.chunk_count : '—') + '</td><td>' + (c.enabled ? 'on' : 'off') + '</td>' +
-      '<td>' + esc((c.consumers || []).join(', ')) + '</td><td class="prov">' + prov + '</td>';
+      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + ' · ' + esc(c.embed_model || '?') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
+      : '<span class="dim">no vectors</span>';
+    tr.innerHTML = '<td><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
+      '<td><span class="cname">' + esc(c.name) + '</span>' + (c.display_name ? '<br><small class="dim">' + esc(c.display_name) + '</small>' : '') + '</td>' +
+      '<td class="num">' + (c.exists ? c.chunk_count : '—') + '</td>' +
+      '<td>' + status + '</td>' +
+      '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
+      '<td class="prov">' + prov + '</td>';
     const td = document.createElement('td');
     const b = document.createElement('button');
     b.textContent = 'manage';
@@ -175,6 +218,17 @@ async function load() {
     tr.appendChild(td);
     tb.appendChild(tr);
   }
+}
+async function newCollection() {
+  const raw = prompt('New collection id (A-Za-z0-9_-, e.g. global_memory):');
+  if (raw == null) return;
+  const name = raw.trim();
+  if (!name) return;
+  try {
+    await api('POST', '/api/collections', {name: name});
+    await load();
+    await select(name);
+  } catch (e) { alert('create failed: ' + e.message); }
 }
 async function select(name) {
   cur = name;

@@ -37,6 +37,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /", h.serveIndex)
 	mux.HandleFunc("GET /api/health", h.health)
 	mux.HandleFunc("GET /api/collections", h.listCollections)
+	mux.HandleFunc("POST /api/collections", h.createCollection)
 	mux.HandleFunc("GET /api/collections/{name}", h.getCollection)
 	mux.HandleFunc("POST /api/collections/{name}/meta", h.setMeta)
 	mux.HandleFunc("POST /api/collections/{name}/delete", h.deleteCollection)
@@ -107,6 +108,30 @@ func (h *Handler) listCollections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, details)
+}
+
+// createCollection makes an empty collection in Qdrant. Lets the dashboard
+// set up a fresh write target (e.g. a global memory bucket) before anything is
+// indexed into it — otherwise the settings default would reject the name as
+// "not found".
+func (h *Handler) createCollection(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if !collectionNameRe.MatchString(name) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("bad collection name (A-Za-z0-9_-, max 64, must start alnum)"))
+		return
+	}
+	if err := h.eng.EnsureCollection(name); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "created", "name": name})
 }
 
 func (h *Handler) getCollection(w http.ResponseWriter, r *http.Request) {

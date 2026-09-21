@@ -60,71 +60,39 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "index_document",
-		Description: "Index a file into a Qdrant collection. The file will be chunked, embedded, and stored.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "Path to the file to index",
-				},
-				"collection_id": map[string]any{
-					"type":        "string",
-					"description": "Collection to index into (e.g., 'obsidian', 'notes')",
-				},
-				"metadata": map[string]any{
-					"type":        "object",
-					"description": "Optional metadata to attach to the chunks",
-				},
-			},
-			"required": []string{"path", "collection_id"},
-		},
-	}, func(args map[string]any) (any, error) {
-		path, _ := args["path"].(string)
-		collectionID, _ := args["collection_id"].(string)
-		metadata := getStringMapArg(args, "metadata")
-
-		result, err := eng.IndexDocument(path, collectionID, metadata)
-		if err != nil {
-			return nil, err
-		}
-
-		return fmt.Sprintf("Indexed %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
-	})
-
-	server.RegisterTool(Tool{
-		Name:        "index_text",
-		Description: "Index raw text directly into a Qdrant collection.",
+		Name: "store_memory",
+		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
+			"Omit collection_id to write to the server's configured default collection. " +
+			"This is the write counterpart of search_memory; the text lives only in the vector store (there is no source file).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"text": map[string]any{
 					"type":        "string",
-					"description": "Text to index",
+					"description": "Text to remember (chunked, embedded, stored).",
 				},
 				"collection_id": map[string]any{
 					"type":        "string",
-					"description": "Collection to index into",
+					"description": "Optional: target collection. Empty uses the server default.",
 				},
 				"metadata": map[string]any{
 					"type":        "object",
 					"description": "Optional metadata to attach to the chunks",
 				},
 			},
-			"required": []string{"text", "collection_id"},
+			"required": []string{"text"},
 		},
 	}, func(args map[string]any) (any, error) {
 		text, _ := args["text"].(string)
 		collectionID, _ := args["collection_id"].(string)
 		metadata := getStringMapArg(args, "metadata")
 
-		result, err := eng.IndexText(text, collectionID, metadata)
+		result, err := eng.StoreMemory(text, collectionID, metadata)
 		if err != nil {
 			return nil, err
 		}
 
-		return fmt.Sprintf("Indexed %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
+		return fmt.Sprintf("Stored %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
 	})
 
 	server.RegisterTool(Tool{

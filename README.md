@@ -21,7 +21,7 @@ RAG shouldn't be locked inside a single chat frontend. Your "memory" should be a
                    ▼
 ┌─────────────────────────────────────────────┐
 │  rag-mcp-server  (Go, :8199)               │
-│  Tools: search, index, delete, list, sync   │
+│  Tools: search, store, delete, list         │
 └──────┬──────────────────────┬───────────────┘
        │                      │
   ┌────▼─────┐    ┌──────────▼──────────────┐
@@ -99,8 +99,7 @@ loudly, so a typo can never silently widen searches into a global scan.
 | Tool | Description |
 |------|-------------|
 | `search_memory` | Semantic search. Optional `collection_id` (defaults to the configured default collection, else all enabled); optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
-| `index_document` | Index a file into a Qdrant collection |
-| `index_text` | Index raw text directly |
+| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Optional `collection_id` (defaults to the configured default collection; errors loudly if there is none) |
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
 | `collection_info` | Live stats + registry metadata, one or all |
