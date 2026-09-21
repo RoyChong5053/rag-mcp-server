@@ -6,7 +6,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 )
 
 // ToolHandler is a function that handles a tool call
@@ -59,6 +61,8 @@ func (s *Server) HandleMCP(w http.ResponseWriter, r *http.Request) {
 		s.sendError(w, req.ID, ErrInvalidRequest, "Invalid JSON-RPC version")
 		return
 	}
+
+	log.Printf("MCP %s from %s", req.Method, r.RemoteAddr)
 
 	switch req.Method {
 	case MethodInitialize:
@@ -118,9 +122,11 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req Request) {
 		return
 	}
 
+	startedAt := time.Now()
 	result, err := handler(params.Arguments)
+	elapsed := time.Since(startedAt)
 	if err != nil {
-		log.Printf("Tool %s error: %v", params.Name, err)
+		log.Printf("Tool %s error after %s: %v | args: %s", params.Name, elapsed, err, summarizeArgs(params.Arguments))
 		s.sendResponse(w, req.ID, ToolCallResult{
 			Content: []ContentBlock{
 				{Type: "text", Text: fmt.Sprintf("Error: %v", err)},
@@ -143,6 +149,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, req Request) {
 	}
 
 	s.sendResponse(w, req.ID, ToolCallResult{Content: content})
+	log.Printf("Tool %s ok in %s | args: %s", params.Name, time.Since(startedAt), summarizeArgs(params.Arguments))
 }
 
 func (s *Server) sendResponse(w http.ResponseWriter, id json.RawMessage, result any) {
@@ -172,4 +179,24 @@ func (s *Server) sendJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("Failed to encode response: %v", err)
 	}
+}
+
+// summarizeArgs renders tool arguments for audit logs.
+// Values are truncated to 120 runes so giant payloads (e.g. index_text
+// with a full document) don't flood the log.
+func summarizeArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "{}"
+	}
+	parts := make([]string, 0, len(args))
+	for k, v := range args {
+		s := fmt.Sprintf("%v", v)
+		if runes := []rune(s); len(runes) > 120 {
+			s = string(runes[:120]) + "…"
+		}
+		// Single-line it: newlines in logged text break log parsing
+		s = strings.ReplaceAll(s, "\n", " ")
+		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
