@@ -12,6 +12,7 @@ import (
 
 	"github.com/RoyChong5053/rag-mcp-server/chunking"
 	"github.com/RoyChong5053/rag-mcp-server/registry"
+	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
 // Engine is the core RAG engine
@@ -21,6 +22,7 @@ type Engine struct {
 	rerank    *RerankClient
 	config    *EngineConfig
 	registry  *registry.Registry
+	settings  *settings.Store
 }
 
 // EngineConfig holds configuration for the engine
@@ -65,7 +67,8 @@ type CollectionInfo struct {
 
 // NewEngine creates a new RAG engine.
 // A corrupt registry file is a loud error; a missing one starts empty.
-func NewEngine(config *EngineConfig) (*Engine, error) {
+// A nil settings store falls back to one seeded from the engine config.
+func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	qdrant := NewQdrantClient(config.QdrantHost, config.QdrantPort)
 	embedding := NewEmbeddingClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.EmbedModel, config.APIKey)
 	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxChars, config.DocMaxChars)
@@ -79,13 +82,41 @@ func NewEngine(config *EngineConfig) (*Engine, error) {
 		return nil, fmt.Errorf("load registry: %w", err)
 	}
 
-	return &Engine{
+	if st == nil {
+		st = settings.New("", settings.Settings{
+			DefaultTopK:      10,
+			DefaultThreshold: 0.25,
+			RerankEnabled:    config.RerankEnabled,
+			RerankRecall:     config.RerankRecall,
+			QueryMaxChars:    config.QueryMaxChars,
+			DocMaxChars:      config.DocMaxChars,
+		})
+	}
+
+	e := &Engine{
 		qdrant:    qdrant,
 		embedding: embedding,
 		rerank:    rerank,
 		config:    config,
 		registry:  reg,
-	}, nil
+		settings:  st,
+	}
+	// Rerank truncation follows runtime settings without a restart.
+	rerank.SetLimitsProvider(func() (int, int) {
+		s := st.Get()
+		return s.QueryMaxChars, s.DocMaxChars
+	})
+	return e, nil
+}
+
+// Settings exposes the runtime settings store for management surfaces.
+func (e *Engine) Settings() *settings.Store {
+	return e.settings
+}
+
+// CollectionExists reports whether a collection is present in Qdrant.
+func (e *Engine) CollectionExists(name string) (bool, error) {
+	return e.qdrant.CollectionExists(name)
 }
 
 // Registry exposes the collection registry for management tools.
@@ -96,6 +127,45 @@ func (e *Engine) Registry() *registry.Registry {
 // Search performs a semantic search with optional reranking (single collection).
 func (e *Engine) Search(query string, collectionID string, topK int, useRerank bool, threshold float64) ([]SearchResult, error) {
 	return e.SearchMulti(query, []string{collectionID}, topK, useRerank, threshold)
+}
+
+// SearchDefault runs the settings-driven search used by the search_memory tool.
+// Callers pass only what they care about; omitted values come from the runtime
+// settings store (WebUI). An explicit collection_id wins over the configured
+// default_collection. If a scope resolves to a name that does not exist, this
+// is a loud error: silently falling back to a global scan would quietly dilute
+// recall and look like "RAG mysticism" later.
+func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64) ([]SearchResult, error) {
+	st := e.settings.Get()
+
+	if topK <= 0 {
+		topK = st.DefaultTopK
+	}
+	if topK <= 0 {
+		topK = 10
+	}
+	thr := st.DefaultThreshold
+	if threshold != nil {
+		thr = *threshold
+	}
+
+	scope := strings.TrimSpace(collectionID)
+	if scope == "" {
+		scope = strings.TrimSpace(st.DefaultCollection)
+	}
+
+	if scope != "" {
+		exists, err := e.qdrant.CollectionExists(scope)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check collection '%s': %w", scope, err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("collection '%s' not found (explicit collection_id or settings default_collection)", scope)
+		}
+		return e.SearchMulti(query, []string{scope}, topK, st.RerankEnabled, thr)
+	}
+	// No scope anywhere: search all enabled collections.
+	return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr)
 }
 
 // SearchMulti searches across several collections and merges the results.
@@ -116,10 +186,13 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 	}
 	queryVector := embeddings[0]
 
-	// Determine recall count (more candidates if reranking)
+	// Determine recall count (more candidates if reranking).
+	// Runtime settings take precedence so WebUI edits apply live.
+	st := e.settings.Get()
+	rerankOn := useRerank && st.RerankEnabled
 	recallCount := topK
-	if useRerank && e.config.RerankEnabled {
-		recallCount = e.config.RerankRecall
+	if rerankOn {
+		recallCount = st.RerankRecall
 		if recallCount < topK {
 			recallCount = topK
 		}
@@ -147,7 +220,7 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 	}
 
 	// Apply reranking if enabled
-	if useRerank && e.config.RerankEnabled && len(merged) > 1 {
+	if rerankOn && len(merged) > 1 {
 		reranked, err := e.applyRerank(query, merged, topK)
 		if err != nil {
 			log.Printf("Rerank failed, falling back to vector order: %v", err)
@@ -237,12 +310,13 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	}
 	queryVector := embeddings[0]
 
+	// Use the configured over-fetch so the recall test mirrors what
+	// search_memory will actually pull before reranking. The rerank toggle
+	// stays explicit here so operators can compare with and without it.
+	st := e.settings.Get()
 	recallCount := topK
-	if useRerank && e.config.RerankEnabled {
-		recallCount = e.config.RerankRecall
-		if recallCount < topK {
-			recallCount = topK
-		}
+	if useRerank && st.RerankRecall > recallCount {
+		recallCount = st.RerankRecall
 	}
 
 	kept, err := e.qdrant.Search(collection, queryVector, recallCount, threshold)
@@ -268,7 +342,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		}
 	}
 
-	if useRerank && e.config.RerankEnabled && len(results) > 1 {
+	if useRerank && len(results) > 1 {
 		if reranked, err := e.applyRerank(query, results, topK); err == nil {
 			results = reranked
 		} else {

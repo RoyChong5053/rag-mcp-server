@@ -13,6 +13,7 @@ import (
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/registry"
+	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
 //go:embed index.html
@@ -49,6 +50,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/preview", h.handlePreview)
 	mux.HandleFunc("GET /api/registry/backup", h.handleBackup)
 	mux.HandleFunc("GET /api/audit", h.audit)
+	mux.HandleFunc("GET /api/settings", h.getSettings)
+	mux.HandleFunc("POST /api/settings", h.setSettings)
 	return mux
 }
 
@@ -59,6 +62,42 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.eng.HealthCheck())
+}
+
+// getSettings returns the runtime search settings shared by all frontends.
+func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.eng.Settings().Get())
+}
+
+// setSettings applies a partial settings patch. A non-empty default_collection
+// must exist in Qdrant: a typo here would otherwise silently widen searches to
+// a global scan, which is hard to notice and looks like flaky recall.
+func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
+	var patch settings.Patch
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	if patch.DefaultCollection != nil {
+		name := strings.TrimSpace(*patch.DefaultCollection)
+		patch.DefaultCollection = &name
+		if name != "" {
+			exists, err := h.eng.CollectionExists(name)
+			if err != nil {
+				writeErr(w, http.StatusBadGateway, err)
+				return
+			}
+			if !exists {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("collection '%s' not found; refusing a default that cannot be searched", name))
+				return
+			}
+		}
+	}
+	if err := h.eng.Settings().Update(patch); err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, h.eng.Settings().Get())
 }
 
 func (h *Handler) listCollections(w http.ResponseWriter, r *http.Request) {

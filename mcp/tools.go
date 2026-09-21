@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 )
@@ -10,8 +11,10 @@ import (
 // RegisterTools registers all RAG MCP tools with the server
 func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
-		Name:        "search_memory",
-		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. Omit both collection_id and collections to search all enabled collections.",
+		Name: "search_memory",
+		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
+			"Omit collection_id to use the server's configured default collection (or all enabled collections when no default is set). " +
+			"top_k, threshold and reranking default to server (WebUI) settings when omitted.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -21,43 +24,34 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"collection_id": map[string]any{
 					"type":        "string",
-					"description": "Single collection to search (e.g., 'chat'). Empty means all enabled.",
-				},
-				"collections": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "Multiple collections to search and merge. Takes precedence over collection_id. Empty means all enabled.",
+					"description": "Optional: a specific collection to search. Empty uses the server default.",
 				},
 				"top_k": map[string]any{
 					"type":        "integer",
-					"description": "Number of results to return (default: 10)",
-					"default":     10,
-				},
-				"rerank": map[string]any{
-					"type":        "boolean",
-					"description": "Apply reranker for precision boost (default: true)",
-					"default":     true,
+					"description": "Optional: number of results. Omit for the server default.",
 				},
 				"threshold": map[string]any{
 					"type":        "number",
-					"description": "Minimum similarity score (0-1, default: 0.25)",
-					"default":     0.25,
+					"description": "Optional: minimum similarity score 0-1. Omit for the server default (lower it when top_k is large).",
 				},
 			},
 			"required": []string{"query"},
 		},
 	}, func(args map[string]any) (any, error) {
 		query, _ := args["query"].(string)
-		collectionID, _ := args["collection_id"].(string)
-		collections := getStringSliceArg(args, "collections")
-		if len(collections) == 0 && collectionID != "" {
-			collections = []string{collectionID}
+		if strings.TrimSpace(query) == "" {
+			return nil, fmt.Errorf("query is required")
 		}
-		topK := getIntArg(args, "top_k", 10)
-		rerank := getBoolArg(args, "rerank", true)
-		threshold := getFloatArg(args, "threshold", 0.25)
+		collectionID, _ := args["collection_id"].(string)
+		topK := getIntArg(args, "top_k", 0) // 0 = server default
+		var threshold *float64
+		if v, ok := args["threshold"]; ok {
+			if f, ok := v.(float64); ok {
+				threshold = &f
+			}
+		}
 
-		results, err := eng.SearchMulti(query, collections, topK, rerank, threshold)
+		results, err := eng.SearchDefault(query, collectionID, topK, threshold)
 		if err != nil {
 			return nil, err
 		}
@@ -314,15 +308,6 @@ func getBoolArg(args map[string]any, key string, defaultVal bool) bool {
 	if v, ok := args[key]; ok {
 		if b, ok := v.(bool); ok {
 			return b
-		}
-	}
-	return defaultVal
-}
-
-func getFloatArg(args map[string]any, key string, defaultVal float64) float64 {
-	if v, ok := args[key]; ok {
-		if f, ok := v.(float64); ok {
-			return f
 		}
 	}
 	return defaultVal

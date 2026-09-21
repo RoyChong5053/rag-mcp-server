@@ -53,6 +53,13 @@ server:
   host: "0.0.0.0"
   port: 8199
 
+admin:                    # management UI + JSON API
+  host: "0.0.0.0"         # no TLS; restrict the host/firewall if exposed
+  port: 8198
+
+registry_path: "collections.json"
+settings_path: "settings.json"
+
 qdrant:
   host: "localhost"
   port: 6333
@@ -71,11 +78,27 @@ rerank:
   recall: 30
 ```
 
+### Runtime settings (`settings.json`)
+
+`config.yaml` covers infrastructure (bind addresses, Qdrant/one-api endpoints,
+chunking). A separate `settings.json` holds **runtime search defaults** that all
+frontends share and that take effect immediately, without a restart:
+
+- `default_collection` — scope used when a caller omits `collection_id`
+  (empty = search all enabled collections)
+- `default_top_k`, `default_threshold`
+- `rerank_enabled`, `rerank_recall` (vector over-fetch before reranking)
+- `query_max_chars`, `doc_max_chars` (rerank truncation, runes)
+
+Edit these from the dashboard's **Search Defaults** panel; `config.yaml` only
+seeds the initial values. A default collection that does not exist is rejected
+loudly, so a typo can never silently widen searches into a global scan.
+
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Semantic search; `collections[]` scopes it, empty = all enabled; disabled always skipped |
+| `search_memory` | Semantic search. Optional `collection_id` (defaults to the configured default collection, else all enabled); optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
 | `index_document` | Index a file into a Qdrant collection |
 | `index_text` | Index raw text directly |
 | `delete_memory` | Delete by filter or collection |
@@ -87,9 +110,12 @@ rerank:
 
 ## Management dashboard
 
-Localhost-only admin UI + JSON API on `:8198` (reach via `ssh -L 8198:localhost:8198 m64`):
+Admin UI + JSON API on `:8198` (defaults to `0.0.0.0` so every LAN device can
+reach it; there is no TLS — restrict the bind or firewall it on untrusted
+networks). Includes a **Search Defaults** panel (default collection, top_k,
+threshold, rerank/recall, truncation limits) shared live by every frontend, plus:
 list/search collections, edit metadata, backfill payloads, recall test with
-threshold-kill report, audit tail.
+threshold-kill report, and an audit tail.
 Collection metadata lives in `collections.json` (server-local, gitignored).
 
 ## Data Bank (dashboard)

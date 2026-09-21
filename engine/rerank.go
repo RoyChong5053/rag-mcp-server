@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // RerankClient calls one-api's rerank endpoint
@@ -19,7 +20,10 @@ type RerankClient struct {
 	apiKey        string
 	queryMaxChars int
 	docMaxChars   int
-	httpClient    *http.Client
+	// limits, when set, supplies runtime truncation limits (query, doc) so
+	// WebUI edits take effect without a restart. It overrides the static values.
+	limits     func() (int, int)
+	httpClient *http.Client
 }
 
 // NewRerankClient creates a new rerank client
@@ -35,6 +39,18 @@ func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, do
 			Timeout: 120 * time.Second,
 		},
 	}
+}
+
+// SetLimitsProvider wires a callback for runtime truncation limits.
+func (c *RerankClient) SetLimitsProvider(f func() (int, int)) {
+	c.limits = f
+}
+
+func (c *RerankClient) effectiveLimits() (int, int) {
+	if c.limits != nil {
+		return c.limits()
+	}
+	return c.queryMaxChars, c.docMaxChars
 }
 
 // RerankRequest represents the request to one-api's rerank endpoint
@@ -73,18 +89,13 @@ func (c *RerankClient) Rerank(query string, documents []string, topN int) ([]Rer
 	}
 
 	// Truncate query
-	if c.queryMaxChars > 0 && len(query) > c.queryMaxChars {
-		query = query[:c.queryMaxChars] + "…"
-	}
+	queryMax, docMax := c.effectiveLimits()
+	query = truncateRunes(query, queryMax)
 
 	// Truncate documents
 	boundedDocs := make([]string, len(documents))
 	for i, doc := range documents {
-		if c.docMaxChars > 0 && len(doc) > c.docMaxChars {
-			boundedDocs[i] = doc[:c.docMaxChars] + "…"
-		} else {
-			boundedDocs[i] = doc
-		}
+		boundedDocs[i] = truncateRunes(doc, docMax)
 	}
 
 	req := RerankRequest{
@@ -188,6 +199,15 @@ func (c *RerankClient) detectScoreMode(results []RerankResult) RerankScoreMode {
 // sigmoid applies sigmoid function to convert logit to probability
 func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
+}
+
+// truncateRunes cuts s to at most max runes (not bytes), appending an ellipsis
+// when clipped. Bytes would split multi-byte CJK runes into invalid UTF-8.
+func truncateRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + "…"
 }
 
 // sortResults sorts results by score descending

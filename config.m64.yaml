@@ -2,13 +2,17 @@ server:
   host: "0.0.0.0"
   port: 8199
 
-# Localhost-only management dashboard. Reach via: ssh -L 8198:localhost:8198 m64
+# Management dashboard + API. 0.0.0.0 = reachable by all LAN devices
+# (development default; no TLS, so restrict host/firewall to trust the network).
 admin:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8198
 
 # Collection registry (management metadata). Lives next to the binary on m64.
 registry_path: "collections.json"
+
+# Runtime settings (search defaults edited via WebUI). Lives next to the binary.
+settings_path: "settings.json"
 
 # Data-bank root browsed by the dashboard (server-local paths).
 # Prefer absolute on servers (ssh CWD is $HOME, not the app dir).

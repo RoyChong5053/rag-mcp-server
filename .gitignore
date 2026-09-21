@@ -36,3 +36,7 @@ docs/
 # Server-local collection registry (management metadata) - never commit
 collections.json
 collections.json.tmp
+
+# Server-local runtime settings (WebUI-edited search defaults) - never commit
+settings.json
+settings.json.tmp

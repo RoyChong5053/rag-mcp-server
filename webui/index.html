@@ -52,6 +52,21 @@ input[type=number] { width: 110px; }
 <button onclick="backup()" title="download collections.json">backup registry</button>
 <div id="health">loading…</div>
 
+<h2>Search Defaults <span class="prov" style="font-weight:normal">— served to every frontend</span></h2>
+<div id="settings-panel">
+  <div class="row">
+    <span>default collection <select id="s-col"></select></span>
+    <span>top_k <input type="number" id="s-topk" min="1" max="100"></span>
+    <span>threshold <input type="number" id="s-thr" min="0" max="1" step="0.05"></span>
+    <label style="display:inline"><input type="checkbox" id="s-rerank"> rerank</label>
+    <span>recall <input type="number" id="s-recall" min="1" max="1000" title="vector over-fetch fed to the reranker"></span>
+    <span>query max <input type="number" id="s-qmax" min="0" title="rerank query truncation (runes, 0 = unlimited)"></span>
+    <span>doc max <input type="number" id="s-dmax" min="0" title="rerank document truncation (runes, 0 = unlimited)"></span>
+    <button onclick="saveSettings()">Save settings</button>
+  </div>
+  <div id="s-status" class="prov"></div>
+</div>
+
 <h2>Collections</h2>
 <table id="tbl"><thead><tr><th>Collection</th><th>Chunks</th><th>Enabled</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
 
@@ -240,6 +255,39 @@ async function testRecall() {
 }
 function backup() { window.location = '/api/registry/backup'; }
 
+/* ---- search defaults ---- */
+async function loadSettings() {
+  const st = document.getElementById('s-status');
+  let s;
+  try { s = await api('GET', '/api/settings'); } catch (e) { st.textContent = 'settings failed: ' + e.message; return; }
+  const sel = document.getElementById('s-col');
+  sel.innerHTML = '<option value="">(all enabled)</option>' + colsCache.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+  sel.value = s.default_collection || '';
+  document.getElementById('s-topk').value = s.default_top_k || 10;
+  document.getElementById('s-thr').value = (s.default_threshold == null ? 0.25 : s.default_threshold);
+  document.getElementById('s-rerank').checked = !!s.rerank_enabled;
+  document.getElementById('s-recall').value = s.rerank_recall || 30;
+  document.getElementById('s-qmax').value = s.query_max_chars || 0;
+  document.getElementById('s-dmax').value = s.doc_max_chars || 0;
+  st.textContent = '';
+}
+async function saveSettings() {
+  const st = document.getElementById('s-status');
+  st.textContent = 'saving…';
+  try {
+    await api('POST', '/api/settings', {
+      default_collection: document.getElementById('s-col').value,
+      default_top_k: +document.getElementById('s-topk').value || 10,
+      default_threshold: +document.getElementById('s-thr').value,
+      rerank_enabled: document.getElementById('s-rerank').checked,
+      rerank_recall: +document.getElementById('s-recall').value || 30,
+      query_max_chars: +document.getElementById('s-qmax').value || 0,
+      doc_max_chars: +document.getElementById('s-dmax').value || 0
+    });
+    st.textContent = 'saved ' + new Date().toLocaleTimeString();
+  } catch (e) { st.textContent = 'save failed: ' + e.message; }
+}
+
 /* ---- data bank ---- */
 const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
 async function loadFiles() {
@@ -352,7 +400,7 @@ async function loadJobs() {
   }
 }
 
-load(); loadFiles(); loadJobs(); loadAudit();
+load().then(loadSettings); loadFiles(); loadJobs(); loadAudit();
 setInterval(loadJobs, 2000);
 async function loadAudit() {
   try {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
+	"github.com/RoyChong5053/rag-mcp-server/settings"
 	"github.com/RoyChong5053/rag-mcp-server/webui"
 )
 
@@ -20,6 +21,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	// Runtime settings (search defaults + rerank behavior). config.yaml seeds
+	// the initial values; settings.json persists WebUI edits on top.
+	settingsPath := cfg.SettingsPath
+	if settingsPath == "" {
+		settingsPath = "settings.json"
+	}
+	settingsStore := settings.New(settingsPath, settings.Settings{
+		DefaultCollection: "",
+		DefaultTopK:       10,
+		DefaultThreshold:  0.25,
+		RerankEnabled:     cfg.Rerank.Enabled,
+		RerankRecall:      cfg.Rerank.Recall,
+		QueryMaxChars:     cfg.Rerank.QueryMaxChars,
+		DocMaxChars:       cfg.Rerank.DocMaxChars,
+	})
 
 	// Create engine
 	engineConfig := &engine.EngineConfig{
@@ -39,7 +56,7 @@ func main() {
 		RegistryPath:    cfg.RegistryPath,
 	}
 
-	eng, err := engine.NewEngine(engineConfig)
+	eng, err := engine.NewEngine(engineConfig, settingsStore)
 	if err != nil {
 		log.Fatalf("Failed to create engine: %v", err)
 	}
@@ -59,23 +76,25 @@ func main() {
 	log.Printf("Qdrant: %s:%d", cfg.Qdrant.Host, cfg.Qdrant.Port)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
 	log.Printf("Registry: %s", cfg.RegistryPath)
+	log.Printf("Settings: %s", settingsPath)
 
-	// Localhost-only management dashboard + API (ssh tunnel to reach it).
+	// Management dashboard + API. Binds per cfg.Admin.Host (default 0.0.0.0 so
+	// any LAN device can reach it during development; there is no TLS).
 	adminAddr := fmt.Sprintf("%s:%d", cfg.Admin.Host, cfg.Admin.Port)
-	if cfg.Admin.Host != "" && cfg.Admin.Host != "0.0.0.0" {
+	if cfg.Admin.Host != "" {
 		docsAbs, err := filepath.Abs(cfg.DocsDir)
 		if err != nil {
 			log.Fatalf("Resolve docs dir: %v", err)
 		}
 		admin := webui.New(eng, "/tmp/rag-mcp.log", docsAbs)
 		go func() {
-			log.Printf("Admin dashboard: http://%s (localhost-only, docs=%s)", adminAddr, docsAbs)
+			log.Printf("Admin dashboard: http://%s (no TLS; docs=%s)", adminAddr, docsAbs)
 			if err := http.ListenAndServe(adminAddr, admin.Routes()); err != nil {
 				log.Fatalf("Admin server failed: %v", err)
 			}
 		}()
 	} else {
-		log.Printf("WARNING: admin host %q is not localhost-only, dashboard disabled", cfg.Admin.Host)
+		log.Printf("Admin dashboard disabled (empty admin.host)")
 	}
 
 	if err := http.ListenAndServe(addr, nil); err != nil {

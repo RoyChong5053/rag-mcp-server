@@ -14,6 +14,9 @@ type Config struct {
 	Chunking     ChunkingConfig `yaml:"chunking"`
 	Rerank       RerankConfig   `yaml:"rerank"`
 	RegistryPath string         `yaml:"registry_path"`
+	// SettingsPath is the runtime settings file (settings.json). It holds the
+	// search defaults edited via the WebUI; missing file = built-in defaults.
+	SettingsPath string `yaml:"settings_path"`
 	// DocsDir is the data-bank root browsed by the dashboard.
 	// Relative paths resolve against the process working directory;
 	// prefer absolute on servers (ssh CWD is $HOME, not the app dir).
@@ -25,8 +28,9 @@ type ServerConfig struct {
 	Port int    `yaml:"port"`
 }
 
-// AdminConfig is the localhost-only management UI + API.
-// Never bind this to 0.0.0.0: m64 has no TLS; reach it via ssh tunnel.
+// AdminConfig is the management UI + API. Defaults to 0.0.0.0 so all LAN
+// devices can reach it during development; there is no TLS, so restrict the
+// host or firewall the port before exposing it beyond a trusted network.
 type AdminConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
@@ -64,10 +68,11 @@ func DefaultConfig() *Config {
 			Port: 8199,
 		},
 		Admin: AdminConfig{
-			Host: "127.0.0.1",
+			Host: "0.0.0.0",
 			Port: 8198,
 		},
 		RegistryPath: "collections.json",
+		SettingsPath: "settings.json",
 		DocsDir:      "docs",
 		Qdrant: QdrantConfig{
 			Host: "localhost",
