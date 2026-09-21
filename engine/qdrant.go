@@ -15,18 +15,8 @@ type QdrantClient struct {
 	httpClient *http.Client
 }
 
-// NewQdrantClient creates a new Qdrant client
-func NewQdrantClient(host string, port int) *QdrantClient {
-	return &QdrantClient{
-		baseURL: fmt.Sprintf("http://%s:%d", host, port),
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
-}
-
-// CollectionInfo holds collection metadata
-type CollectionInfo struct {
+// QdrantCollectionInfo holds collection metadata from Qdrant
+type QdrantCollectionInfo struct {
 	Name       string `json:"name"`
 	ChunkCount int    `json:"chunk_count"`
 }
@@ -38,11 +28,21 @@ type Point struct {
 	Vector  []float32      `json:"vector,omitempty"`
 }
 
-// SearchResult represents a search result
-type SearchResult struct {
+// QdrantSearchResult represents a raw search result from Qdrant
+type QdrantSearchResult struct {
 	ID      string         `json:"id"`
 	Score   float64        `json:"score"`
 	Payload map[string]any `json:"payload"`
+}
+
+// NewQdrantClient creates a new Qdrant client
+func NewQdrantClient(host string, port int) *QdrantClient {
+	return &QdrantClient{
+		baseURL: fmt.Sprintf("http://%s:%d", host, port),
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
 }
 
 // CreateCollection creates a new Qdrant collection with cosine similarity
@@ -66,7 +66,7 @@ func (c *QdrantClient) CollectionExists(name string) (bool, error) {
 }
 
 // GetCollectionInfo returns collection info including point count
-func (c *QdrantClient) GetCollectionInfo(name string) (*CollectionInfo, error) {
+func (c *QdrantClient) GetCollectionInfo(name string) (*QdrantCollectionInfo, error) {
 	resp, err := c.get(fmt.Sprintf("/collections/%s", name))
 	if err != nil {
 		return nil, err
@@ -84,14 +84,14 @@ func (c *QdrantClient) GetCollectionInfo(name string) (*CollectionInfo, error) {
 		return nil, err
 	}
 
-	return &CollectionInfo{
+	return &QdrantCollectionInfo{
 		Name:       name,
 		ChunkCount: result.Result.PointsCount,
 	}, nil
 }
 
 // ListCollections returns all collections
-func (c *QdrantClient) ListCollections() ([]CollectionInfo, error) {
+func (c *QdrantClient) ListCollections() ([]QdrantCollectionInfo, error) {
 	resp, err := c.get("/collections")
 	if err != nil {
 		return nil, err
@@ -108,7 +108,7 @@ func (c *QdrantClient) ListCollections() ([]CollectionInfo, error) {
 		return nil, err
 	}
 
-	var collections []CollectionInfo
+	var collections []QdrantCollectionInfo
 	for _, col := range result.Result.Collections {
 		info, err := c.GetCollectionInfo(col.Name)
 		if err != nil {
@@ -129,7 +129,7 @@ func (c *QdrantClient) UpsertPoints(collection string, points []Point) error {
 }
 
 // Search performs a vector search
-func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64) ([]SearchResult, error) {
+func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64) ([]QdrantSearchResult, error) {
 	body := map[string]any{
 		"vector": vector,
 		"limit":  limit,
@@ -143,7 +143,7 @@ func (c *QdrantClient) Search(collection string, vector []float32, limit int, th
 	}
 
 	var result struct {
-		Result []SearchResult `json:"result"`
+		Result []QdrantSearchResult `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -157,50 +157,8 @@ func (c *QdrantClient) DeletePoints(collection string, filter map[string]any) er
 	body := map[string]any{
 		"filter": filter,
 	}
-	return c.post(fmt.Sprintf("/collections/%s/points/delete", collection), body)
-}
-
-// DeletePointsByPayload deletes points matching a payload filter
-func (c *QdrantClient) DeletePointsByPayload(collection string, key string, value any) error {
-	filter := map[string]any{
-		"must": []map[string]any{
-			{
-				"key": key,
-				"match": map[string]any{
-					"value": value,
-				},
-			},
-		},
-	}
-	return c.DeletePoints(collection, filter)
-}
-
-// ScrollPoints retrieves points with optional filter
-func (c *QdrantClient) ScrollPoints(collection string, filter map[string]any, limit int) ([]Point, string, error) {
-	body := map[string]any{
-		"limit":      limit,
-		"with_payload": true,
-	}
-	if filter != nil {
-		body["filter"] = filter
-	}
-
-	resp, err := c.post(fmt.Sprintf("/collections/%s/points/scroll", collection), body)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var result struct {
-		Result struct {
-			Points []Point `json:"points"`
-			NextPageOffset string `json:"next_page_offset"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, "", err
-	}
-
-	return result.Result.Points, result.Result.NextPageOffset, nil
+	_, err := c.post(fmt.Sprintf("/collections/%s/points/delete", collection), body)
+	return err
 }
 
 // Ping checks if Qdrant is reachable
