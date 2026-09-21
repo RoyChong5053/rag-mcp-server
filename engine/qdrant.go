@@ -162,6 +162,26 @@ func (c *QdrantClient) DeletePoints(collection string, filter map[string]any) er
 	return err
 }
 
+// DeleteCollection drops an entire collection with all its points.
+func (c *QdrantClient) DeleteCollection(name string) error {
+	return c.delete(fmt.Sprintf("/collections/%s", name))
+}
+
+// SetPayload sets payload fields on points matching filter.
+// An empty filter matches ALL points in the collection, which is exactly
+// what backfill wants (tag every existing chunk without re-embedding).
+func (c *QdrantClient) SetPayload(collection string, payload map[string]any, filter map[string]any) error {
+	if filter == nil {
+		filter = map[string]any{}
+	}
+	body := map[string]any{
+		"payload": payload,
+		"filter":  filter,
+	}
+	_, err := c.post(fmt.Sprintf("/collections/%s/points/payload", collection), body)
+	return err
+}
+
 // Ping checks if Qdrant is reachable
 func (c *QdrantClient) Ping() error {
 	resp, err := c.get("/collections")
@@ -181,6 +201,23 @@ func (c *QdrantClient) Ping() error {
 }
 
 // HTTP helpers
+
+func (c *QdrantClient) delete(path string) error {
+	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
 
 func (c *QdrantClient) get(path string) ([]byte, error) {
 	resp, err := c.httpClient.Get(c.baseURL + path)

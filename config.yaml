@@ -2,6 +2,14 @@ server:
   host: "0.0.0.0"
   port: 8199
 
+# Localhost-only management dashboard. Reach via: ssh -L 8198:localhost:8198 m64
+admin:
+  host: "127.0.0.1"
+  port: 8198
+
+# Collection registry (management metadata). Lives next to the binary on m64.
+registry_path: "collections.json"
+
 qdrant:
   host: "localhost"
   port: 6333

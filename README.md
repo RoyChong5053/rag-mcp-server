@@ -75,13 +75,21 @@ rerank:
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Semantic search with optional reranker precision boost |
+| `search_memory` | Semantic search; `collections[]` scopes it, empty = all enabled; disabled always skipped |
 | `index_document` | Index a file into a Qdrant collection |
 | `index_text` | Index raw text directly |
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
-| `sync_vault` | Incremental Obsidian vault sync |
+| `collection_info` | Live stats + registry metadata, one or all |
+| `set_collection_meta` | Display name, tags, consumers, enabled flag |
+| `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy |
+
+## Management dashboard
+
+Localhost-only admin UI + JSON API on `:8198` (reach via `ssh -L 8198:localhost:8198 m64`):
+list/search collections, edit metadata, backfill payloads, recall test, audit tail.
+Collection metadata lives in `collections.json` (server-local, gitignored).
 
 ## Register with one-api
 

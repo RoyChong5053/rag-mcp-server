@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Collections</title>
+<style>
+:root { color-scheme: dark; }
+body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 16px; max-width: 1100px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+#health { color: #888; font-size: 13px; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; }
+tr.sel { background: #1e2a3a; }
+tr.orphan td:first-child { color: #e8a33d; }
+tr.disabled td:first-child { color: #666; text-decoration: line-through; }
+button { background: #245; color: #cde; border: 1px solid #468; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+button.danger { background: #422; border-color: #a44; color: #faa; }
+button:disabled { opacity: .4; }
+#detail { margin-top: 16px; border: 1px solid #444; border-radius: 6px; padding: 12px; display: none; }
+#detail h2 { font-size: 16px; margin: 0 0 8px; }
+label { display: block; font-size: 12px; color: #999; margin: 8px 0 2px; }
+input[type=text], textarea { width: 100%; box-sizing: border-box; background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
+.row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+#results div { border-left: 3px solid #468; margin: 8px 0; padding: 4px 8px; background: #181818; font-size: 13px; white-space: pre-wrap; }
+#audit { background: #000; color: #9d9; font: 12px monospace; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+h3 { font-size: 14px; margin: 16px 0 6px; color: #aaa; }
+</style>
+</head>
+<body>
+<h1>RAG Collections</h1>
+<div id="health">loading…</div>
+<table id="tbl"><thead><tr><th>Collection</th><th>Chunks</th><th>Enabled</th><th>Consumers</th><th>Source</th><th></th></tr></thead><tbody></tbody></table>
+
+<div id="detail">
+  <h2 id="d-name"></h2>
+  <div id="d-flags" style="font-size:13px;color:#888"></div>
+  <label>Display name</label><input type="text" id="f-display">
+  <label>Description</label><textarea id="f-desc" rows="2"></textarea>
+  <label>Tags (comma separated)</label><input type="text" id="f-tags">
+  <label>Consumers (comma separated, e.g. st-leer, opencode-global)</label><input type="text" id="f-consumers">
+  <label><input type="checkbox" id="f-enabled"> enabled (global search skips disabled)</label>
+  <div class="row">
+    <button onclick="saveMeta()">Save</button>
+    <button onclick="backfill()">Backfill payload</button>
+    <button class="danger" onclick="delCol()">Delete collection</button>
+  </div>
+  <h3>Recall test</h3>
+  <div class="row"><input type="text" id="q" placeholder="query…" style="flex:1"><button onclick="testRecall()">Search</button></div>
+  <div id="results"></div>
+</div>
+
+<h3>Audit log <button onclick="loadAudit()">refresh</button></h3>
+<pre id="audit"></pre>
+
+<script>
+let cur = null;
+const api = (m, url, body) => fetch(url, {method: m, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined}).then(async r => {
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+});
+const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
+
+async function load() {
+  try {
+    const h = await api('GET', '/api/health');
+    document.getElementById('health').textContent = Object.entries(h).map(([k, v]) => k + ': ' + v).join('  |  ');
+  } catch (e) { document.getElementById('health').textContent = 'health failed: ' + e.message; }
+  let cols = [];
+  try { cols = await api('GET', '/api/collections'); } catch (e) { alert('list failed: ' + e.message); return; }
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = '';
+  for (const c of cols) {
+    const tr = document.createElement('tr');
+    if (cur === c.name) tr.className = 'sel';
+    if (!c.exists) tr.classList.add('orphan');
+    if (c.exists && !c.enabled) tr.classList.add('disabled');
+    const disp = c.display_name || '—';
+    tr.innerHTML = '<td>' + esc(c.name) + '<br><small style="color:#888">' + esc(disp) + (c.exists ? '' : ' (orphan: no vectors)') + '</small></td>' +
+      '<td>' + (c.exists ? c.chunk_count : '—') + '</td>' +
+      '<td>' + (c.enabled ? 'on' : 'off') + '</td>' +
+      '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
+      '<td><small>' + esc(shortSrc(c.source_file)) + '</small></td>';
+    const td = document.createElement('td');
+    const b = document.createElement('button');
+    b.textContent = 'manage';
+    b.onclick = () => select(c.name);
+    td.appendChild(b);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m])); }
+function shortSrc(s) { if (!s) return ''; const p = s.split('/'); return p.length > 2 ? '…/' + p.slice(-2).join('/') : s; }
+
+async function select(name) {
+  cur = name;
+  const c = await api('GET', '/api/collections/' + encodeURIComponent(name));
+  document.getElementById('detail').style.display = 'block';
+  document.getElementById('d-name').textContent = c.name;
+  document.getElementById('d-flags').textContent = (c.exists ? c.chunk_count + ' chunks' : 'ORPHAN (no vectors in Qdrant)') +
+    '  |  created ' + (c.created_at || '?') + '  |  updated ' + (c.updated_at || '?') +
+    (c.chunk_size ? '  |  chunk ' + c.chunk_size + '/' + c.chunk_overlap : '');
+  document.getElementById('f-display').value = c.display_name || '';
+  document.getElementById('f-desc').value = c.description || '';
+  document.getElementById('f-tags').value = (c.tags || []).join(', ');
+  document.getElementById('f-consumers').value = (c.consumers || []).join(', ');
+  document.getElementById('f-enabled').checked = !!c.enabled;
+  document.getElementById('results').innerHTML = '';
+  load();
+}
+async function saveMeta() {
+  try {
+    await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/meta', {
+      display_name: document.getElementById('f-display').value,
+      description: document.getElementById('f-desc').value,
+      tags: csv(document.getElementById('f-tags').value),
+      consumers: csv(document.getElementById('f-consumers').value),
+      enabled: document.getElementById('f-enabled').checked
+    });
+    alert('saved'); load();
+  } catch (e) { alert('save failed: ' + e.message); }
+}
+async function backfill() {
+  try {
+    const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/backfill', {});
+    alert('backfilled: ' + JSON.stringify(r.payload));
+  } catch (e) { alert('backfill failed: ' + e.message); }
+}
+async function delCol() {
+  if (!confirm('PERMANENTLY delete collection "' + cur + '" and all its vectors?')) return;
+  if (prompt('Type the collection name to confirm:') !== cur) { alert('name mismatch, aborted'); return; }
+  try {
+    await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/delete', {confirm: true});
+    alert('deleted'); cur = null;
+    document.getElementById('detail').style.display = 'none';
+    load();
+  } catch (e) { alert('delete failed: ' + e.message); }
+}
+async function testRecall() {
+  const q = document.getElementById('q').value;
+  if (!q.trim()) return;
+  const box = document.getElementById('results');
+  box.innerHTML = 'searching…';
+  try {
+    const rs = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/search', {query: q, top_k: 3});
+    box.innerHTML = rs.length ? '' : 'no results';
+    for (const r of rs) {
+      const d = document.createElement('div');
+      d.textContent = '[' + Number(r.score).toFixed(3) + '] ' + r.text.slice(0, 400);
+      box.appendChild(d);
+    }
+  } catch (e) { box.textContent = 'search failed: ' + e.message; }
+}
+async function loadAudit() {
+  try {
+    const j = await api('GET', '/api/audit?lines=150');
+    const el = document.getElementById('audit');
+    el.textContent = j.log;
+    el.scrollTop = el.scrollHeight;
+  } catch (e) { document.getElementById('audit').textContent = 'audit unavailable: ' + e.message; }
+}
+load(); loadAudit();
+</script>
+</body>
+</html>

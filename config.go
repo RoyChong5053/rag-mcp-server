@@ -7,14 +7,23 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Qdrant   QdrantConfig   `yaml:"qdrant"`
-	OneAPI   OneAPIConfig   `yaml:"oneapi"`
-	Chunking ChunkingConfig `yaml:"chunking"`
-	Rerank   RerankConfig   `yaml:"rerank"`
+	Server       ServerConfig   `yaml:"server"`
+	Admin        AdminConfig    `yaml:"admin"`
+	Qdrant       QdrantConfig   `yaml:"qdrant"`
+	OneAPI       OneAPIConfig   `yaml:"oneapi"`
+	Chunking     ChunkingConfig `yaml:"chunking"`
+	Rerank       RerankConfig   `yaml:"rerank"`
+	RegistryPath string         `yaml:"registry_path"`
 }
 
 type ServerConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+}
+
+// AdminConfig is the localhost-only management UI + API.
+// Never bind this to 0.0.0.0: m64 has no TLS; reach it via ssh tunnel.
+type AdminConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 }
@@ -50,6 +59,11 @@ func DefaultConfig() *Config {
 			Host: "0.0.0.0",
 			Port: 8199,
 		},
+		Admin: AdminConfig{
+			Host: "127.0.0.1",
+			Port: 8198,
+		},
+		RegistryPath: "collections.json",
 		Qdrant: QdrantConfig{
 			Host: "localhost",
 			Port: 6333,

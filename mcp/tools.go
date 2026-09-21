@@ -11,7 +11,7 @@ import (
 func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name:        "search_memory",
-		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base.",
+		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. Omit both collection_id and collections to search all enabled collections.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -21,7 +21,12 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"collection_id": map[string]any{
 					"type":        "string",
-					"description": "Collection to search (e.g., 'obsidian', 'chat')",
+					"description": "Single collection to search (e.g., 'chat'). Empty means all enabled.",
+				},
+				"collections": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Multiple collections to search and merge. Takes precedence over collection_id. Empty means all enabled.",
 				},
 				"top_k": map[string]any{
 					"type":        "integer",
@@ -39,16 +44,20 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 					"default":     0.25,
 				},
 			},
-			"required": []string{"query", "collection_id"},
+			"required": []string{"query"},
 		},
 	}, func(args map[string]any) (any, error) {
 		query, _ := args["query"].(string)
 		collectionID, _ := args["collection_id"].(string)
+		collections := getStringSliceArg(args, "collections")
+		if len(collections) == 0 && collectionID != "" {
+			collections = []string{collectionID}
+		}
 		topK := getIntArg(args, "top_k", 10)
 		rerank := getBoolArg(args, "rerank", true)
 		threshold := getFloatArg(args, "threshold", 0.25)
 
-		results, err := eng.Search(query, collectionID, topK, rerank, threshold)
+		results, err := eng.SearchMulti(query, collections, topK, rerank, threshold)
 		if err != nil {
 			return nil, err
 		}
@@ -180,6 +189,114 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		status := eng.HealthCheck()
 		return formatHealthCheck(status), nil
 	})
+
+	server.RegisterTool(Tool{
+		Name:        "collection_info",
+		Description: "Show management metadata and live chunk count for one collection (or all with collection_id empty).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to describe. Empty lists all with their registry metadata.",
+				},
+			},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		info, err := eng.DescribeCollections(collectionID)
+		if err != nil {
+			return nil, err
+		}
+		return ConvertToJSON(info), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "set_collection_meta",
+		Description: "Set management metadata for a collection: display name, description, tags, enabled flag, consumers.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to update",
+				},
+				"display_name": map[string]any{
+					"type":        "string",
+					"description": "Human-readable name",
+				},
+				"description": map[string]any{
+					"type":        "string",
+					"description": "What this collection holds",
+				},
+				"tags": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Tags for grouping (replaces existing)",
+				},
+				"consumers": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Who queries this (e.g. st-leer, opencode-global). Replaces existing.",
+				},
+				"enabled": map[string]any{
+					"type":        "boolean",
+					"description": "Disabled collections are skipped by global search",
+				},
+			},
+			"required": []string{"collection_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		meta := engine.CollectionMetaUpdate{}
+		if v, ok := args["display_name"].(string); ok {
+			meta.DisplayName = &v
+		}
+		if v, ok := args["description"].(string); ok {
+			meta.Description = &v
+		}
+		if _, ok := args["tags"]; ok {
+			v := getStringSliceArg(args, "tags")
+			meta.Tags = &v
+		}
+		if _, ok := args["consumers"]; ok {
+			v := getStringSliceArg(args, "consumers")
+			meta.Consumers = &v
+		}
+		if v, ok := args["enabled"].(bool); ok {
+			meta.Enabled = &v
+		}
+		if err := eng.SetCollectionMeta(collectionID, meta); err != nil {
+			return nil, err
+		}
+		return fmt.Sprintf("Updated metadata for collection '%s'", collectionID), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "delete_collection",
+		Description: "Permanently drop an entire collection with all its points and registry entry. Requires confirm=true. Irreversible.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to drop",
+				},
+				"confirm": map[string]any{
+					"type":        "boolean",
+					"description": "Must be true, otherwise the call is refused",
+				},
+			},
+			"required": []string{"collection_id", "confirm"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		confirm := getBoolArg(args, "confirm", false)
+		if err := eng.DeleteCollection(collectionID, confirm); err != nil {
+			return nil, err
+		}
+		return fmt.Sprintf("Deleted collection '%s'", collectionID), nil
+	})
 }
 
 // Helper functions
@@ -224,6 +341,24 @@ func getStringMapArg(args map[string]any, key string) map[string]string {
 	return nil
 }
 
+func getStringSliceArg(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func formatSearchResults(results []engine.SearchResult) string {
 	if len(results) == 0 {
 		return "No results found."
@@ -232,6 +367,9 @@ func formatSearchResults(results []engine.SearchResult) string {
 	result := fmt.Sprintf("Found %d results:\n\n", len(results))
 	for i, r := range results {
 		result += fmt.Sprintf("--- Result %d (score: %.3f) ---\n", i+1, r.Score)
+		if r.Collection != "" {
+			result += fmt.Sprintf("Collection: %s\n", r.Collection)
+		}
 		if r.Source != "" {
 			result += fmt.Sprintf("Source: %s\n", r.Source)
 		}

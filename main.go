@@ -8,6 +8,7 @@ import (
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
+	"github.com/RoyChong5053/rag-mcp-server/webui"
 )
 
 func main() {
@@ -34,9 +35,13 @@ func main() {
 		RerankRecall:    cfg.Rerank.Recall,
 		QueryMaxChars:   cfg.Rerank.QueryMaxChars,
 		DocMaxChars:     cfg.Rerank.DocMaxChars,
+		RegistryPath:    cfg.RegistryPath,
 	}
 
-	eng := engine.NewEngine(engineConfig)
+	eng, err := engine.NewEngine(engineConfig)
+	if err != nil {
+		log.Fatalf("Failed to create engine: %v", err)
+	}
 
 	// Create MCP server
 	mcpServer := mcp.NewServer()
@@ -52,6 +57,21 @@ func main() {
 	log.Printf("MCP endpoint: http://%s/mcp", addr)
 	log.Printf("Qdrant: %s:%d", cfg.Qdrant.Host, cfg.Qdrant.Port)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
+	log.Printf("Registry: %s", cfg.RegistryPath)
+
+	// Localhost-only management dashboard + API (ssh tunnel to reach it).
+	adminAddr := fmt.Sprintf("%s:%d", cfg.Admin.Host, cfg.Admin.Port)
+	if cfg.Admin.Host != "" && cfg.Admin.Host != "0.0.0.0" {
+		admin := webui.New(eng, "/tmp/rag-mcp.log")
+		go func() {
+			log.Printf("Admin dashboard: http://%s (localhost-only)", adminAddr)
+			if err := http.ListenAndServe(adminAddr, admin.Routes()); err != nil {
+				log.Fatalf("Admin server failed: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("WARNING: admin host %q is not localhost-only, dashboard disabled", cfg.Admin.Host)
+	}
 
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
