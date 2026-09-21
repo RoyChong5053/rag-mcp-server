@@ -1,0 +1,24 @@
+server:
+  host: "0.0.0.0"
+  port: 8199
+
+qdrant:
+  host: "localhost"
+  port: 6333
+
+oneapi:
+  base_url: "http://192.168.100.20:3000"
+  backup_url: "http://192.168.10.2:3000"
+  embed_model: "embedding"
+  rerank_model: "reranker"
+  api_key: ""
+
+chunking:
+  chunk_size: 500
+  overlap_percent: 30
+
+rerank:
+  enabled: true
+  recall: 30
+  query_max_chars: 2000
+  doc_max_chars: 1000
