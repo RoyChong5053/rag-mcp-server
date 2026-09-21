@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
@@ -62,9 +63,13 @@ func main() {
 	// Localhost-only management dashboard + API (ssh tunnel to reach it).
 	adminAddr := fmt.Sprintf("%s:%d", cfg.Admin.Host, cfg.Admin.Port)
 	if cfg.Admin.Host != "" && cfg.Admin.Host != "0.0.0.0" {
-		admin := webui.New(eng, "/tmp/rag-mcp.log")
+		docsAbs, err := filepath.Abs(cfg.DocsDir)
+		if err != nil {
+			log.Fatalf("Resolve docs dir: %v", err)
+		}
+		admin := webui.New(eng, "/tmp/rag-mcp.log", docsAbs)
 		go func() {
-			log.Printf("Admin dashboard: http://%s (localhost-only)", adminAddr)
+			log.Printf("Admin dashboard: http://%s (localhost-only, docs=%s)", adminAddr, docsAbs)
 			if err := http.ListenAndServe(adminAddr, admin.Routes()); err != nil {
 				log.Fatalf("Admin server failed: %v", err)
 			}

@@ -3,72 +3,142 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RAG Collections</title>
+<title>RAG Console</title>
 <style>
 :root { color-scheme: dark; }
-body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 16px; max-width: 1100px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-#health { color: #888; font-size: 13px; margin-bottom: 16px; }
+body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 16px 300px 16px 16px; max-width: 1200px; }
+h1 { font-size: 20px; margin: 0 0 4px; display: inline; }
+#health { color: #888; font-size: 13px; margin: 4px 0 16px; }
+h2 { font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 4px; margin-top: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; vertical-align: top; }
 tr.sel { background: #1e2a3a; }
 tr.orphan td:first-child { color: #e8a33d; }
 tr.disabled td:first-child { color: #666; text-decoration: line-through; }
-button { background: #245; color: #cde; border: 1px solid #468; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 8px; border: 1px solid #555; }
+.b-fresh { color: #8d8; border-color: #484; }
+.b-stale { color: #e8a33d; border-color: #a80; }
+.b-new { color: #9cc; border-color: #488; }
+.b-unk { color: #999; }
+button { background: #245; color: #cde; border: 1px solid #468; border-radius: 4px; padding: 4px 10px; cursor: pointer; margin: 1px; }
 button.danger { background: #422; border-color: #a44; color: #faa; }
 button:disabled { opacity: .4; }
 #detail { margin-top: 16px; border: 1px solid #444; border-radius: 6px; padding: 12px; display: none; }
-#detail h2 { font-size: 16px; margin: 0 0 8px; }
+#detail h3 { font-size: 16px; margin: 0 0 8px; }
 label { display: block; font-size: 12px; color: #999; margin: 8px 0 2px; }
-input[type=text], textarea { width: 100%; box-sizing: border-box; background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
-.row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-#results div { border-left: 3px solid #468; margin: 8px 0; padding: 4px 8px; background: #181818; font-size: 13px; white-space: pre-wrap; }
+input[type=text], input[type=number], textarea { background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
+input[type=text], textarea { width: 100%; box-sizing: border-box; }
+input[type=number] { width: 110px; }
+.row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: end; }
+#results div, #killed div, #preview-out div { border-left: 3px solid #468; margin: 8px 0; padding: 4px 8px; background: #181818; font-size: 13px; white-space: pre-wrap; }
+#killed div { border-color: #a80; }
 #audit { background: #000; color: #9d9; font: 12px monospace; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
-h3 { font-size: 14px; margin: 16px 0 6px; color: #aaa; }
+.prov { font-size: 13px; color: #888; }
+.prov b { color: #bbb; font-weight: normal; }
+/* sidebar */
+#side { position: fixed; top: 0; right: 0; width: 270px; height: 100%; background: #161616; border-left: 1px solid #333; padding: 12px; overflow-y: auto; box-sizing: border-box; }
+#side h2 { margin-top: 0; }
+.job { border: 1px solid #444; border-radius: 5px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
+.job .bar { height: 6px; background: #333; border-radius: 3px; margin: 6px 0; }
+.job .bar i { display: block; height: 100%; background: #6af; border-radius: 3px; }
+.job.done { border-color: #484; } .job.error { border-color: #a44; }
+.job small { color: #888; }
+#index-panel { border: 1px solid #468; border-radius: 6px; padding: 10px; margin-top: 10px; display: none; }
+.warn { color: #e8a33d; font-size: 12px; }
 </style>
 </head>
 <body>
-<h1>RAG Collections</h1>
+<h1>RAG Console</h1>
+<button onclick="backup()" title="download collections.json">backup registry</button>
 <div id="health">loading…</div>
-<table id="tbl"><thead><tr><th>Collection</th><th>Chunks</th><th>Enabled</th><th>Consumers</th><th>Source</th><th></th></tr></thead><tbody></tbody></table>
+
+<h2>Collections</h2>
+<table id="tbl"><thead><tr><th>Collection</th><th>Chunks</th><th>Enabled</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
 
 <div id="detail">
-  <h2 id="d-name"></h2>
-  <div id="d-flags" style="font-size:13px;color:#888"></div>
+  <h3 id="d-name"></h3>
+  <div id="d-flags" class="prov"></div>
   <label>Display name</label><input type="text" id="f-display">
   <label>Description</label><textarea id="f-desc" rows="2"></textarea>
   <label>Tags (comma separated)</label><input type="text" id="f-tags">
-  <label>Consumers (comma separated, e.g. st-leer, opencode-global)</label><input type="text" id="f-consumers">
+  <label>Consumers (comma separated)</label><input type="text" id="f-consumers">
   <label><input type="checkbox" id="f-enabled"> enabled (global search skips disabled)</label>
   <div class="row">
     <button onclick="saveMeta()">Save</button>
     <button onclick="backfill()">Backfill payload</button>
     <button class="danger" onclick="delCol()">Delete collection</button>
   </div>
-  <h3>Recall test</h3>
-  <div class="row"><input type="text" id="q" placeholder="query…" style="flex:1"><button onclick="testRecall()">Search</button></div>
+  <h2>Recall test</h2>
+  <div class="row">
+    <input type="text" id="q" placeholder="query…" style="flex:1;min-width:200px">
+    <span>top_k <input type="number" id="q-topk" value="3" min="1" max="50"></span>
+    <span>threshold <input type="number" id="q-thr" value="0" min="0" max="1" step="0.05"></span>
+    <label style="display:inline"><input type="checkbox" id="q-rerank" checked> rerank</label>
+    <button onclick="testRecall()">Search</button>
+  </div>
   <div id="results"></div>
+  <div id="killed"></div>
 </div>
 
-<h3>Audit log <button onclick="loadAudit()">refresh</button></h3>
+<h2>Data Bank <button onclick="loadFiles()">refresh</button></h2>
+<div class="row">
+  <input type="file" id="up-file">
+  <button onclick="upload()">Upload to staging/</button>
+  <span class="prov">raw files live under docs/ on the server — upload, or scp them yourself</span>
+</div>
+<table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table>
+
+<div id="index-panel">
+  <b id="ip-file"></b>
+  <div class="row">
+    <span>collection <input type="text" id="ip-col" list="col-list" placeholder="new_or_existing"></span>
+    <datalist id="col-list"></datalist>
+    <span>chunk size <input type="number" id="ip-size" value="0" min="0" max="20000" title="0 = global default"></span>
+    <span>overlap % <input type="number" id="ip-overlap" value="0" min="0" max="99" title="0 = global default"></span>
+    <span>mode <select id="ip-mode"><option value="append">append</option><option value="rebuild">rebuild (purge first)</option></select></span>
+  </div>
+  <div id="ip-warn" class="warn"></div>
+  <div class="row">
+    <button onclick="preview()">Preview chunks (zero token)</button>
+    <button onclick="submitIndex()">Vectorize → background job</button>
+  </div>
+  <div id="preview-out"></div>
+</div>
+
+<h2>Audit log <button onclick="loadAudit()">refresh</button></h2>
 <pre id="audit"></pre>
 
-<script>
-let cur = null;
-const api = (m, url, body) => fetch(url, {method: m, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined}).then(async r => {
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.status);
-  return j;
-});
-const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
+<div id="side">
+  <h2>Jobs</h2>
+  <div id="jobs"><small style="color:#666">no jobs yet</small></div>
+</div>
 
+<script>
+let cur = null, ipFile = null, colsCache = [];
+const api = (m, url, body, raw) => {
+  const opt = {method: m};
+  if (raw) { opt.body = body; }
+  else if (body !== undefined) { opt.headers = {'Content-Type': 'application/json'}; opt.body = JSON.stringify(body); }
+  return fetch(url, opt).then(async r => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok && r.status !== 202) throw new Error(j.error || r.status);
+    return j;
+  });
+};
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m]));
+const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
+const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'M' : n > 1024 ? (n / 1024).toFixed(0) + 'K' : n + 'B';
+
+/* ---- collections ---- */
 async function load() {
   try {
     const h = await api('GET', '/api/health');
     document.getElementById('health').textContent = Object.entries(h).map(([k, v]) => k + ': ' + v).join('  |  ');
   } catch (e) { document.getElementById('health').textContent = 'health failed: ' + e.message; }
   let cols = [];
-  try { cols = await api('GET', '/api/collections'); } catch (e) { alert('list failed: ' + e.message); return; }
+  try { cols = await api('GET', '/api/collections'); } catch (e) { return; }
+  colsCache = cols;
+  document.getElementById('col-list').innerHTML = cols.map(c => '<option value="' + esc(c.name) + '">').join('');
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
   for (const c of cols) {
@@ -76,12 +146,12 @@ async function load() {
     if (cur === c.name) tr.className = 'sel';
     if (!c.exists) tr.classList.add('orphan');
     if (c.exists && !c.enabled) tr.classList.add('disabled');
-    const disp = c.display_name || '—';
-    tr.innerHTML = '<td>' + esc(c.name) + '<br><small style="color:#888">' + esc(disp) + (c.exists ? '' : ' (orphan: no vectors)') + '</small></td>' +
-      '<td>' + (c.exists ? c.chunk_count : '—') + '</td>' +
-      '<td>' + (c.enabled ? 'on' : 'off') + '</td>' +
-      '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
-      '<td><small>' + esc(shortSrc(c.source_file)) + '</small></td>';
+    const prov = c.exists
+      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + '<br>' + esc(c.embed_model || '') + '<br><small>' + esc((c.source_sha256 || '').slice(0, 12)) + '</small>'
+      : 'orphan: no vectors';
+    tr.innerHTML = '<td>' + esc(c.name) + '<br><small style="color:#888">' + esc(c.display_name || '') + '</small></td>' +
+      '<td>' + (c.exists ? c.chunk_count : '—') + '</td><td>' + (c.enabled ? 'on' : 'off') + '</td>' +
+      '<td>' + esc((c.consumers || []).join(', ')) + '</td><td class="prov">' + prov + '</td>';
     const td = document.createElement('td');
     const b = document.createElement('button');
     b.textContent = 'manage';
@@ -91,23 +161,24 @@ async function load() {
     tb.appendChild(tr);
   }
 }
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m])); }
-function shortSrc(s) { if (!s) return ''; const p = s.split('/'); return p.length > 2 ? '…/' + p.slice(-2).join('/') : s; }
-
 async function select(name) {
   cur = name;
   const c = await api('GET', '/api/collections/' + encodeURIComponent(name));
   document.getElementById('detail').style.display = 'block';
   document.getElementById('d-name').textContent = c.name;
-  document.getElementById('d-flags').textContent = (c.exists ? c.chunk_count + ' chunks' : 'ORPHAN (no vectors in Qdrant)') +
-    '  |  created ' + (c.created_at || '?') + '  |  updated ' + (c.updated_at || '?') +
-    (c.chunk_size ? '  |  chunk ' + c.chunk_size + '/' + c.chunk_overlap : '');
+  document.getElementById('d-flags').innerHTML =
+    (c.exists ? '<b>' + c.chunk_count + '</b> chunks' : '<b>ORPHAN</b> (no vectors)') +
+    ' | chunk <b>' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + '</b>' +
+    ' | model <b>' + esc(c.embed_model || '?') + '</b>' +
+    ' | sha <b>' + esc((c.source_sha256 || '?').slice(0, 16)) + '</b>' +
+    ' | created ' + esc(c.created_at || '?');
   document.getElementById('f-display').value = c.display_name || '';
   document.getElementById('f-desc').value = c.description || '';
   document.getElementById('f-tags').value = (c.tags || []).join(', ');
   document.getElementById('f-consumers').value = (c.consumers || []).join(', ');
   document.getElementById('f-enabled').checked = !!c.enabled;
   document.getElementById('results').innerHTML = '';
+  document.getElementById('killed').innerHTML = '';
   load();
 }
 async function saveMeta() {
@@ -119,7 +190,7 @@ async function saveMeta() {
       consumers: csv(document.getElementById('f-consumers').value),
       enabled: document.getElementById('f-enabled').checked
     });
-    alert('saved'); load();
+    load();
   } catch (e) { alert('save failed: ' + e.message); }
 }
 async function backfill() {
@@ -133,7 +204,7 @@ async function delCol() {
   if (prompt('Type the collection name to confirm:') !== cur) { alert('name mismatch, aborted'); return; }
   try {
     await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/delete', {confirm: true});
-    alert('deleted'); cur = null;
+    cur = null;
     document.getElementById('detail').style.display = 'none';
     load();
   } catch (e) { alert('delete failed: ' + e.message); }
@@ -141,27 +212,156 @@ async function delCol() {
 async function testRecall() {
   const q = document.getElementById('q').value;
   if (!q.trim()) return;
-  const box = document.getElementById('results');
-  box.innerHTML = 'searching…';
+  const box = document.getElementById('results'), kb = document.getElementById('killed');
+  box.innerHTML = 'searching…'; kb.innerHTML = '';
   try {
-    const rs = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/search', {query: q, top_k: 3});
-    box.innerHTML = rs.length ? '' : 'no results';
-    for (const r of rs) {
+    const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/search', {
+      query: q, top_k: +document.getElementById('q-topk').value || 3,
+      threshold: +document.getElementById('q-thr').value || 0,
+      rerank: document.getElementById('q-rerank').checked
+    });
+    box.innerHTML = r.results.length ? '' : 'no results';
+    for (const x of r.results) {
       const d = document.createElement('div');
-      d.textContent = '[' + Number(r.score).toFixed(3) + '] ' + r.text.slice(0, 400);
+      d.textContent = '[' + Number(x.score).toFixed(3) + '] ' + x.text.slice(0, 400);
       box.appendChild(d);
+    }
+    if (r.killed && r.killed.length) {
+      const h = document.createElement('div');
+      h.innerHTML = '<b style="color:#e8a33d">' + r.killed.length + ' killed by threshold:</b>';
+      kb.appendChild(h);
+      for (const x of r.killed.slice(0, 5)) {
+        const d = document.createElement('div');
+        d.textContent = '[' + Number(x.score).toFixed(3) + '] ' + x.text.slice(0, 200);
+        kb.appendChild(d);
+      }
     }
   } catch (e) { box.textContent = 'search failed: ' + e.message; }
 }
+function backup() { window.location = '/api/registry/backup'; }
+
+/* ---- data bank ---- */
+const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
+async function loadFiles() {
+  let files = [];
+  try { files = await api('GET', '/api/files'); } catch (e) { alert('files failed: ' + e.message); return; }
+  const tb = document.querySelector('#ftbl tbody');
+  tb.innerHTML = '';
+  for (const f of files) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td><td>' + fmtSize(f.size) + '</td><td>' + badge(f.status) + '</td>';
+    const td = document.createElement('td');
+    const bp = document.createElement('button'); bp.textContent = 'preview';
+    bp.onclick = () => openIndex(f.path, true);
+    const bi = document.createElement('button'); bi.textContent = 'index…';
+    bi.onclick = () => openIndex(f.path, false);
+    td.appendChild(bp); td.appendChild(bi);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+}
+async function upload() {
+  const inp = document.getElementById('up-file');
+  if (!inp.files.length) { alert('pick a file first'); return; }
+  const fd = new FormData();
+  fd.append('file', inp.files[0]);
+  try {
+    const r = await api('POST', '/api/upload', fd, true);
+    alert('uploaded: ' + r.path);
+    inp.value = '';
+    loadFiles();
+  } catch (e) { alert('upload failed: ' + e.message); }
+}
+function openIndex(path, autoPreview) {
+  ipFile = path;
+  document.getElementById('index-panel').style.display = 'block';
+  document.getElementById('ip-file').textContent = path;
+  document.getElementById('preview-out').innerHTML = '';
+  // suggest collection from filename
+  const base = path.split('/').pop().replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+  const colInp = document.getElementById('ip-col');
+  if (!colInp.value) colInp.value = base;
+  updateWarn();
+  if (autoPreview) preview();
+  document.getElementById('index-panel').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+function updateWarn() {
+  const col = document.getElementById('ip-col').value.trim();
+  const mode = document.getElementById('ip-mode').value;
+  const known = colsCache.find(c => c.name === col);
+  const w = document.getElementById('ip-warn');
+  if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
+    w.textContent = '⚠ ' + col + ' already has ' + known.chunk_count + ' chunks (' + known.chunk_size + '/' + known.chunk_overlap + '). Appending with different settings creates mixed chunking — use rebuild instead.';
+  } else if (known && known.exists && mode === 'rebuild') {
+    w.textContent = '⚠ rebuild purges all ' + known.chunk_count + ' existing chunks first, then re-indexes.';
+  } else if (!known) {
+    w.textContent = 'new collection "' + (col || '?') + '" will be created.';
+  } else w.textContent = '';
+}
+['ip-col', 'ip-mode', 'ip-size'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
+async function preview() {
+  const box = document.getElementById('preview-out');
+  box.innerHTML = 'chunking…';
+  try {
+    const r = await api('POST', '/api/preview', {
+      path: ipFile,
+      chunk_size: +document.getElementById('ip-size').value || 0,
+      overlap_percent: +document.getElementById('ip-overlap').value || 0
+    });
+    box.innerHTML = '<b>' + r.chunks + ' chunks</b> (size ' + r.size + ' / overlap ' + r.overlap + ', zero token spent)';
+    for (const s of r.samples) {
+      const d = document.createElement('div');
+      d.textContent = s.slice(0, 300);
+      box.appendChild(d);
+    }
+  } catch (e) { box.textContent = 'preview failed: ' + e.message; }
+}
+async function submitIndex() {
+  const col = document.getElementById('ip-col').value.trim();
+  if (!col) { alert('collection name required'); return; }
+  if (document.getElementById('ip-mode').value === 'rebuild' && !confirm('Rebuild "' + col + '"? Existing vectors are purged first.')) return;
+  try {
+    const job = await api('POST', '/api/index', {
+      path: ipFile, collection: col,
+      chunk_size: +document.getElementById('ip-size').value || 0,
+      overlap_percent: +document.getElementById('ip-overlap').value || 0,
+      mode: document.getElementById('ip-mode').value
+    });
+    loadJobs();
+    document.getElementById('side').scrollIntoView();
+    alert('job ' + job.id + ' queued — watch the sidebar');
+  } catch (e) { alert('submit failed: ' + e.message); }
+}
+
+/* ---- jobs sidebar ---- */
+async function loadJobs() {
+  let jobs = [];
+  try { jobs = await api('GET', '/api/jobs'); } catch (e) { return; }
+  const box = document.getElementById('jobs');
+  if (!jobs.length) { box.innerHTML = '<small style="color:#666">no jobs yet</small>'; return; }
+  box.innerHTML = '';
+  for (const j of jobs.slice(0, 15)) {
+    const pct = j.total_chunks ? Math.round(j.done_chunks / j.total_chunks * 100) : (j.state === 'done' ? 100 : 0);
+    const d = document.createElement('div');
+    d.className = 'job ' + (j.state === 'done' ? 'done' : j.state === 'error' ? 'error' : '');
+    d.innerHTML = '<b>' + esc(j.id) + '</b> ' + esc(j.state) + ' <small>' + esc(j.stage) + '</small><br>' +
+      esc(j.collection) + (j.rebuild ? ' (rebuild)' : '') + '<br><small>' + esc(j.file.split('/').pop()) + '</small>' +
+      '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+      '<small>' + j.done_chunks + '/' + (j.total_chunks || '…') + ' chunks' + (j.chunks ? ' · ' + j.chunks + ' indexed' : '') + (j.error ? '<br>ERR: ' + esc(j.error) : '') + '</small>';
+    box.appendChild(d);
+  }
+}
+
+load(); loadFiles(); loadJobs(); loadAudit();
+setInterval(loadJobs, 2000);
 async function loadAudit() {
   try {
-    const j = await api('GET', '/api/audit?lines=150');
+    const j = await api('GET', '/api/audit?lines=80');
     const el = document.getElementById('audit');
     el.textContent = j.log;
     el.scrollTop = el.scrollHeight;
   } catch (e) { document.getElementById('audit').textContent = 'audit unavailable: ' + e.message; }
 }
-load(); loadAudit();
 </script>
 </body>
 </html>

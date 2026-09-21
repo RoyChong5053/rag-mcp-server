@@ -14,6 +14,10 @@ type Config struct {
 	Chunking     ChunkingConfig `yaml:"chunking"`
 	Rerank       RerankConfig   `yaml:"rerank"`
 	RegistryPath string         `yaml:"registry_path"`
+	// DocsDir is the data-bank root browsed by the dashboard.
+	// Relative paths resolve against the process working directory;
+	// prefer absolute on servers (ssh CWD is $HOME, not the app dir).
+	DocsDir string `yaml:"docs_dir"`
 }
 
 type ServerConfig struct {
@@ -64,6 +68,7 @@ func DefaultConfig() *Config {
 			Port: 8198,
 		},
 		RegistryPath: "collections.json",
+		DocsDir:      "docs",
 		Qdrant: QdrantConfig{
 			Host: "localhost",
 			Port: 6333,

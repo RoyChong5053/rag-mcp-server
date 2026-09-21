@@ -1,6 +1,7 @@
 package chunking
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -79,6 +80,43 @@ func TestSplitRecursive(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSplitRecursiveMerges proves ST parity: small pieces are packed back
+// up to maxSize instead of one-chunk-per-piece. Without this, files without
+// big delimiters degenerate (e.g. 19k word-chunks from 117KB).
+func TestSplitRecursiveMerges(t *testing.T) {
+	// words pack: "aa bb cc" (8) fits 10, " dd" would exceed
+	chunks := SplitRecursive("aa bb cc dd", 10, []string{" ", ""})
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 packed chunks, got %d: %q", len(chunks), chunks)
+	}
+	if chunks[0] != "aa bb cc" || chunks[1] != "dd" {
+		t.Fatalf("unexpected pack: %q", chunks)
+	}
+
+	// lines pack: 5x100-char lines at max 250 -> 2+2+1
+	line := strings.Repeat("x", 100)
+	text := strings.Join([]string{line, line, line, line, line}, "\n")
+	chunks = SplitRecursive(text, 250, []string{"\n\n", "\n", " ", ""})
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 packed chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if runeLen := utf8.RuneCountInString(c); runeLen > 250 {
+			t.Fatalf("chunk[%d] exceeds max: %d", i, runeLen)
+		}
+		if c == "" {
+			t.Fatalf("chunk[%d] is empty", i)
+		}
+	}
+
+	// oversized single piece still falls through to smaller delimiter
+	// ("bbbbbbbbbb" exceeds 5, so "\n" is rejected; char split wins)
+	chunks = SplitRecursive("aaa\nbbbbbbbbbb", 5, []string{"\n", " ", ""})
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %q", len(chunks), chunks)
 	}
 }
 

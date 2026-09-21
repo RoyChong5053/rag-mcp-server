@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,10 +23,12 @@ var indexHTML string
 type Handler struct {
 	eng       *engine.Engine
 	auditPath string
+	docsRoot  string
+	jobs      *Manager
 }
 
-func New(eng *engine.Engine, auditPath string) *Handler {
-	return &Handler{eng: eng, auditPath: auditPath}
+func New(eng *engine.Engine, auditPath, docsRoot string) *Handler {
+	return &Handler{eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2)}
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -38,6 +41,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/collections/{name}/delete", h.deleteCollection)
 	mux.HandleFunc("POST /api/collections/{name}/backfill", h.backfill)
 	mux.HandleFunc("POST /api/collections/{name}/search", h.search)
+	mux.HandleFunc("GET /api/files", h.handleFiles)
+	mux.HandleFunc("POST /api/upload", h.handleUpload)
+	mux.HandleFunc("POST /api/index", h.handleSubmitIndex)
+	mux.HandleFunc("GET /api/jobs", h.handleJobs)
+	mux.HandleFunc("GET /api/jobs/{id}", h.handleJob)
+	mux.HandleFunc("POST /api/preview", h.handlePreview)
+	mux.HandleFunc("GET /api/registry/backup", h.handleBackup)
 	mux.HandleFunc("GET /api/audit", h.audit)
 	return mux
 }
@@ -203,10 +213,31 @@ func (h *Handler) backfill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
-	// Stamp source_file in the registry too (best-effort).
+	// Adopt legacy collections: stamp source_file + sha + live chunk count
+	// so the data bank can badge them fresh/stale without re-embedding.
+	abs := sourceFile
+	if !filepath.IsAbs(abs) {
+		if j, err := jail(h.docsRoot, abs); err == nil {
+			abs = j
+		}
+	}
+	var sha string
+	if st, err := os.Stat(abs); err == nil && !st.IsDir() {
+		sha = fileSHA256(abs, st.Size())
+	}
+	chunkCount := 0
+	if d, err := h.eng.DescribeCollections(name); err == nil && len(d) > 0 {
+		chunkCount = d[0].ChunkCount
+	}
 	_ = h.eng.Registry().Update(name, func(en *registry.Entry) {
 		if en.SourceFile == "" {
 			en.SourceFile = sourceFile
+		}
+		if sha != "" && en.SourceSHA256 == "" {
+			en.SourceSHA256 = sha
+		}
+		if chunkCount > 0 {
+			en.ChunkCount = chunkCount
 		}
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "payload": payload})
@@ -214,9 +245,10 @@ func (h *Handler) backfill(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Query  string `json:"query"`
-		TopK   int    `json:"top_k"`
-		Rerank *bool  `json:"rerank"`
+		Query     string   `json:"query"`
+		TopK      int      `json:"top_k"`
+		Rerank    *bool    `json:"rerank"`
+		Threshold *float64 `json:"threshold"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
@@ -233,12 +265,18 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	if body.Rerank != nil {
 		useRerank = *body.Rerank
 	}
-	results, err := h.eng.Search(body.Query, r.PathValue("name"), body.TopK, useRerank, 0)
+	threshold := 0.0
+	if body.Threshold != nil {
+		threshold = *body.Threshold
+	}
+	// SearchDebug also reports candidates the threshold killed,
+	// so recall tuning is evidence-based instead of guesswork.
+	res, err := h.eng.SearchDebug(body.Query, r.PathValue("name"), body.TopK, useRerank, threshold)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, results)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {

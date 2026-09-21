@@ -3,9 +3,13 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -63,10 +67,10 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 	// Small input: single request (fast path, preserves old behavior)
 	if len(texts) <= embedBatchSize {
 		// Try primary endpoint first
-		embeddings, err := c.callEndpoint(c.baseURL, req)
+		embeddings, err := c.callWithRetry(c.baseURL, req)
 		if err != nil && c.backupURL != "" {
 			// Fallback to backup endpoint
-			embeddings, err = c.callEndpoint(c.backupURL, req)
+			embeddings, err = c.callWithRetry(c.backupURL, req)
 		}
 		return embeddings, err
 	}
@@ -79,9 +83,9 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 			end = len(texts)
 		}
 		batchReq := EmbeddingRequest{Model: c.model, Input: texts[start:end]}
-		embeddings, err := c.callEndpoint(c.baseURL, batchReq)
+		embeddings, err := c.callWithRetry(c.baseURL, batchReq)
 		if err != nil && c.backupURL != "" {
-			embeddings, err = c.callEndpoint(c.backupURL, batchReq)
+			embeddings, err = c.callWithRetry(c.backupURL, batchReq)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("batch [%d:%d]: %w", start, end, err)
@@ -90,6 +94,66 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 	}
 
 	return all, nil
+}
+
+// apiError carries the HTTP status so the retry wrapper can decide.
+type apiError struct {
+	status     int
+	body       string
+	retryAfter time.Duration
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("embedding API error %d: %s", e.status, e.body)
+}
+
+// retryable reports whether the error deserves another attempt:
+// rate limits, bad gateways, and transport failures. Auth/validation
+// errors (400/401/403/404/413/422) fail fast.
+func retryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if ae, ok := err.(*apiError); ok {
+		switch ae.status {
+		case 429, 500, 502, 503, 504:
+			return true
+		}
+		return false
+	}
+	// Transport errors (connection reset, timeouts) are retryable
+	return true
+}
+
+// callWithRetry runs one embedding request with exponential backoff.
+// Honors Retry-After when the server sends one. 6 attempts ≈ up to
+// ~1min of waiting per batch before giving up.
+func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([][]float32, error) {
+	backoff := 2 * time.Second
+	const maxAttempts = 6
+	var err error
+	var embeddings [][]float32
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var apiErr *apiError
+		embeddings, err = c.callEndpoint(baseURL, req)
+		if err == nil {
+			return embeddings, nil
+		}
+		if !retryable(err) {
+			return nil, err
+		}
+		if attempt == maxAttempts {
+			break
+		}
+		wait := backoff
+		if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
+			wait = apiErr.retryAfter
+		}
+		log.Printf("Embedding attempt %d/%d failed (%v), retrying in %s", attempt, maxAttempts, err, wait)
+		time.Sleep(wait)
+		backoff *= 2
+	}
+	return nil, fmt.Errorf("embedding failed after %d attempts: %w", maxAttempts, err)
 }
 
 func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([][]float32, error) {
@@ -121,7 +185,7 @@ func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([]
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("embedding API error %d: %s", resp.StatusCode, string(body))
+		return nil, &apiError{status: resp.StatusCode, body: string(body), retryAfter: parseRetryAfter(resp)}
 	}
 
 	var embeddingResp EmbeddingResponse
@@ -146,6 +210,21 @@ func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([]
 	}
 
 	return embeddings, nil
+}
+
+// parseRetryAfter reads the Retry-After header (seconds or HTTP date).
+func parseRetryAfter(resp *http.Response) time.Duration {
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		if secs > 120 {
+			secs = 120
+		}
+		return time.Duration(secs) * time.Second
+	}
+	return 0
 }
 
 // Ping tests connectivity to the embedding endpoint

@@ -62,7 +62,11 @@ func SplitRecursive(text string, maxChunkSize int, delimiters []string) []string
 }
 
 // trySplit attempts to split text using a specific delimiter.
-// Returns nil if any resulting chunk exceeds maxChunkSize.
+// Returns nil if any single piece exceeds maxChunkSize (caller tries
+// a smaller delimiter). Pieces are greedily merged back up to
+// maxChunkSize — this is ST splitRecursive parity: split, then pack.
+// Without the merge step, inputs without big delimiters degenerate
+// into one-chunk-per-word explosions.
 func trySplit(text string, maxChunkSize int, delim string) []string {
 	if delim == "" {
 		return tryCharSplit(text, maxChunkSize)
@@ -80,15 +84,34 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 		}
 	}
 
-	// Rejoin with delimiter to preserve original text
+	// Greedily pack parts; Join restores the original text exactly.
 	var chunks []string
-	for i, part := range parts {
-		if i == 0 {
-			chunks = append(chunks, part)
+	var cur []string
+	curLen := 0
+	flush := func() {
+		if len(cur) > 0 {
+			chunks = append(chunks, strings.Join(cur, delim))
+		}
+		cur = nil
+		curLen = 0
+	}
+	for _, part := range parts {
+		pl := runeLen(part)
+		add := pl
+		if len(cur) > 0 {
+			add += runeLen(delim)
+		}
+		if len(cur) > 0 && curLen+add > maxChunkSize {
+			flush()
+		}
+		cur = append(cur, part)
+		if len(cur) == 1 {
+			curLen = pl
 		} else {
-			chunks = append(chunks, delim+part)
+			curLen += add
 		}
 	}
+	flush()
 
 	return chunks
 }

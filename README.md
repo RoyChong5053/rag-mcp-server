@@ -88,8 +88,17 @@ rerank:
 ## Management dashboard
 
 Localhost-only admin UI + JSON API on `:8198` (reach via `ssh -L 8198:localhost:8198 m64`):
-list/search collections, edit metadata, backfill payloads, recall test, audit tail.
+list/search collections, edit metadata, backfill payloads, recall test with
+threshold-kill report, audit tail.
 Collection metadata lives in `collections.json` (server-local, gitignored).
+
+## Data Bank (dashboard)
+
+- `docs/` browser with fresh/stale/unindexed badges (sha256 vs registry provenance)
+- Upload to `docs/staging/`, zero-token chunk preview, index into new/existing
+  collection with per-job `chunk_size`/`overlap_percent` (append or rebuild)
+- Background jobs (max 2 concurrent, search never blocked) with sidebar progress
+- Provenance snapshot per collection: chunk size/overlap, embed model, source sha
 
 ## Register with one-api
 

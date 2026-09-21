@@ -17,17 +17,22 @@ type ChunkConfig struct {
 
 // Entry is the management metadata for one Qdrant collection.
 // It lives in collections.json on the server; Qdrant holds the vectors.
+// Provenance fields (Chunk, EmbedModel, SourceSHA256) record HOW the
+// vectors were computed. Query policy (top_k/threshold) is deliberately
+// NOT here: that's the caller's decision at query time.
 type Entry struct {
-	DisplayName string      `json:"display_name"`
-	Description string      `json:"description"`
-	Tags        []string    `json:"tags"`
-	Enabled     bool        `json:"enabled"`
-	Consumers   []string    `json:"consumers"`
-	SourceFile  string      `json:"source_file"`
-	CreatedAt   string      `json:"created_at"`
-	UpdatedAt   string      `json:"updated_at"`
-	ChunkCount  int         `json:"chunk_count"`
-	Chunk       ChunkConfig `json:"chunk"`
+	DisplayName  string      `json:"display_name"`
+	Description  string      `json:"description"`
+	Tags         []string    `json:"tags"`
+	Enabled      bool        `json:"enabled"`
+	Consumers    []string    `json:"consumers"`
+	SourceFile   string      `json:"source_file"`
+	SourceSHA256 string      `json:"source_sha256"`
+	EmbedModel   string      `json:"embed_model"`
+	CreatedAt    string      `json:"created_at"`
+	UpdatedAt    string      `json:"updated_at"`
+	ChunkCount   int         `json:"chunk_count"`
+	Chunk        ChunkConfig `json:"chunk"`
 }
 
 // Registry is a concurrency-safe file-backed collection registry.

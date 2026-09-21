@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -217,6 +219,68 @@ func trimResults(results []SearchResult, topK int) []SearchResult {
 	return results
 }
 
+// SearchDebugResult pairs kept results with candidates the threshold killed.
+// Killed items are fetched with threshold=0 over the same recall window,
+// so tuners see exactly what a higher threshold would have kept.
+type SearchDebugResult struct {
+	Results []SearchResult `json:"results"`
+	Killed  []SearchResult `json:"killed"`
+}
+
+// SearchDebug runs a single-collection search and reports threshold kills.
+// It embeds once and searches twice (threshold, then 0): no rerank on the
+// killed set, they are shown in raw vector order.
+func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64) (*SearchDebugResult, error) {
+	embeddings, err := e.embedding.CreateEmbeddings([]string{query})
+	if err != nil {
+		return nil, fmt.Errorf("failed to embed query: %w", err)
+	}
+	queryVector := embeddings[0]
+
+	recallCount := topK
+	if useRerank && e.config.RerankEnabled {
+		recallCount = e.config.RerankRecall
+		if recallCount < topK {
+			recallCount = topK
+		}
+	}
+
+	kept, err := e.qdrant.Search(collection, queryVector, recallCount, threshold)
+	if err != nil {
+		return nil, fmt.Errorf("qdrant search failed: %w", err)
+	}
+	results := make([]SearchResult, 0, len(kept))
+	keptIDs := make(map[any]bool, len(kept))
+	for _, r := range kept {
+		keptIDs[r.ID] = true
+		results = append(results, qdrantToSearchResult(r, collection))
+	}
+
+	var killed []SearchResult
+	if threshold > 0 {
+		all, err := e.qdrant.Search(collection, queryVector, recallCount, 0)
+		if err == nil {
+			for _, r := range all {
+				if !keptIDs[r.ID] {
+					killed = append(killed, qdrantToSearchResult(r, collection))
+				}
+			}
+		}
+	}
+
+	if useRerank && e.config.RerankEnabled && len(results) > 1 {
+		if reranked, err := e.applyRerank(query, results, topK); err == nil {
+			results = reranked
+		} else {
+			log.Printf("Rerank failed, falling back to vector order: %v", err)
+			results = trimResults(results, topK)
+		}
+	} else {
+		results = trimResults(results, topK)
+	}
+	return &SearchDebugResult{Results: results, Killed: killed}, nil
+}
+
 func (e *Engine) applyRerank(query string, results []SearchResult, topK int) ([]SearchResult, error) {
 	// Extract texts for reranking
 	texts := make([]string, len(results))
@@ -243,8 +307,58 @@ func (e *Engine) applyRerank(query string, results []SearchResult, topK int) ([]
 	return reranked, nil
 }
 
+// ChunkOptions overrides the global chunking config for one index job.
+// Zero values fall back to global config. Delimiters are intentionally
+// fixed (parity with the ST toolchain) and not exposed per job.
+type ChunkOptions struct {
+	Size           int `json:"size"`
+	OverlapPercent int `json:"overlap_percent"`
+}
+
+// ResolvedChunkOptions is the effective chunking used by a job.
+type ResolvedChunkOptions struct {
+	Size    int
+	Overlap int
+}
+
+// ProgressFunc reports upsert progress: doneChunks of totalChunks.
+type ProgressFunc func(doneChunks, totalChunks int)
+
+// ResolveChunkOptions fills zero values from global config.
+// Zero means "use global" (the dashboard sends 0 for defaults);
+// there is currently no way to request literal 0% overlap per job.
+func (e *Engine) ResolveChunkOptions(opts *ChunkOptions) ResolvedChunkOptions {
+	size := e.config.ChunkSize
+	overlapPct := e.config.OverlapPercent
+	if opts != nil {
+		if opts.Size > 0 {
+			size = opts.Size
+		}
+		if opts.OverlapPercent > 0 && opts.OverlapPercent < 100 {
+			overlapPct = opts.OverlapPercent
+		}
+	}
+	return ResolvedChunkOptions{Size: size, Overlap: size * overlapPct / 100}
+}
+
+// Provenance records how a collection's vectors were computed.
+// Stored in the registry: "how it was built", never query policy.
+type Provenance struct {
+	SourceFile   string
+	SourceSHA256 string
+	ChunkSize    int
+	ChunkOverlap int
+	EmbedModel   string
+	Chunks       int
+}
+
 // IndexDocument indexes a file into a Qdrant collection
 func (e *Engine) IndexDocument(path string, collectionID string, metadata map[string]string) (*IndexResult, error) {
+	return e.IndexDocumentWithOptions(path, collectionID, metadata, nil, nil)
+}
+
+// IndexDocumentWithOptions indexes a file with per-job chunking and progress.
+func (e *Engine) IndexDocumentWithOptions(path string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
 	// Read file
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -258,33 +372,99 @@ func (e *Engine) IndexDocument(path string, collectionID string, metadata map[st
 	}
 	metadata["source"] = path
 
-	res, err := e.indexTextInternal(text, collectionID, metadata, fileName, path)
+	sum := sha256.Sum256(data)
+	prov := Provenance{
+		SourceFile:   path,
+		SourceSHA256: hex.EncodeToString(sum[:]),
+		EmbedModel:   e.config.EmbedModel,
+	}
+
+	res, used, err := e.indexTextInternal(text, collectionID, metadata, fileName, path, opts, prog)
 	if err != nil {
 		return nil, err
 	}
-	e.recordIndex(collectionID, path, res.ChunksIndexed)
+	prov.Chunks = res.ChunksIndexed
+	prov.ChunkSize, prov.ChunkOverlap = used.Size, used.Overlap
+	e.recordIndex(collectionID, prov)
 	return res, nil
+}
+
+// ReindexDocument drops all vectors and rebuilds from file with new options.
+// Required when chunking changes: different splits produce different point
+// IDs, so plain upsert would leave stale chunks behind. Registry metadata
+// (display name, tags, consumers) is preserved.
+func (e *Engine) ReindexDocument(path string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
+	exists, err := e.qdrant.CollectionExists(collectionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check collection: %w", err)
+	}
+	if exists {
+		if err := e.qdrant.DeleteCollection(collectionID); err != nil {
+			return nil, fmt.Errorf("failed to purge collection: %w", err)
+		}
+		log.Printf("Purged collection '%s' for re-index", collectionID)
+	}
+	return e.IndexDocumentWithOptions(path, collectionID, metadata, opts, prog)
 }
 
 // IndexText indexes raw text into a Qdrant collection
 func (e *Engine) IndexText(text string, collectionID string, metadata map[string]string) (*IndexResult, error) {
-	res, err := e.indexTextInternal(text, collectionID, metadata, "direct_text", "direct_text")
+	return e.IndexTextWithOptions(text, collectionID, metadata, nil, nil)
+}
+
+// IndexTextWithOptions indexes raw text with per-job chunking and progress.
+func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
+	res, used, err := e.indexTextInternal(text, collectionID, metadata, "direct_text", "direct_text", opts, prog)
 	if err != nil {
 		return nil, err
 	}
-	e.recordIndex(collectionID, "direct_text", res.ChunksIndexed)
+	e.recordIndex(collectionID, Provenance{
+		SourceFile:   "direct_text",
+		ChunkSize:    used.Size,
+		ChunkOverlap: used.Overlap,
+		EmbedModel:   e.config.EmbedModel,
+		Chunks:       res.ChunksIndexed,
+	})
 	return res, nil
 }
 
-// recordIndex snapshots management metadata in the registry.
+// PreviewChunks splits text without embedding: zero-token cost tuning.
+// Returns total count plus up to maxSamples leading chunks.
+func PreviewChunks(text string, size, overlap int, maxSamples int) (int, []string) {
+	if size <= 0 {
+		size = 500
+	}
+	delimiters := []string{"\n\n", "\n", " ", ""}
+	effective := size - overlap
+	if effective <= 0 {
+		effective = size
+	}
+	chunks := chunking.SplitRecursive(text, effective, delimiters)
+	if overlap > 0 {
+		chunks = chunking.OverlapChunks(chunks, overlap)
+	}
+	samples := chunks
+	if maxSamples > 0 && len(chunks) > maxSamples {
+		samples = chunks[:maxSamples]
+	}
+	return len(chunks), samples
+}
+
+// recordIndex snapshots provenance in the registry.
 // Best-effort: a registry write failure is logged, indexing already succeeded.
-func (e *Engine) recordIndex(collectionID, sourceFile string, chunks int) {
+func (e *Engine) recordIndex(collectionID string, prov Provenance) {
 	err := e.registry.Update(collectionID, func(en *registry.Entry) {
 		if en.SourceFile == "" {
-			en.SourceFile = sourceFile
+			en.SourceFile = prov.SourceFile
 		}
-		en.ChunkCount = chunks
-		en.Chunk = registry.ChunkConfig{Size: e.config.ChunkSize, Overlap: e.config.ChunkSize * e.config.OverlapPercent / 100}
+		if prov.SourceSHA256 != "" {
+			en.SourceSHA256 = prov.SourceSHA256
+		}
+		if prov.EmbedModel != "" {
+			en.EmbedModel = prov.EmbedModel
+		}
+		en.ChunkCount = prov.Chunks
+		en.Chunk = registry.ChunkConfig{Size: prov.ChunkSize, Overlap: prov.ChunkOverlap}
 	})
 	if err != nil {
 		log.Printf("Registry update failed for '%s': %v", collectionID, err)
@@ -298,18 +478,18 @@ func (e *Engine) BackfillPayload(collectionID string, payload map[string]any) er
 	return e.qdrant.SetPayload(collectionID, payload, nil)
 }
 
-func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string) (*IndexResult, error) {
-	// Chunk the text
+func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
+	// Chunk the text (per-job options fall back to global config)
 	delimiters := []string{"\n\n", "\n", " ", ""}
-	overlapSize := e.config.ChunkSize * e.config.OverlapPercent / 100
-	effectiveChunkSize := e.config.ChunkSize
-	if overlapSize > 0 {
-		effectiveChunkSize = e.config.ChunkSize - overlapSize
+	used := e.ResolveChunkOptions(opts)
+	effectiveChunkSize := used.Size - used.Overlap
+	if effectiveChunkSize <= 0 {
+		effectiveChunkSize = used.Size
 	}
 
 	chunks := chunking.SplitRecursive(text, effectiveChunkSize, delimiters)
-	if overlapSize > 0 {
-		chunks = chunking.OverlapChunks(chunks, overlapSize)
+	if used.Overlap > 0 {
+		chunks = chunking.OverlapChunks(chunks, used.Overlap)
 	}
 
 	// Validate chunks
@@ -319,13 +499,13 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 	}
 
 	if len(chunks) == 0 {
-		return &IndexResult{ChunksIndexed: 0, Collection: collectionID}, nil
+		return &IndexResult{ChunksIndexed: 0, Collection: collectionID}, used, nil
 	}
 
 	// Embed all chunks
 	embeddings, err := e.embedding.CreateEmbeddings(chunks)
 	if err != nil {
-		return nil, fmt.Errorf("failed to embed chunks: %w", err)
+		return nil, used, fmt.Errorf("failed to embed chunks: %w", err)
 	}
 
 	// Create Qdrant points with deterministic uint IDs:
@@ -357,11 +537,11 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 	// Ensure collection exists
 	exists, err := e.qdrant.CollectionExists(collectionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check collection: %w", err)
+		return nil, used, fmt.Errorf("failed to check collection: %w", err)
 	}
 	if !exists {
 		if err := e.qdrant.CreateCollection(collectionID); err != nil {
-			return nil, fmt.Errorf("failed to create collection: %w", err)
+			return nil, used, fmt.Errorf("failed to create collection: %w", err)
 		}
 	}
 
@@ -374,7 +554,10 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 			end = len(points)
 		}
 		if err := e.qdrant.UpsertPoints(collectionID, points[start:end]); err != nil {
-			return nil, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
+			return &IndexResult{ChunksIndexed: start, Collection: collectionID}, used, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
+		}
+		if prog != nil {
+			prog(end, len(points))
 		}
 	}
 	log.Printf("Indexed %d chunks into collection '%s' (%d upsert batches)", len(chunks), collectionID, (len(points)+upsertBatchSize-1)/upsertBatchSize)
@@ -382,7 +565,7 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 	return &IndexResult{
 		ChunksIndexed: len(chunks),
 		Collection:    collectionID,
-	}, nil
+	}, used, nil
 }
 
 // DeleteMemory deletes points from a collection
@@ -420,6 +603,8 @@ type CollectionDetail struct {
 	Enabled      bool     `json:"enabled"`
 	Consumers    []string `json:"consumers,omitempty"`
 	SourceFile   string   `json:"source_file,omitempty"`
+	SourceSHA256 string   `json:"source_sha256,omitempty"`
+	EmbedModel   string   `json:"embed_model,omitempty"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	UpdatedAt    string   `json:"updated_at,omitempty"`
 	ChunkSize    int      `json:"chunk_size,omitempty"`
@@ -453,6 +638,8 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		d.Enabled = en.Enabled
 		d.Consumers = en.Consumers
 		d.SourceFile = en.SourceFile
+		d.SourceSHA256 = en.SourceSHA256
+		d.EmbedModel = en.EmbedModel
 		d.CreatedAt = en.CreatedAt
 		d.UpdatedAt = en.UpdatedAt
 		d.ChunkSize = en.Chunk.Size

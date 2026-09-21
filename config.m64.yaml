@@ -10,6 +10,10 @@ admin:
 # Collection registry (management metadata). Lives next to the binary on m64.
 registry_path: "collections.json"
 
+# Data-bank root browsed by the dashboard (server-local paths).
+# Prefer absolute on servers (ssh CWD is $HOME, not the app dir).
+docs_dir: "docs"
+
 qdrant:
   host: "192.168.10.1"
   port: 6333
