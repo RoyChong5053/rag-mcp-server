@@ -42,6 +42,10 @@ func main() {
 	engineConfig := &engine.EngineConfig{
 		QdrantHost:      cfg.Qdrant.Host,
 		QdrantPort:      cfg.Qdrant.Port,
+		VectraDir:       cfg.Storage.VectraDir,
+		Backend:         cfg.Storage.Backend,
+		DocsDir:         cfg.DocsDir,
+		MemoryDir:       cfg.Storage.MemoryDir,
 		OneAPIBaseURL:   cfg.OneAPI.BaseURL,
 		OneAPIBackupURL: cfg.OneAPI.BackupURL,
 		EmbedModel:      cfg.OneAPI.EmbedModel,
@@ -75,6 +79,7 @@ func main() {
 	log.Printf("MCP endpoint: http://%s/mcp", addr)
 	log.Printf("Qdrant: %s:%d", cfg.Qdrant.Host, cfg.Qdrant.Port)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
+	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, cfg.Storage.VectraDir)
 	log.Printf("Registry: %s", cfg.RegistryPath)
 	log.Printf("Settings: %s", settingsPath)
 

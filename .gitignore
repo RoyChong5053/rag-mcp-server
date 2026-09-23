@@ -33,6 +33,9 @@ config.local.yaml
 # Private chat history / personal data - never commit
 docs/
 
+# Local file-backed vector store (Vectra-compatible) - never commit
+Vectra/
+
 # Server-local collection registry (management metadata) - never commit
 collections.json
 collections.json.tmp

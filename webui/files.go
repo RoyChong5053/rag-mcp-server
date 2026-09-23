@@ -216,6 +216,12 @@ func (h *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.jobs.List())
 }
 
+// handleClearJobs drops finished jobs from the sidebar; in-flight jobs stay.
+func (h *Handler) handleClearJobs(w http.ResponseWriter, r *http.Request) {
+	removed := h.jobs.Clear()
+	writeJSON(w, http.StatusOK, map[string]any{"removed": removed})
+}
+
 func (h *Handler) handleJob(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Get(r.PathValue("id"))
 	if job == nil {

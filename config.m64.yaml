@@ -18,6 +18,13 @@ settings_path: "settings.json"
 # Prefer absolute on servers (ssh CWD is $HOME, not the app dir).
 docs_dir: "docs"
 
+# Vector backend. backend = global default (qdrant | vectra); a collection can
+# override it via its registry entry. vectra_dir holds the local file store.
+storage:
+  backend: "qdrant"
+  vectra_dir: "Vectra"
+  # memory_dir: "docs/memory"   # store_memory raw text (default: <docs_dir>/memory)
+
 qdrant:
   host: "192.168.10.1"
   port: 6333

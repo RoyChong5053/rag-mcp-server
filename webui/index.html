@@ -95,7 +95,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <button onclick="newCollection()">＋ New</button>
     <button onclick="load()">refresh</button>
   </div>
-  <table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
+  <table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Backend</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
 </div>
 
 <div id="detail">
@@ -106,6 +106,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <label>Tags (comma separated)</label><input type="text" id="f-tags">
   <label>Consumers (comma separated)</label><input type="text" id="f-consumers">
   <label><input type="checkbox" id="f-enabled"> enabled (global search skips disabled)</label>
+  <label>Backend <select id="f-backend"><option value="">(server default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></label>
   <div class="row">
     <button onclick="saveMeta()">Save</button>
     <button onclick="backfill()">Backfill payload</button>
@@ -160,7 +161,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 </div>
 
 <div id="side">
-  <h2>Jobs</h2>
+  <h2 style="display:flex;align-items:center;gap:8px">Jobs <span class="spacer" style="flex:1"></span> <button onclick="clearJobs()" title="remove finished jobs">clear</button></h2>
   <div id="jobs"><small style="color:#666">no jobs yet</small></div>
 </div>
 
@@ -207,6 +208,7 @@ async function load() {
     tr.innerHTML = '<td><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
       '<td><span class="cname">' + esc(c.name) + '</span>' + (c.display_name ? '<br><small class="dim">' + esc(c.display_name) + '</small>' : '') + '</td>' +
       '<td class="num">' + (c.exists ? c.chunk_count : '—') + '</td>' +
+      '<td><span class="badge b-on">' + esc(c.backend || '?') + '</span></td>' +
       '<td>' + status + '</td>' +
       '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
       '<td class="prov">' + prov + '</td>';
@@ -246,6 +248,7 @@ async function select(name) {
   document.getElementById('f-tags').value = (c.tags || []).join(', ');
   document.getElementById('f-consumers').value = (c.consumers || []).join(', ');
   document.getElementById('f-enabled').checked = !!c.enabled;
+  document.getElementById('f-backend').value = c.backend || '';
   document.getElementById('results').innerHTML = '';
   document.getElementById('killed').innerHTML = '';
   load();
@@ -257,7 +260,8 @@ async function saveMeta() {
       description: document.getElementById('f-desc').value,
       tags: csv(document.getElementById('f-tags').value),
       consumers: csv(document.getElementById('f-consumers').value),
-      enabled: document.getElementById('f-enabled').checked
+      enabled: document.getElementById('f-enabled').checked,
+      backend: document.getElementById('f-backend').value
     });
     load();
   } catch (e) { alert('save failed: ' + e.message); }
@@ -436,6 +440,10 @@ async function submitIndex() {
 }
 
 /* ---- jobs sidebar ---- */
+async function clearJobs() {
+  try { await api('POST', '/api/jobs/clear'); } catch (e) { return; }
+  loadJobs();
+}
 async function loadJobs() {
   let jobs = [];
   try { jobs = await api('GET', '/api/jobs'); } catch (e) { return; }

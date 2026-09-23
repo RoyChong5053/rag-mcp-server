@@ -63,7 +63,8 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		Name: "store_memory",
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
 			"Omit collection_id to write to the server's configured default collection. " +
-			"This is the write counterpart of search_memory; the text lives only in the vector store (there is no source file).",
+			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
+			"so it can be browsed in the data bank and re-indexed.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -175,7 +176,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 	server.RegisterTool(Tool{
 		Name:        "set_collection_meta",
-		Description: "Set management metadata for a collection: display name, description, tags, enabled flag, consumers.",
+		Description: "Set management metadata for a collection: display name, description, tags, enabled flag, consumers, backend (qdrant|vectra).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -205,6 +206,10 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 					"type":        "boolean",
 					"description": "Disabled collections are skipped by global search",
 				},
+				"backend": map[string]any{
+					"type":        "string",
+					"description": "Storage backend: qdrant or vectra. Empty follows the server default.",
+				},
 			},
 			"required": []string{"collection_id"},
 		},
@@ -227,6 +232,9 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		if v, ok := args["enabled"].(bool); ok {
 			meta.Enabled = &v
+		}
+		if v, ok := args["backend"].(string); ok {
+			meta.Backend = &v
 		}
 		if err := eng.SetCollectionMeta(collectionID, meta); err != nil {
 			return nil, err

@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Server       ServerConfig   `yaml:"server"`
 	Admin        AdminConfig    `yaml:"admin"`
+	Storage      StorageConfig  `yaml:"storage"`
 	Qdrant       QdrantConfig   `yaml:"qdrant"`
 	OneAPI       OneAPIConfig   `yaml:"oneapi"`
 	Chunking     ChunkingConfig `yaml:"chunking"`
@@ -21,6 +22,16 @@ type Config struct {
 	// Relative paths resolve against the process working directory;
 	// prefer absolute on servers (ssh CWD is $HOME, not the app dir).
 	DocsDir string `yaml:"docs_dir"`
+}
+
+// StorageConfig selects the vector backend. backend is the global default
+// ("qdrant" or "vectra"); a collection can override it via its registry entry.
+type StorageConfig struct {
+	Backend   string `yaml:"backend"`
+	VectraDir string `yaml:"vectra_dir"`
+	// MemoryDir is where store_memory raw text is persisted. Empty defaults to
+	// <docs_dir>/memory.
+	MemoryDir string `yaml:"memory_dir"`
 }
 
 type ServerConfig struct {
@@ -42,11 +53,11 @@ type QdrantConfig struct {
 }
 
 type OneAPIConfig struct {
-	BaseURL    string `yaml:"base_url"`
-	BackupURL  string `yaml:"backup_url"`
-	EmbedModel string `yaml:"embed_model"`
+	BaseURL     string `yaml:"base_url"`
+	BackupURL   string `yaml:"backup_url"`
+	EmbedModel  string `yaml:"embed_model"`
 	RerankModel string `yaml:"rerank_model"`
-	APIKey     string `yaml:"api_key"`
+	APIKey      string `yaml:"api_key"`
 }
 
 type ChunkingConfig struct {
@@ -55,10 +66,10 @@ type ChunkingConfig struct {
 }
 
 type RerankConfig struct {
-	Enabled         bool `yaml:"enabled"`
-	Recall          int  `yaml:"recall"`
-	QueryMaxChars   int  `yaml:"query_max_chars"`
-	DocMaxChars     int  `yaml:"doc_max_chars"`
+	Enabled       bool `yaml:"enabled"`
+	Recall        int  `yaml:"recall"`
+	QueryMaxChars int  `yaml:"query_max_chars"`
+	DocMaxChars   int  `yaml:"doc_max_chars"`
 }
 
 func DefaultConfig() *Config {
@@ -74,6 +85,10 @@ func DefaultConfig() *Config {
 		RegistryPath: "collections.json",
 		SettingsPath: "settings.json",
 		DocsDir:      "docs",
+		Storage: StorageConfig{
+			Backend:   "qdrant",
+			VectraDir: "Vectra",
+		},
 		Qdrant: QdrantConfig{
 			Host: "localhost",
 			Port: 6333,

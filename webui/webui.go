@@ -47,6 +47,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/upload", h.handleUpload)
 	mux.HandleFunc("POST /api/index", h.handleSubmitIndex)
 	mux.HandleFunc("GET /api/jobs", h.handleJobs)
+	mux.HandleFunc("POST /api/jobs/clear", h.handleClearJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", h.handleJob)
 	mux.HandleFunc("POST /api/preview", h.handlePreview)
 	mux.HandleFunc("GET /api/registry/backup", h.handleBackup)
@@ -149,6 +150,7 @@ type metaBody struct {
 	Tags        []string `json:"tags"`
 	Consumers   []string `json:"consumers"`
 	Enabled     *bool    `json:"enabled"`
+	Backend     *string  `json:"backend"`
 	// hasTags/hasConsumers distinguish "missing" from "empty array"
 	HasTags      bool `json:"-"`
 	HasConsumers bool `json:"-"`
@@ -169,6 +171,7 @@ func (h *Handler) setMeta(w http.ResponseWriter, r *http.Request) {
 		DisplayName: body.DisplayName,
 		Description: body.Description,
 		Enabled:     body.Enabled,
+		Backend:     body.Backend,
 	}
 	if body.HasTags {
 		update.Tags = &body.Tags
@@ -219,6 +222,9 @@ func mapToMeta(raw map[string]any, out *metaBody) error {
 		return err
 	}
 	if out.Description, err = strPtr("description"); err != nil {
+		return err
+	}
+	if out.Backend, err = strPtr("backend"); err != nil {
 		return err
 	}
 	if out.Tags, out.HasTags, err = strSlice("tags"); err != nil {

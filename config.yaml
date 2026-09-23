@@ -17,6 +17,13 @@ settings_path: "settings.json"
 # Data-bank root browsed by the dashboard (server-local paths).
 docs_dir: "docs"
 
+# Vector backend. backend = global default (qdrant | vectra); a collection can
+# override it via its registry entry. vectra_dir holds the local file store.
+storage:
+  backend: "qdrant"
+  vectra_dir: "Vectra"
+  # memory_dir: "docs/memory"   # store_memory raw text (default: <docs_dir>/memory)
+
 qdrant:
   host: "localhost"
   port: 6333

@@ -15,27 +15,6 @@ type QdrantClient struct {
 	httpClient *http.Client
 }
 
-// QdrantCollectionInfo holds collection metadata from Qdrant
-type QdrantCollectionInfo struct {
-	Name       string `json:"name"`
-	ChunkCount int    `json:"chunk_count"`
-}
-
-// Point represents a Qdrant point.
-// ID must be an unsigned integer or UUID (Qdrant rejects arbitrary strings).
-type Point struct {
-	ID      uint64         `json:"id"`
-	Payload map[string]any `json:"payload"`
-	Vector  []float32      `json:"vector,omitempty"`
-}
-
-// QdrantSearchResult represents a raw search result from Qdrant
-type QdrantSearchResult struct {
-	ID      any            `json:"id"`
-	Score   float64        `json:"score"`
-	Payload map[string]any `json:"payload"`
-}
-
 // NewQdrantClient creates a new Qdrant client
 func NewQdrantClient(host string, port int) *QdrantClient {
 	return &QdrantClient{
@@ -67,7 +46,7 @@ func (c *QdrantClient) CollectionExists(name string) (bool, error) {
 }
 
 // GetCollectionInfo returns collection info including point count
-func (c *QdrantClient) GetCollectionInfo(name string) (*QdrantCollectionInfo, error) {
+func (c *QdrantClient) GetCollectionInfo(name string) (*StoreCollectionInfo, error) {
 	resp, err := c.get(fmt.Sprintf("/collections/%s", name))
 	if err != nil {
 		return nil, err
@@ -75,24 +54,24 @@ func (c *QdrantClient) GetCollectionInfo(name string) (*QdrantCollectionInfo, er
 
 	var result struct {
 		Result struct {
-			Status string `json:"status"`
+			Status          string `json:"status"`
 			OptimizerStatus string `json:"optimizer_status"`
-			VectorsCount int `json:"vectors_count"`
-			PointsCount  int `json:"points_count"`
+			VectorsCount    int    `json:"vectors_count"`
+			PointsCount     int    `json:"points_count"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
 	}
 
-	return &QdrantCollectionInfo{
+	return &StoreCollectionInfo{
 		Name:       name,
 		ChunkCount: result.Result.PointsCount,
 	}, nil
 }
 
 // ListCollections returns all collections
-func (c *QdrantClient) ListCollections() ([]QdrantCollectionInfo, error) {
+func (c *QdrantClient) ListCollections() ([]StoreCollectionInfo, error) {
 	resp, err := c.get("/collections")
 	if err != nil {
 		return nil, err
@@ -109,7 +88,7 @@ func (c *QdrantClient) ListCollections() ([]QdrantCollectionInfo, error) {
 		return nil, err
 	}
 
-	var collections []QdrantCollectionInfo
+	var collections []StoreCollectionInfo
 	for _, col := range result.Result.Collections {
 		info, err := c.GetCollectionInfo(col.Name)
 		if err != nil {
@@ -130,12 +109,12 @@ func (c *QdrantClient) UpsertPoints(collection string, points []Point) error {
 }
 
 // Search performs a vector search
-func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64) ([]QdrantSearchResult, error) {
+func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64) ([]StoreSearchResult, error) {
 	body := map[string]any{
-		"vector": vector,
-		"limit":  limit,
+		"vector":          vector,
+		"limit":           limit,
 		"score_threshold": threshold,
-		"with_payload": true,
+		"with_payload":    true,
 	}
 
 	resp, err := c.post(fmt.Sprintf("/collections/%s/points/search", collection), body)
@@ -144,7 +123,7 @@ func (c *QdrantClient) Search(collection string, vector []float32, limit int, th
 	}
 
 	var result struct {
-		Result []QdrantSearchResult `json:"result"`
+		Result []StoreSearchResult `json:"result"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err

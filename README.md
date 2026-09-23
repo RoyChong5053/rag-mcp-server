@@ -6,7 +6,8 @@ An independent Retrieval-Augmented Generation engine exposed via the Model Conte
 
 RAG shouldn't be locked inside a single chat frontend. Your "memory" should be a shared service that any agent can access. This project decouples RAG from SillyTavern and exposes it as a standard MCP toolset, backed by:
 
-- **Qdrant** for vector storage
+- **Pluggable vector storage**: Qdrant for full deployments, or a local
+  file-based Vectra-compatible store for lightweight/portable setups
 - **one-api** for high-availability embedding and reranking (6-device fan-out)
 - **MCP Streamable HTTP** for universal client compatibility
 
@@ -24,11 +25,11 @@ RAG shouldn't be locked inside a single chat frontend. Your "memory" should be a
 │  Tools: search, store, delete, list         │
 └──────┬──────────────────────┬───────────────┘
        │                      │
-  ┌────▼─────┐    ┌──────────▼──────────────┐
-  │ Qdrant   │    │ one-api (:3000)          │
-  │ (:6333)  │    │ /v1/embeddings (fan-out) │
-  │          │    │ /v1/rerank   (fan-out)   │
-  └──────────┘    └─────────────────────────┘
+  ┌────▼──────────────┐  ┌────▼─────────────────┐
+  │ VectorStore       │  │ one-api (:3000)      │
+  │ Qdrant :6333  or  │  │ /v1/embeddings       │
+  │ Vectra/ (files)   │  │ /v1/rerank (fan-out) │
+  └───────────────────┘  └──────────────────────┘
 ```
 
 ## Quick Start
@@ -59,6 +60,14 @@ admin:                    # management UI + JSON API
 
 registry_path: "collections.json"
 settings_path: "settings.json"
+docs_dir: "docs"
+
+# Vector backend: "qdrant" (default) or "vectra" (local files).
+# A collection can override the default via its registry `backend` field.
+storage:
+  backend: "qdrant"
+  vectra_dir: "Vectra"
+  # memory_dir: "docs/memory"   # store_memory raw text (default <docs_dir>/memory)
 
 qdrant:
   host: "localhost"
@@ -94,16 +103,46 @@ Edit these from the dashboard's **Search Defaults** panel; `config.yaml` only
 seeds the initial values. A default collection that does not exist is rejected
 loudly, so a typo can never silently widen searches into a global scan.
 
+## Storage Backends
+
+`storage.backend` selects the global default; a collection can override it with
+its registry `backend` field (dashboard "Backend" selector or
+`set_collection_meta`). Both backends share one `VectorStore` interface, so
+search/index/delete behave identically.
+
+| Backend | Storage | Best for |
+|---------|---------|----------|
+| `qdrant` | Qdrant REST (`:6333`) | large corpora, shared deployments |
+| `vectra` | Local JSON files under `vectra_dir/` | lightweight/portable, no server |
+
+The file backend mirrors the Vectra / SillyTavern on-disk shape:
+
+```
+Vectra/<collection>/catalog.json
+Vectra/<collection>/<source_key>/index.json
+```
+
+`index.json` is `{version, metadata_config, items:[{id, metadata, vector, norm}]}`.
+Source keys mirror the `docs/` tree, so `docs/chat_history/Leer.md` becomes
+`Vectra/<collection>/chat_history/Leer.md/index.json`. Writes are serialized and
+land atomically (temp + rename). It is only ever written inside our own
+`Vectra/` root; SillyTavern's `data/.../vectors` is never touched.
+
+`store_memory` now persists the raw text under `<memory_dir>/<YYYY-MM-DD>/`
+before indexing, in **both** backends, so memory writes have an on-disk source
+document (browsable in the data bank) instead of living only in the vector
+store.
+
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `search_memory` | Semantic search. Optional `collection_id` (defaults to the configured default collection, else all enabled); optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
-| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Optional `collection_id` (defaults to the configured default collection; errors loudly if there is none) |
+| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Raw text is persisted on disk by date, then indexed. Optional `collection_id` (defaults to the configured default collection; errors loudly if there is none) |
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
 | `collection_info` | Live stats + registry metadata, one or all |
-| `set_collection_meta` | Display name, tags, consumers, enabled flag |
+| `set_collection_meta` | Display name, tags, consumers, enabled flag, backend |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy |
 
@@ -123,6 +162,7 @@ Collection metadata lives in `collections.json` (server-local, gitignored).
 - Upload to `docs/staging/`, zero-token chunk preview, index into new/existing
   collection with per-job `chunk_size`/`overlap_percent` (append or rebuild)
 - Background jobs (max 2 concurrent, search never blocked) with sidebar progress
+  and a **clear** button for finished jobs
 - Provenance snapshot per collection: chunk size/overlap, embed model, source sha
 
 ## Register with one-api

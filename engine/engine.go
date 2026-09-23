@@ -18,18 +18,25 @@ import (
 
 // Engine is the core RAG engine
 type Engine struct {
-	qdrant    *QdrantClient
-	embedding *EmbeddingClient
-	rerank    *RerankClient
-	config    *EngineConfig
-	registry  *registry.Registry
-	settings  *settings.Store
+	stores         map[string]VectorStore
+	defaultBackend string
+	embedding      *EmbeddingClient
+	rerank         *RerankClient
+	config         *EngineConfig
+	registry       *registry.Registry
+	settings       *settings.Store
+	docsDir        string
+	memoryDir      string
 }
 
 // EngineConfig holds configuration for the engine
 type EngineConfig struct {
 	QdrantHost      string
 	QdrantPort      int
+	VectraDir       string
+	Backend         string
+	DocsDir         string
+	MemoryDir       string
 	OneAPIBaseURL   string
 	OneAPIBackupURL string
 	EmbedModel      string
@@ -70,9 +77,25 @@ type CollectionInfo struct {
 // A corrupt registry file is a loud error; a missing one starts empty.
 // A nil settings store falls back to one seeded from the engine config.
 func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
-	qdrant := NewQdrantClient(config.QdrantHost, config.QdrantPort)
 	embedding := NewEmbeddingClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.EmbedModel, config.APIKey)
 	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxChars, config.DocMaxChars)
+
+	stores := map[string]VectorStore{
+		BackendQdrant: NewQdrantClient(config.QdrantHost, config.QdrantPort),
+	}
+	vectraDir := config.VectraDir
+	if vectraDir == "" {
+		vectraDir = "Vectra"
+	}
+	stores[BackendVectra] = NewFileStore(vectraDir, config.DocsDir)
+
+	backend := config.Backend
+	if backend == "" {
+		backend = BackendQdrant
+	}
+	if _, ok := stores[backend]; !ok {
+		return nil, fmt.Errorf("unknown storage backend %q (want %s or %s)", backend, BackendQdrant, BackendVectra)
+	}
 
 	regPath := config.RegistryPath
 	if regPath == "" {
@@ -95,12 +118,15 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	}
 
 	e := &Engine{
-		qdrant:    qdrant,
-		embedding: embedding,
-		rerank:    rerank,
-		config:    config,
-		registry:  reg,
-		settings:  st,
+		stores:         stores,
+		defaultBackend: backend,
+		embedding:      embedding,
+		rerank:         rerank,
+		config:         config,
+		registry:       reg,
+		settings:       st,
+		docsDir:        config.DocsDir,
+		memoryDir:      config.MemoryDir,
 	}
 	// Rerank truncation follows runtime settings without a restart.
 	rerank.SetLimitsProvider(func() (int, int) {
@@ -115,9 +141,77 @@ func (e *Engine) Settings() *settings.Store {
 	return e.settings
 }
 
+// DefaultBackend returns the configured global storage backend.
+func (e *Engine) DefaultBackend() string {
+	return e.defaultBackend
+}
+
+// storeFor resolves the backend for a collection: an explicit per-collection
+// registry `backend` wins, otherwise the global default. A name without a
+// registry entry (new collection) uses the default backend.
+func (e *Engine) storeFor(name string) VectorStore {
+	if name != "" {
+		if en := e.registry.Get(name); en != nil && en.Backend != "" {
+			if s, ok := e.stores[en.Backend]; ok {
+				return s
+			}
+		}
+	}
+	return e.stores[e.defaultBackend]
+}
+
+// storeCollection is one listed collection plus the backend it lives in.
+type storeCollection struct {
+	Name       string
+	ChunkCount int
+	Backend    string
+}
+
+// listAllStoresDetailed lists collections across every backend, tagging each
+// with the backend that holds it. A name present in both stores appears twice
+// (qdrant before vectra), letting callers pick the authoritative one.
+func (e *Engine) listAllStoresDetailed() []storeCollection {
+	var out []storeCollection
+	for _, backend := range []string{BackendQdrant, BackendVectra} {
+		s, ok := e.stores[backend]
+		if !ok {
+			continue
+		}
+		cols, err := s.ListCollections()
+		if err != nil {
+			log.Printf("ListCollections on %s failed: %v", backend, err)
+			continue
+		}
+		for _, c := range cols {
+			out = append(out, storeCollection{Name: c.Name, ChunkCount: c.ChunkCount, Backend: backend})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].Backend < out[j].Backend
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// listAllStores merges collection listings to one entry per name.
+func (e *Engine) listAllStores() ([]StoreCollectionInfo, error) {
+	seen := map[string]bool{}
+	var out []StoreCollectionInfo
+	for _, c := range e.listAllStoresDetailed() {
+		if seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		out = append(out, StoreCollectionInfo{Name: c.Name, ChunkCount: c.ChunkCount})
+	}
+	return out, nil
+}
+
 // CollectionExists reports whether a collection is present in Qdrant.
 func (e *Engine) CollectionExists(name string) (bool, error) {
-	return e.qdrant.CollectionExists(name)
+	return e.storeFor(name).CollectionExists(name)
 }
 
 // Registry exposes the collection registry for management tools.
@@ -156,7 +250,7 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	if scope != "" {
-		exists, err := e.qdrant.CollectionExists(scope)
+		exists, err := e.storeFor(scope).CollectionExists(scope)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check collection '%s': %w", scope, err)
 		}
@@ -207,7 +301,7 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 				return nil, fmt.Errorf("collection '%s' is disabled", name)
 			}
 		}
-		results, err := e.qdrant.Search(name, queryVector, recallCount, threshold)
+		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold)
 		if err != nil {
 			if explicit {
 				return nil, fmt.Errorf("qdrant search failed on '%s': %w", name, err)
@@ -248,17 +342,17 @@ func (e *Engine) resolveTargets(collections []string) ([]string, bool) {
 	if enabled := e.registry.EnabledNames(); len(enabled) > 0 {
 		var targets []string
 		for _, name := range enabled {
-			exists, err := e.qdrant.CollectionExists(name)
+			exists, err := e.storeFor(name).CollectionExists(name)
 			if err != nil || !exists {
-				log.Printf("Registry drift: '%s' enabled but missing in Qdrant, skipped", name)
+				log.Printf("Registry drift: '%s' enabled but missing in its store, skipped", name)
 				continue
 			}
 			targets = append(targets, name)
 		}
 		return targets, false
 	}
-	// ...or every Qdrant collection when the registry is empty.
-	all, err := e.qdrant.ListCollections()
+	// ...or every stored collection when the registry is empty.
+	all, err := e.listAllStores()
 	if err != nil {
 		log.Printf("ListCollections failed: %v", err)
 		return nil, false
@@ -270,7 +364,7 @@ func (e *Engine) resolveTargets(collections []string) ([]string, bool) {
 	return targets, false
 }
 
-func qdrantToSearchResult(r QdrantSearchResult, collection string) SearchResult {
+func qdrantToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	text, _ := r.Payload["text"].(string)
 	source, _ := r.Payload["source"].(string)
 	chunkIndex, _ := r.Payload["chunk_index"].(float64)
@@ -320,7 +414,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		recallCount = st.RerankRecall
 	}
 
-	kept, err := e.qdrant.Search(collection, queryVector, recallCount, threshold)
+	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold)
 	if err != nil {
 		return nil, fmt.Errorf("qdrant search failed: %w", err)
 	}
@@ -333,7 +427,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 
 	var killed []SearchResult
 	if threshold > 0 {
-		all, err := e.qdrant.Search(collection, queryVector, recallCount, 0)
+		all, err := e.storeFor(collection).Search(collection, queryVector, recallCount, 0)
 		if err == nil {
 			for _, r := range all {
 				if !keptIDs[r.ID] {
@@ -469,12 +563,12 @@ func (e *Engine) IndexDocumentWithOptions(path string, collectionID string, meta
 // IDs, so plain upsert would leave stale chunks behind. Registry metadata
 // (display name, tags, consumers) is preserved.
 func (e *Engine) ReindexDocument(path string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
-	exists, err := e.qdrant.CollectionExists(collectionID)
+	exists, err := e.storeFor(collectionID).CollectionExists(collectionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check collection: %w", err)
 	}
 	if exists {
-		if err := e.qdrant.DeleteCollection(collectionID); err != nil {
+		if err := e.storeFor(collectionID).DeleteCollection(collectionID); err != nil {
 			return nil, fmt.Errorf("failed to purge collection: %w", err)
 		}
 		log.Printf("Purged collection '%s' for re-index", collectionID)
@@ -507,7 +601,10 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 // store_memory tool). It is the write-side counterpart of SearchDefault: an
 // omitted collection_id resolves to settings.default_collection, and having no
 // default is a loud error rather than a silent write to a random bucket.
-// Unlike a file-backed corpus this content lives only inside Qdrant.
+//
+// The raw text is first persisted under <memoryDir>/<YYYY-MM-DD>/ so the file
+// backend has a source document and Qdrant deployments keep an on-disk copy;
+// indexing then runs through the normal document path.
 func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]string) (*IndexResult, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("text is required")
@@ -519,7 +616,43 @@ func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]stri
 	if scope == "" {
 		return nil, fmt.Errorf("no collection_id given and no default_collection configured; pass collection_id or set a default in the management dashboard")
 	}
-	return e.IndexText(text, scope, metadata)
+
+	path, err := e.writeMemoryRaw(text)
+	if err != nil {
+		return nil, fmt.Errorf("failed to persist memory raw file: %w", err)
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	metadata["kind"] = "store_memory"
+	if metadata["collection"] == "" {
+		metadata["collection"] = scope
+	}
+	return e.IndexDocument(path, scope, metadata)
+}
+
+// writeMemoryRaw persists ad-hoc memory text under <memoryDir>/<date>/.
+// The content hash is part of the filename so two writes in the same second
+// never clobber each other.
+func (e *Engine) writeMemoryRaw(text string) (string, error) {
+	base := e.memoryDir
+	if base == "" {
+		if e.docsDir != "" {
+			base = filepath.Join(e.docsDir, "memory")
+		} else {
+			base = filepath.Join("docs", "memory")
+		}
+	}
+	now := time.Now()
+	sum := sha256.Sum256([]byte(text))
+	dir := filepath.Join(base, now.Format("2006-01-02"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%s-%s.md", now.Format("150405"), hex.EncodeToString(sum[:])[:8])
+	path := filepath.Join(dir, name)
+	return path, os.WriteFile(path, []byte(text), 0o644)
 }
 
 // EnsureCollection creates a collection in Qdrant if it does not exist yet, so
@@ -530,14 +663,14 @@ func (e *Engine) EnsureCollection(name string) error {
 	if name == "" {
 		return fmt.Errorf("collection name is required")
 	}
-	exists, err := e.qdrant.CollectionExists(name)
+	exists, err := e.storeFor(name).CollectionExists(name)
 	if err != nil {
 		return fmt.Errorf("failed to check collection '%s': %w", name, err)
 	}
 	if exists {
 		return nil
 	}
-	if err := e.qdrant.CreateCollection(name); err != nil {
+	if err := e.storeFor(name).CreateCollection(name); err != nil {
 		return fmt.Errorf("failed to create collection '%s': %w", name, err)
 	}
 	return nil
@@ -590,7 +723,7 @@ func (e *Engine) recordIndex(collectionID string, prov Provenance) {
 // without re-embedding. Used to add source_file/indexed_at to chunks
 // indexed before payload enrichment existed.
 func (e *Engine) BackfillPayload(collectionID string, payload map[string]any) error {
-	return e.qdrant.SetPayload(collectionID, payload, nil)
+	return e.storeFor(collectionID).SetPayload(collectionID, payload, nil)
 }
 
 func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
@@ -650,12 +783,13 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 	}
 
 	// Ensure collection exists
-	exists, err := e.qdrant.CollectionExists(collectionID)
+	store := e.storeFor(collectionID)
+	exists, err := store.CollectionExists(collectionID)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to check collection: %w", err)
 	}
 	if !exists {
-		if err := e.qdrant.CreateCollection(collectionID); err != nil {
+		if err := store.CreateCollection(collectionID); err != nil {
 			return nil, used, fmt.Errorf("failed to create collection: %w", err)
 		}
 	}
@@ -668,7 +802,7 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 		if end > len(points) {
 			end = len(points)
 		}
-		if err := e.qdrant.UpsertPoints(collectionID, points[start:end]); err != nil {
+		if err := store.UpsertPoints(collectionID, points[start:end]); err != nil {
 			return &IndexResult{ChunksIndexed: start, Collection: collectionID}, used, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
 		}
 		if prog != nil {
@@ -685,20 +819,21 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 
 // DeleteMemory deletes points from a collection
 func (e *Engine) DeleteMemory(collectionID string, filter map[string]any) (int, error) {
+	store := e.storeFor(collectionID)
 	// Get count before delete
-	info, err := e.qdrant.GetCollectionInfo(collectionID)
+	info, err := store.GetCollectionInfo(collectionID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get collection info: %w", err)
 	}
 	beforeCount := info.ChunkCount
 
 	// Delete points
-	if err := e.qdrant.DeletePoints(collectionID, filter); err != nil {
+	if err := store.DeletePoints(collectionID, filter); err != nil {
 		return 0, fmt.Errorf("failed to delete points: %w", err)
 	}
 
 	// Get count after delete
-	info, err = e.qdrant.GetCollectionInfo(collectionID)
+	info, err = store.GetCollectionInfo(collectionID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get collection info after delete: %w", err)
 	}
@@ -707,10 +842,11 @@ func (e *Engine) DeleteMemory(collectionID string, filter map[string]any) (int, 
 	return beforeCount - afterCount, nil
 }
 
-// CollectionDetail merges live Qdrant stats with registry metadata.
+// CollectionDetail merges live store stats with registry metadata.
 type CollectionDetail struct {
 	ID           int      `json:"id"`
 	Name         string   `json:"name"`
+	Backend      string   `json:"backend"`
 	ChunkCount   int      `json:"chunk_count"`
 	Exists       bool     `json:"exists"`
 	DisplayName  string   `json:"display_name,omitempty"`
@@ -727,25 +863,32 @@ type CollectionDetail struct {
 	ChunkOverlap int      `json:"chunk_overlap,omitempty"`
 }
 
-// DescribeCollections returns details for one collection, or all Qdrant
-// collections merged with registry entries when name is empty.
+// DescribeCollections returns details for one collection, or all collections
+// across every backend merged with registry entries when name is empty.
 // Registry-only entries (orphans: meta without vectors) are included
 // with Exists=false so drift is visible instead of silent.
 func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
-	all, err := e.qdrant.ListCollections()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list collections: %w", err)
-	}
+	detailed := e.listAllStoresDetailed()
 	reg := e.registry.List()
 
 	byName := make(map[string]*CollectionDetail)
-	for _, c := range all {
-		byName[c.Name] = &CollectionDetail{Name: c.Name, ChunkCount: c.ChunkCount, Exists: true, Enabled: true}
+	for _, c := range detailed {
+		d, ok := byName[c.Name]
+		if !ok {
+			byName[c.Name] = &CollectionDetail{Name: c.Name, Backend: c.Backend, ChunkCount: c.ChunkCount, Exists: true, Enabled: true}
+			continue
+		}
+		// Also present in another backend: an explicit registry backend wins,
+		// otherwise the first (qdrant) listing stays authoritative.
+		if en := reg[c.Name]; en != nil && en.Backend != "" && c.Backend == en.Backend {
+			d.Backend = c.Backend
+			d.ChunkCount = c.ChunkCount
+		}
 	}
 	for n, en := range reg {
 		d, ok := byName[n]
 		if !ok {
-			d = &CollectionDetail{Name: n, Exists: false, Enabled: en.Enabled}
+			d = &CollectionDetail{Name: n, Backend: en.Backend, Exists: false, Enabled: en.Enabled}
 			byName[n] = d
 		}
 		d.DisplayName = en.DisplayName
@@ -760,12 +903,22 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		d.UpdatedAt = en.UpdatedAt
 		d.ChunkSize = en.Chunk.Size
 		d.ChunkOverlap = en.Chunk.Overlap
+		if en.Backend != "" {
+			d.Backend = en.Backend
+		}
+	}
+	// Fill any unset backend with the effective default so the UI never shows
+	// a blank cell.
+	for _, d := range byName {
+		if d.Backend == "" {
+			d.Backend = e.defaultBackend
+		}
 	}
 
 	if name != "" {
 		d, ok := byName[name]
 		if !ok {
-			return nil, fmt.Errorf("collection '%s' not found in Qdrant or registry", name)
+			return nil, fmt.Errorf("collection '%s' not found in any store or registry", name)
 		}
 		d.ID = CollectionNumID(d.Name)
 		return []CollectionDetail{*d}, nil
@@ -782,6 +935,15 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 	return out, nil
 }
 
+// backendOf reports the effective backend for a collection (registry override
+// or global default), used for display.
+func (e *Engine) backendOf(name string) string {
+	if en := e.registry.Get(name); en != nil && en.Backend != "" {
+		return en.Backend
+	}
+	return e.defaultBackend
+}
+
 // CollectionNumID derives a stable, human-friendly numeric id from a
 // collection name. It is cosmetic (a row label in the dashboard) so it needs
 // no registry migration; it is not guaranteed unique.
@@ -796,13 +958,21 @@ type CollectionMetaUpdate struct {
 	Tags        *[]string
 	Consumers   *[]string
 	Enabled     *bool
+	Backend     *string
 }
 
 // SetCollectionMeta updates registry metadata. Allowed for collections that
-// don't exist in Qdrant yet (aspirational entry); callers are told.
+// don't exist yet (aspirational entry); callers are told.
 func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("collection_id is required")
+	}
+	if meta.Backend != nil {
+		b := strings.TrimSpace(*meta.Backend)
+		if b != "" && b != BackendQdrant && b != BackendVectra {
+			return fmt.Errorf("unknown backend %q (want %s or %s)", b, BackendQdrant, BackendVectra)
+		}
+		meta.Backend = &b
 	}
 	return e.registry.Update(name, func(en *registry.Entry) {
 		if meta.DisplayName != nil {
@@ -820,11 +990,14 @@ func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error
 		if meta.Enabled != nil {
 			en.Enabled = *meta.Enabled
 		}
+		if meta.Backend != nil {
+			en.Backend = *meta.Backend
+		}
 	})
 }
 
-// DeleteCollection drops the Qdrant collection and its registry entry.
-// Refuses without confirm=true: this is irreversible.
+// DeleteCollection drops the collection from whichever backend holds it and
+// removes its registry entry. Refuses without confirm=true: irreversible.
 func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("collection_id is required")
@@ -832,14 +1005,15 @@ func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	if !confirm {
 		return fmt.Errorf("refused: pass confirm=true to permanently delete collection '%s'", name)
 	}
-	exists, err := e.qdrant.CollectionExists(name)
+	store := e.storeFor(name)
+	exists, err := store.CollectionExists(name)
 	if err != nil {
 		return fmt.Errorf("failed to check collection: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("collection '%s' does not exist in Qdrant", name)
+		return fmt.Errorf("collection '%s' does not exist in backend '%s'", name, e.backendOf(name))
 	}
-	if err := e.qdrant.DeleteCollection(name); err != nil {
+	if err := store.DeleteCollection(name); err != nil {
 		return fmt.Errorf("failed to delete collection: %w", err)
 	}
 	if err := e.registry.Delete(name); err != nil {
@@ -849,9 +1023,9 @@ func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	return nil
 }
 
-// ListCollections lists all collections
+// ListCollections lists all collections across every backend.
 func (e *Engine) ListCollections() ([]CollectionInfo, error) {
-	collections, err := e.qdrant.ListCollections()
+	collections, err := e.listAllStores()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list collections: %w", err)
 	}
@@ -867,15 +1041,21 @@ func (e *Engine) ListCollections() ([]CollectionInfo, error) {
 	return result, nil
 }
 
-// HealthCheck checks all components
+// HealthCheck checks all components. Every configured backend is reported with
+// its own key (qdrant/vectra) so a disabled backend is visible too.
 func (e *Engine) HealthCheck() map[string]string {
 	status := make(map[string]string)
 
-	// Check Qdrant
-	if err := e.qdrant.Ping(); err != nil {
-		status["qdrant"] = fmt.Sprintf("error: %v", err)
-	} else {
-		status["qdrant"] = "ok"
+	for _, backend := range []string{BackendQdrant, BackendVectra} {
+		s, ok := e.stores[backend]
+		if !ok {
+			continue
+		}
+		if err := s.Ping(); err != nil {
+			status[backend] = fmt.Sprintf("error: %v", err)
+		} else {
+			status[backend] = "ok"
+		}
 	}
 
 	// Check embedding

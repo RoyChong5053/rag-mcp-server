@@ -8,6 +8,17 @@ An independent RAG (Retrieval-Augmented Generation) engine exposed via MCP (Mode
 
 ---
 
+## Dual backend (2026-09-23)
+
+- [x] `VectorStore` interface; Qdrant and file-based Vectra-compatible backends
+- [x] `storage.backend` global default + per-collection registry `backend` override
+- [x] `Vectra/<collection>/<source_key>/index.json` (ST-compatible shape), atomic writes
+- [x] `store_memory` persists raw text under `docs/memory/<date>/` in both backends
+- [x] Dashboard: backend column/selector, jobs "clear" button
+- [ ] qdrant → vectra export helper (optional)
+
+---
+
 ## Architecture
 
 ```

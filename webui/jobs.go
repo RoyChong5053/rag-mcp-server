@@ -162,3 +162,23 @@ func (m *Manager) List() []*Job {
 	}
 	return out
 }
+
+// Clear removes finished jobs (done/error) and returns how many were dropped.
+// Queued/running jobs are kept so an in-flight index is never hidden.
+func (m *Manager) Clear() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := make([]string, 0, len(m.order))
+	removed := 0
+	for _, id := range m.order {
+		j := m.jobs[id]
+		if j != nil && (j.State == "queued" || j.State == "running") {
+			kept = append(kept, id)
+			continue
+		}
+		delete(m.jobs, id)
+		removed++
+	}
+	m.order = kept
+	return removed
+}

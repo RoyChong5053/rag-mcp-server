@@ -26,6 +26,7 @@ type Entry struct {
 	Tags         []string    `json:"tags"`
 	Enabled      bool        `json:"enabled"`
 	Consumers    []string    `json:"consumers"`
+	Backend      string      `json:"backend,omitempty"`
 	SourceFile   string      `json:"source_file"`
 	SourceSHA256 string      `json:"source_sha256"`
 	EmbedModel   string      `json:"embed_model"`
