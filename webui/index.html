@@ -6,12 +6,24 @@
 <title>RAG Console</title>
 <style>
 :root { color-scheme: dark; }
-body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 16px 300px 16px 16px; max-width: 1200px; }
+body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 0; }
+#layout { display: flex; align-items: flex-start; gap: 18px; padding: 16px; max-width: 1600px; margin: 0 auto; }
+#main { flex: 1 1 auto; min-width: 0; }
 h1 { font-size: 20px; margin: 0 0 4px; display: inline; }
 #health { color: #888; font-size: 13px; margin: 4px 0 16px; }
 h2 { font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 4px; margin-top: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; vertical-align: top; }
+.table-wrap { overflow-x: auto; }
+#tbl { table-layout: fixed; }
+#tbl th:nth-child(1) { width: 62px; }
+#tbl th:nth-child(3) { width: 68px; }
+#tbl th:nth-child(4) { width: 78px; }
+#tbl th:nth-child(5) { width: 84px; }
+#tbl th:nth-child(6) { width: 120px; }
+#tbl th:nth-child(7) { width: 200px; }
+#tbl th:nth-child(8) { width: 74px; }
+#ftbl { min-width: 560px; }
 tr.sel { background: #1e2a3a; }
 tr.orphan td:first-child { color: #e8a33d; }
 tr.disabled td:first-child { color: #666; text-decoration: line-through; }
@@ -36,8 +48,12 @@ input[type=number] { width: 110px; }
 .prov { font-size: 13px; color: #888; }
 .prov b { color: #bbb; font-weight: normal; }
 /* sidebar */
-#side { position: fixed; top: 0; right: 0; width: 270px; height: 100%; background: #161616; border-left: 1px solid #333; padding: 12px; overflow-y: auto; box-sizing: border-box; }
+#side { flex: 0 0 270px; position: sticky; top: 16px; max-height: calc(100vh - 32px); background: #161616; border: 1px solid #333; border-radius: 8px; padding: 12px; overflow-y: auto; box-sizing: border-box; }
 #side h2 { margin-top: 0; }
+@media (max-width: 900px) {
+  #layout { flex-direction: column; }
+  #side { flex: 0 0 auto; position: static; width: 100%; max-height: none; }
+}
 .job { border: 1px solid #444; border-radius: 5px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
 .job .bar { height: 6px; background: #333; border-radius: 3px; margin: 6px 0; }
 .job .bar i { display: block; height: 100%; background: #6af; border-radius: 3px; }
@@ -57,15 +73,19 @@ tbody tr { transition: background .08s; }
 tbody tr:hover { background: #1a2028; }
 tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 .col-id { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7fd6a6; background: #12211a; border: 1px solid #2c5137; border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
-.cname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; word-break: break-word; }
 .dim { color: #7c8791; }
 .num { text-align: right; font-variant-numeric: tabular-nums; color: #cfe; }
+.prov { overflow-wrap: anywhere; }
 .b-on { color: #8d8; border-color: #484; }
+.b-vec { color: #9cc; border-color: #488; }
 .b-off { color: #777; }
 .b-orphan { color: #e8a33d; border-color: #a80; }
 </style>
 </head>
 <body>
+<div id="layout">
+<main id="main">
 <h1>RAG Console</h1>
 <button onclick="backup()" title="download collections.json">backup registry</button>
 <div id="health">loading…</div>
@@ -74,7 +94,12 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend</span></div>
   <div id="settings-panel">
   <div class="row">
-    <span>default collection <select id="s-col"></select></span>
+    <span>active backend <select id="s-active" title="which database the default scope uses"><option value="">(config default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></span>
+    <span>qdrant default <select id="s-col-qdrant"></select></span>
+    <span>vectra default <select id="s-col-vectra"></select></span>
+    <label style="display:inline" title="when qdrant is unreachable, fall back to the vectra default"><input type="checkbox" id="s-failover"> failover to vectra</label>
+  </div>
+  <div class="row">
     <span>top_k <input type="number" id="s-topk" min="1" max="100"></span>
     <span>threshold <input type="number" id="s-thr" min="0" max="1" step="0.05"></span>
     <label style="display:inline"><input type="checkbox" id="s-rerank"> rerank</label>
@@ -95,7 +120,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <button onclick="newCollection()">＋ New</button>
     <button onclick="load()">refresh</button>
   </div>
-  <table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Backend</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="table-wrap"><table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Backend</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div id="detail">
@@ -135,7 +160,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <input type="file" id="up-file">
     <button onclick="upload()">Upload to staging/</button>
   </div>
-  <table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table>
+  <div class="table-wrap"><table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div id="index-panel">
@@ -159,10 +184,12 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div class="panel-head"><h2>Audit log</h2><span class="spacer"></span><button onclick="loadAudit()">refresh</button></div>
   <pre id="audit"></pre>
 </div>
+</main>
 
-<div id="side">
+<aside id="side">
   <h2 style="display:flex;align-items:center;gap:8px">Jobs <span class="spacer" style="flex:1"></span> <button onclick="clearJobs()" title="remove finished jobs">clear</button></h2>
   <div id="jobs"><small style="color:#666">no jobs yet</small></div>
+</aside>
 </div>
 
 <script>
@@ -193,7 +220,7 @@ async function load() {
   document.getElementById('col-list').innerHTML = cols.map(c => '<option value="' + esc(c.name) + '">').join('');
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
-  document.getElementById('col-count').textContent = cols.length + ' total · ' + cols.filter(c => c.exists).length + ' in Qdrant';
+  document.getElementById('col-count').textContent = cols.length + ' total · ' + cols.filter(c => c.exists).length + ' present';
   for (const c of cols) {
     const tr = document.createElement('tr');
     if (cur === c.name) tr.className = 'sel';
@@ -208,7 +235,7 @@ async function load() {
     tr.innerHTML = '<td><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
       '<td><span class="cname">' + esc(c.name) + '</span>' + (c.display_name ? '<br><small class="dim">' + esc(c.display_name) + '</small>' : '') + '</td>' +
       '<td class="num">' + (c.exists ? c.chunk_count : '—') + '</td>' +
-      '<td><span class="badge b-on">' + esc(c.backend || '?') + '</span></td>' +
+      '<td><span class="badge ' + (c.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(c.backend || '?') + '</span></td>' +
       '<td>' + status + '</td>' +
       '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
       '<td class="prov">' + prov + '</td>';
@@ -314,13 +341,21 @@ async function testRecall() {
 function backup() { window.location = '/api/registry/backup'; }
 
 /* ---- search defaults ---- */
+function fillColSelect(id, backend, allLabel) {
+  const sel = document.getElementById(id);
+  const cols = colsCache.filter(c => (c.backend || 'qdrant') === backend);
+  sel.innerHTML = '<option value="">' + allLabel + '</option>' + cols.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+}
 async function loadSettings() {
   const st = document.getElementById('s-status');
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { st.textContent = 'settings failed: ' + e.message; return; }
-  const sel = document.getElementById('s-col');
-  sel.innerHTML = '<option value="">(all enabled)</option>' + colsCache.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
-  sel.value = s.default_collection || '';
+  fillColSelect('s-col-qdrant', 'qdrant', '(search all enabled)');
+  fillColSelect('s-col-vectra', 'vectra', '(no vectra default)');
+  document.getElementById('s-active').value = s.active_backend || '';
+  document.getElementById('s-col-qdrant').value = s.default_collection_qdrant || '';
+  document.getElementById('s-col-vectra').value = s.default_collection_vectra || '';
+  document.getElementById('s-failover').checked = s.failover_enabled !== false;
   document.getElementById('s-topk').value = s.default_top_k || 10;
   document.getElementById('s-thr').value = (s.default_threshold == null ? 0.25 : s.default_threshold);
   document.getElementById('s-rerank').checked = !!s.rerank_enabled;
@@ -334,7 +369,10 @@ async function saveSettings() {
   st.textContent = 'saving…';
   try {
     await api('POST', '/api/settings', {
-      default_collection: document.getElementById('s-col').value,
+      active_backend: document.getElementById('s-active').value,
+      default_collection_qdrant: document.getElementById('s-col-qdrant').value,
+      default_collection_vectra: document.getElementById('s-col-vectra').value,
+      failover_enabled: document.getElementById('s-failover').checked,
       default_top_k: +document.getElementById('s-topk').value || 10,
       default_threshold: +document.getElementById('s-thr').value,
       rerank_enabled: document.getElementById('s-rerank').checked,

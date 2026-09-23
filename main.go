@@ -29,13 +29,14 @@ func main() {
 		settingsPath = "settings.json"
 	}
 	settingsStore := settings.New(settingsPath, settings.Settings{
-		DefaultCollection: "",
-		DefaultTopK:       10,
-		DefaultThreshold:  0.25,
-		RerankEnabled:     cfg.Rerank.Enabled,
-		RerankRecall:      cfg.Rerank.Recall,
-		QueryMaxChars:     cfg.Rerank.QueryMaxChars,
-		DocMaxChars:       cfg.Rerank.DocMaxChars,
+		ActiveBackend:    "",
+		DefaultTopK:      10,
+		DefaultThreshold: 0.25,
+		RerankEnabled:    cfg.Rerank.Enabled,
+		RerankRecall:     cfg.Rerank.Recall,
+		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
+		DocMaxChars:      cfg.Rerank.DocMaxChars,
+		FailoverEnabled:  true,
 	})
 
 	// Resolve the file-backed store dir (and optional memory dir) against the

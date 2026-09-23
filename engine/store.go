@@ -1,5 +1,45 @@
 package engine
 
+import "errors"
+
+// backendUnavailableError marks a backend as unreachable (connection refused,
+// timeout, 5xx). The engine uses IsUnavailable to decide whether a request may
+// fail over to another backend. Logical errors (404 collection missing, 400
+// bad request) are deliberately NOT wrapped this way.
+type backendUnavailableError struct{ err error }
+
+func (e *backendUnavailableError) Error() string { return e.err.Error() }
+func (e *backendUnavailableError) Unwrap() error { return e.err }
+
+func unavailable(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *backendUnavailableError
+	if errors.As(err, &already) {
+		return err
+	}
+	return &backendUnavailableError{err: err}
+}
+
+// IsUnavailable reports whether err means the backend could not be reached, as
+// opposed to a logical error such as a missing collection.
+func IsUnavailable(err error) bool {
+	var u *backendUnavailableError
+	return errors.As(err, &u)
+}
+
+// otherBackend returns the counterpart backend used for same-name failover.
+func otherBackend(b string) string {
+	switch b {
+	case BackendQdrant:
+		return BackendVectra
+	case BackendVectra:
+		return BackendQdrant
+	}
+	return ""
+}
+
 // VectorStore is the storage surface shared by every backend (Qdrant REST,
 // local file-based Vectra-compatible store). The RAG pipeline is written
 // against this interface so a deployment can pick a backend without touching

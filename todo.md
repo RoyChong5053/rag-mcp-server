@@ -17,6 +17,19 @@ An independent RAG (Retrieval-Augmented Generation) engine exposed via MCP (Mode
 - [x] Dashboard: backend column/selector, jobs "clear" button
 - [ ] qdrant → vectra export helper (optional)
 
+## Failover + dual defaults (2026-09-24)
+
+- [x] settings: `active_backend`, `default_collection_qdrant`,
+      `default_collection_vectra`, `failover_enabled`; legacy
+      `default_collection` migrates to the qdrant default
+- [x] engine: `IsUnavailable` classifier (conn refused/timeout/5xx) + 15s health
+      cache so a dead qdrant doesn't cost a timeout per call
+- [x] default scope: active backend's default, auto-fallback to vectra default
+- [x] explicit collection_id: same-name fallback when its backend is down
+- [x] results tagged with `[backend]`; health_check reports active backend
+- [x] responsive dashboard: table scroll-wrap, long-name wrapping, flex sidebar
+- [ ] optional: "re-index docs/memory into qdrant" catch-up job after an outage
+
 ---
 
 ## Architecture

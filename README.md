@@ -93,15 +93,23 @@ rerank:
 chunking). A separate `settings.json` holds **runtime search defaults** that all
 frontends share and that take effect immediately, without a restart:
 
-- `default_collection` — scope used when a caller omits `collection_id`
+- `active_backend` — which backend's default collection the omitted-`collection_id`
+  scope uses (`qdrant`|`vectra`; empty = follow `storage.backend`). Search/default
+  scope only — it never changes where new named collections are created
+- `default_collection_qdrant` — qdrant scope for calls that omit `collection_id`
   (empty = search all enabled collections)
+- `default_collection_vectra` — vectra scope; also the failover target when qdrant
+  is unreachable
+- `failover_enabled` — fall back to the vectra default on a qdrant outage
 - `default_top_k`, `default_threshold`
 - `rerank_enabled`, `rerank_recall` (vector over-fetch before reranking)
 - `query_max_chars`, `doc_max_chars` (rerank truncation, runes)
 
 Edit these from the dashboard's **Search Defaults** panel; `config.yaml` only
-seeds the initial values. A default collection that does not exist is rejected
-loudly, so a typo can never silently widen searches into a global scan.
+seeds the initial values. A default collection that does not exist in its own
+backend is rejected loudly, so a typo can never silently widen searches into a
+global scan. A pre-existing single `default_collection` key is migrated to
+`default_collection_qdrant` on load.
 
 ## Storage Backends
 
@@ -133,25 +141,45 @@ before indexing, in **both** backends, so memory writes have an on-disk source
 document (browsable in the data bank) instead of living only in the vector
 store.
 
+### Failover (qdrant → vectra)
+
+For setups where Qdrant runs on a machine that is not always on, the default
+scope can fall back to a local vectra collection:
+
+- Calls that omit `collection_id` use `active_backend`'s default collection.
+  If that is qdrant and it is unreachable (connection refused/timeout/5xx) and
+  `failover_enabled` is set, the `default_collection_vectra` is searched/written
+  instead. Results are tagged with their `[backend]`.
+- An explicit `collection_id` whose backend is down falls back to a **same-name**
+  collection on the other backend when one exists; otherwise it errors loudly.
+  A disabled backend is never retried into a global scan.
+- Unreachable backends are remembered for ~15s so a dead qdrant does not cost a
+  timeout on every call. Logical errors (missing collection, bad request) never
+  trigger failover.
+- There is no automatic reconciliation: memories written to the vectra fallback
+  during an outage stay there. The raw source files are under `docs/memory/`, so
+  they can be re-indexed into qdrant later.
+
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Semantic search. Optional `collection_id` (defaults to the configured default collection, else all enabled); optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
-| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Raw text is persisted on disk by date, then indexed. Optional `collection_id` (defaults to the configured default collection; errors loudly if there is none) |
+| `search_memory` | Semantic search. Omitted `collection_id` uses the active backend's default, with automatic vectra fallback when qdrant is down; optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
+| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Raw text is persisted on disk by date, then indexed. Omitted `collection_id` uses the active backend's default with qdrant→vectra failover; errors loudly if there is none |
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
 | `collection_info` | Live stats + registry metadata, one or all |
 | `set_collection_meta` | Display name, tags, consumers, enabled flag, backend |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
-| `health_check` | Verify all components are healthy |
+| `health_check` | Verify all components are healthy and report the active backend |
 
 ## Management dashboard
 
 Admin UI + JSON API on `:8198` (defaults to `0.0.0.0` so every LAN device can
 reach it; there is no TLS — restrict the bind or firewall it on untrusted
-networks). Includes a **Search Defaults** panel (default collection, top_k,
-threshold, rerank/recall, truncation limits) shared live by every frontend, plus:
+networks). Includes a **Search Defaults** panel (active backend, per-backend
+default collections, failover toggle, top_k, threshold, rerank/recall, truncation
+limits) shared live by every frontend, plus:
 list/search collections, edit metadata, backfill payloads, recall test with
 threshold-kill report, and an audit tail.
 Collection metadata lives in `collections.json` (server-local, gitignored).

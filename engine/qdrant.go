@@ -20,7 +20,9 @@ func NewQdrantClient(host string, port int) *QdrantClient {
 	return &QdrantClient{
 		baseURL: fmt.Sprintf("http://%s:%d", host, port),
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			// Short enough that a dead/blackholed qdrant fails fast so the
+			// engine can fail over to vectra; LAN round-trips are <1ms.
+			Timeout: 10 * time.Second,
 		},
 	}
 }
@@ -188,12 +190,16 @@ func (c *QdrantClient) delete(path string) error {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return unavailable(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode >= 500 {
+			return unavailable(err)
+		}
+		return err
 	}
 	return nil
 }
@@ -201,15 +207,19 @@ func (c *QdrantClient) delete(path string) error {
 func (c *QdrantClient) get(path string) ([]byte, error) {
 	resp, err := c.httpClient.Get(c.baseURL + path)
 	if err != nil {
-		return nil, err
+		return nil, unavailable(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, unavailable(err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode >= 500 {
+			return nil, unavailable(err)
+		}
+		return nil, err
 	}
 	return body, nil
 }
@@ -226,12 +236,16 @@ func (c *QdrantClient) put(path string, body any) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return unavailable(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode >= 500 {
+			return unavailable(err)
+		}
+		return err
 	}
 	return nil
 }
@@ -243,15 +257,19 @@ func (c *QdrantClient) post(path string, body any) ([]byte, error) {
 	}
 	resp, err := c.httpClient.Post(c.baseURL+path, "application/json", bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, unavailable(err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, unavailable(err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(respBody))
+		err := fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode >= 500 {
+			return nil, unavailable(err)
+		}
+		return nil, err
 	}
 	return respBody, nil
 }

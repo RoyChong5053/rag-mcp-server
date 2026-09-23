@@ -80,20 +80,39 @@ func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
 		return
 	}
-	if patch.DefaultCollection != nil {
-		name := strings.TrimSpace(*patch.DefaultCollection)
-		patch.DefaultCollection = &name
-		if name != "" {
-			exists, err := h.eng.CollectionExists(name)
-			if err != nil {
-				writeErr(w, http.StatusBadGateway, err)
-				return
-			}
-			if !exists {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("collection '%s' not found; refusing a default that cannot be searched", name))
-				return
-			}
+	if patch.ActiveBackend != nil {
+		b := strings.TrimSpace(*patch.ActiveBackend)
+		if b != "" && b != engine.BackendQdrant && b != engine.BackendVectra {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("active_backend must be %q or %q (empty = follow config)", engine.BackendQdrant, engine.BackendVectra))
+			return
 		}
+		patch.ActiveBackend = &b
+	}
+	validate := func(field **string, backend string) error {
+		if *field == nil {
+			return nil
+		}
+		name := strings.TrimSpace(**field)
+		*field = &name
+		if name == "" {
+			return nil
+		}
+		exists, err := h.eng.CollectionExistsOn(backend, name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("collection '%s' not found in %s; refusing a default that cannot be searched", name, backend)
+		}
+		return nil
+	}
+	if err := validate(&patch.DefaultCollectionQdrant, engine.BackendQdrant); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validate(&patch.DefaultCollectionVectra, engine.BackendVectra); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 	if err := h.eng.Settings().Update(patch); err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))

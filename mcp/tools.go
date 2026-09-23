@@ -13,7 +13,8 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
-			"Omit collection_id to use the server's configured default collection (or all enabled collections when no default is set). " +
+			"Omit collection_id to use the active backend's configured default collection; if qdrant is unreachable it automatically fails back to the vectra default (when configured). " +
+			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -62,7 +63,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "store_memory",
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
-			"Omit collection_id to write to the server's configured default collection. " +
+			"Omit collection_id to write to the active backend's default collection, with automatic vectra failover when qdrant is unreachable. " +
 			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
 			"so it can be browsed in the data bank and re-indexed.",
 		InputSchema: map[string]any{
@@ -143,7 +144,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 	server.RegisterTool(Tool{
 		Name:        "health_check",
-		Description: "Check if all components (Qdrant, embedding, rerank) are healthy.",
+		Description: "Check component health (qdrant, vectra, embedding, rerank) and report the active default backend.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -329,7 +330,11 @@ func formatSearchResults(results []engine.SearchResult) string {
 	for i, r := range results {
 		result += fmt.Sprintf("--- Result %d (score: %.3f) ---\n", i+1, r.Score)
 		if r.Collection != "" {
-			result += fmt.Sprintf("Collection: %s\n", r.Collection)
+			tag := ""
+			if r.Backend != "" {
+				tag = " [" + r.Backend + "]"
+			}
+			result += fmt.Sprintf("Collection: %s%s\n", r.Collection, tag)
 		}
 		if r.Source != "" {
 			result += fmt.Sprintf("Source: %s\n", r.Source)
