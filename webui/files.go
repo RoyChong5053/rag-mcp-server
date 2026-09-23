@@ -174,6 +174,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 type indexBody struct {
 	Path           string `json:"path"`
 	Collection     string `json:"collection"`
+	Backend        string `json:"backend"` // "" (default) | qdrant | vectra
 	ChunkSize      int    `json:"chunk_size"`
 	OverlapPercent int    `json:"overlap_percent"`
 	Mode           string `json:"mode"` // append (default) | rebuild
@@ -198,6 +199,30 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("bad collection name (A-Za-z0-9_-, max 64, must start alnum)"))
 		return
 	}
+	backend := strings.TrimSpace(body.Backend)
+	if backend != "" && backend != engine.BackendQdrant && backend != engine.BackendVectra {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("backend must be qdrant or vectra (empty = server default)"))
+		return
+	}
+	// A collection's backend is fixed once chosen. Refuse to index into a
+	// different backend than the one the registry says it lives in, and refuse
+	// to create a same-name collection in the other store: either would leave
+	// vectors split across backends and silently break recall.
+	if backend != "" {
+		if en := h.eng.Registry().Get(body.Collection); en != nil && en.Backend != "" && en.Backend != backend {
+			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' is fixed to %s; refusing to index into %s", body.Collection, en.Backend, backend))
+			return
+		}
+		exists, err := h.eng.CollectionExistsOnOther(backend, body.Collection)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		if exists {
+			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' already exists in the other backend; delete or rename it before vectorizing into %s", body.Collection, backend))
+			return
+		}
+	}
 	if body.ChunkSize < 0 || body.ChunkSize > 20000 || body.OverlapPercent < 0 || body.OverlapPercent >= 100 {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("chunk_size 0-20000 (0=global), overlap_percent 0-99"))
 		return
@@ -208,7 +233,7 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := &engine.ChunkOptions{Size: body.ChunkSize, OverlapPercent: body.OverlapPercent}
-	job := h.jobs.SubmitIndex(abs, body.Collection, opts, rebuild)
+	job := h.jobs.SubmitIndex(abs, body.Collection, backend, opts, rebuild)
 	writeJSON(w, http.StatusAccepted, job)
 }
 

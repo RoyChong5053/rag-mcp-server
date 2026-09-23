@@ -17,6 +17,17 @@ An independent RAG (Retrieval-Augmented Generation) engine exposed via MCP (Mode
 - [x] Dashboard: backend column/selector, jobs "clear" button
 - [ ] qdrant → vectra export helper (optional)
 
+## Vectorize-time backend choice (2026-09-25)
+
+- [x] Data Bank panel: explicit `database` selector (qdrant/vectra) at Vectorize
+- [x] `IndexDocumentOn` / `ReindexDocumentOn` route to an explicit backend;
+      `recordIndex` stamps the backend into the registry
+- [x] Manage panel backend is read-only; `set_collection_meta` refuses to switch
+      a collection that already holds vectors (no more silent orphaning)
+- [x] Reject cross-backend name collisions (same name in qdrant and vectra)
+- [x] UI: 500/30 chunk defaults, "index" renamed to "Vectorize", busy-spinner +
+      toast feedback on all buttons
+
 ## Failover + dual defaults (2026-09-24)
 
 - [x] settings: `active_backend`, `default_collection_qdrant`,

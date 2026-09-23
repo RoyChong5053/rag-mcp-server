@@ -14,6 +14,7 @@ type Job struct {
 	ID          string `json:"id"`
 	Kind        string `json:"kind"`
 	Collection  string `json:"collection"`
+	Backend     string `json:"backend,omitempty"`
 	File        string `json:"file"`
 	ChunkSize   int    `json:"chunk_size"`
 	Overlap     int    `json:"overlap"`
@@ -54,7 +55,9 @@ func NewManager(eng *engine.Engine, maxConcurrent int) *Manager {
 }
 
 // SubmitIndex queues a file index job. absPath must already be jailed.
-func (m *Manager) SubmitIndex(absPath, collection string, opts *engine.ChunkOptions, rebuild bool) *Job {
+// backend may be empty (follow registry/default routing) or "qdrant"/"vectra"
+// to force where the vectors land.
+func (m *Manager) SubmitIndex(absPath, collection, backend string, opts *engine.ChunkOptions, rebuild bool) *Job {
 	id := fmt.Sprintf("job-%d", m.seq.Add(1))
 	size, overlap := 0, 0
 	if opts != nil {
@@ -64,6 +67,7 @@ func (m *Manager) SubmitIndex(absPath, collection string, opts *engine.ChunkOpti
 		ID:         id,
 		Kind:       "index",
 		Collection: collection,
+		Backend:    backend,
 		File:       absPath,
 		ChunkSize:  size,
 		Overlap:    overlap,
@@ -86,11 +90,11 @@ func (m *Manager) SubmitIndex(absPath, collection string, opts *engine.ChunkOpti
 	}
 	m.mu.Unlock()
 
-	go m.run(job, absPath, collection, opts, rebuild)
+	go m.run(job, absPath, collection, backend, opts, rebuild)
 	return m.Get(id)
 }
 
-func (m *Manager) run(job *Job, absPath, collection string, opts *engine.ChunkOptions, rebuild bool) {
+func (m *Manager) run(job *Job, absPath, collection, backend string, opts *engine.ChunkOptions, rebuild bool) {
 	m.sem <- struct{}{} // wait for a worker slot
 	defer func() { <-m.sem }()
 
@@ -111,9 +115,9 @@ func (m *Manager) run(job *Job, absPath, collection string, opts *engine.ChunkOp
 		err error
 	)
 	if rebuild {
-		res, err = m.eng.ReindexDocument(absPath, collection, nil, opts, prog)
+		res, err = m.eng.ReindexDocumentOn(backend, absPath, collection, nil, opts, prog)
 	} else {
-		res, err = m.eng.IndexDocumentWithOptions(absPath, collection, nil, opts, prog)
+		res, err = m.eng.IndexDocumentOn(backend, absPath, collection, nil, opts, prog)
 	}
 	m.update(job.ID, func(j *Job) {
 		j.FinishedAt = time.Now().UTC().Format(time.RFC3339)

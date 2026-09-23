@@ -753,6 +753,17 @@ func (e *Engine) IndexDocumentWithOptions(path string, collectionID string, meta
 	return e.indexDocumentInternal(e.backendOf(collectionID), path, collectionID, metadata, opts, prog)
 }
 
+// IndexDocumentOn indexes a file into an explicit backend, ignoring registry
+// routing. An empty backend falls back to the normal routing. Used by the
+// dashboard's per-job backend choice so a brand-new collection can be created
+// directly in vectra instead of the global default.
+func (e *Engine) IndexDocumentOn(backend, path, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
+	if backend == "" {
+		return e.IndexDocumentWithOptions(path, collectionID, metadata, opts, prog)
+	}
+	return e.indexDocumentInternal(backend, path, collectionID, metadata, opts, prog)
+}
+
 // indexDocumentInternal indexes a file into one explicit backend, bypassing
 // registry routing. Used by the default-path failover so a write can target the
 // vectra fallback even when the collection name has no registry entry.
@@ -783,7 +794,7 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 	}
 	prov.Chunks = res.ChunksIndexed
 	prov.ChunkSize, prov.ChunkOverlap = used.Size, used.Overlap
-	e.recordIndex(collectionID, prov)
+	e.recordIndex(collectionID, prov, backend)
 	return res, nil
 }
 
@@ -805,6 +816,38 @@ func (e *Engine) ReindexDocument(path string, collectionID string, metadata map[
 	return e.IndexDocumentWithOptions(path, collectionID, metadata, opts, prog)
 }
 
+// ReindexDocumentOn purges and rebuilds a collection on an explicit backend.
+// An empty backend falls back to registry routing. The registry entry (display
+// name, tags, consumers) is preserved; only the vectors are rebuilt.
+func (e *Engine) ReindexDocumentOn(backend, path, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
+	if backend == "" {
+		return e.ReindexDocument(path, collectionID, metadata, opts, prog)
+	}
+	store := e.storeForBackend(backend)
+	exists, err := store.CollectionExists(collectionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check collection: %w", err)
+	}
+	if exists {
+		if err := store.DeleteCollection(collectionID); err != nil {
+			return nil, fmt.Errorf("failed to purge collection: %w", err)
+		}
+		log.Printf("Purged collection '%s' from %s for re-index", collectionID, backend)
+	}
+	return e.indexDocumentInternal(backend, path, collectionID, metadata, opts, prog)
+}
+
+// CollectionExistsOnOther reports whether name exists on the backend paired
+// with backend (qdrant<->vectra). Used to reject cross-backend name collisions
+// so a collection never silently lives in two stores at once.
+func (e *Engine) CollectionExistsOnOther(backend, name string) (bool, error) {
+	other := otherBackend(backend)
+	if other == "" {
+		return false, nil
+	}
+	return e.CollectionExistsOn(other, name)
+}
+
 // IndexText indexes raw text into a Qdrant collection
 func (e *Engine) IndexText(text string, collectionID string, metadata map[string]string) (*IndexResult, error) {
 	return e.IndexTextWithOptions(text, collectionID, metadata, nil, nil)
@@ -822,7 +865,7 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 		ChunkOverlap: used.Overlap,
 		EmbedModel:   e.config.EmbedModel,
 		Chunks:       res.ChunksIndexed,
-	})
+	}, e.backendOf(collectionID))
 	return res, nil
 }
 
@@ -974,9 +1017,10 @@ func PreviewChunks(text string, size, overlap int, maxSamples int) (int, []strin
 	return len(chunks), samples
 }
 
-// recordIndex snapshots provenance in the registry.
+// recordIndex snapshots provenance in the registry, including the backend the
+// vectors actually landed in, so the dashboard can show it as fixed metadata.
 // Best-effort: a registry write failure is logged, indexing already succeeded.
-func (e *Engine) recordIndex(collectionID string, prov Provenance) {
+func (e *Engine) recordIndex(collectionID string, prov Provenance, backend string) {
 	err := e.registry.Update(collectionID, func(en *registry.Entry) {
 		if en.SourceFile == "" {
 			en.SourceFile = prov.SourceFile
@@ -986,6 +1030,9 @@ func (e *Engine) recordIndex(collectionID string, prov Provenance) {
 		}
 		if prov.EmbedModel != "" {
 			en.EmbedModel = prov.EmbedModel
+		}
+		if backend != "" {
+			en.Backend = backend
 		}
 		en.ChunkCount = prov.Chunks
 		en.Chunk = registry.ChunkConfig{Size: prov.ChunkSize, Overlap: prov.ChunkOverlap}
@@ -1244,6 +1291,10 @@ type CollectionMetaUpdate struct {
 
 // SetCollectionMeta updates registry metadata. Allowed for collections that
 // don't exist yet (aspirational entry); callers are told.
+//
+// The backend is fixed once a collection holds vectors: switching it would
+// strand the existing data in the old store, so such a change is refused.
+// Setting the backend on an empty/aspirational entry is allowed.
 func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("collection_id is required")
@@ -1254,6 +1305,12 @@ func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error
 			return fmt.Errorf("unknown backend %q (want %s or %s)", b, BackendQdrant, BackendVectra)
 		}
 		meta.Backend = &b
+		if b != "" && b != e.backendOf(name) {
+			store := e.storeFor(name)
+			if info, err := store.GetCollectionInfo(name); err == nil && info != nil && info.ChunkCount > 0 {
+				return fmt.Errorf("collection '%s' already has %d chunks in %s; backend is fixed — re-Vectorize to move it", name, info.ChunkCount, e.backendOf(name))
+			}
+		}
 	}
 	return e.registry.Update(name, func(en *registry.Entry) {
 		if meta.DisplayName != nil {

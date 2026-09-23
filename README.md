@@ -114,9 +114,21 @@ global scan. A pre-existing single `default_collection` key is migrated to
 ## Storage Backends
 
 `storage.backend` selects the global default; a collection can override it with
-its registry `backend` field (dashboard "Backend" selector or
-`set_collection_meta`). Both backends share one `VectorStore` interface, so
-search/index/delete behave identically.
+its registry `backend` field. Both backends share one `VectorStore` interface,
+so search/index/delete behave identically.
+
+**Choosing a backend happens at vectorize time.** The Data Bank's
+`Vectorize → job` panel has a `database` selector (server default / `qdrant` /
+`vectra`); the choice is written into the collection's registry entry as a
+**fixed** property. The dashboard's manage panel shows it read-only, and
+`set_collection_meta` refuses to switch a collection that already holds vectors
+(that would strand its chunks in the old store). To move a collection, re-index
+it into the other backend. Creating a same-name collection in the other backend
+is rejected too, so a name never silently lives in two stores at once.
+
+The global `active_backend` setting is unrelated: it only picks which default
+collection an omitted-`collection_id` search/write uses, and never decides where
+a new named collection is created.
 
 | Backend | Storage | Best for |
 |---------|---------|----------|
@@ -169,7 +181,7 @@ scope can fall back to a local vectra collection:
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
 | `collection_info` | Live stats + registry metadata, one or all |
-| `set_collection_meta` | Display name, tags, consumers, enabled flag, backend |
+| `set_collection_meta` | Display name, tags, consumers, enabled flag, backend (backend refused once the collection holds vectors) |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy and report the active backend |
 
@@ -187,8 +199,9 @@ Collection metadata lives in `collections.json` (server-local, gitignored).
 ## Data Bank (dashboard)
 
 - `docs/` browser with fresh/stale/unindexed badges (sha256 vs registry provenance)
-- Upload to `docs/staging/`, zero-token chunk preview, index into new/existing
-  collection with per-job `chunk_size`/`overlap_percent` (append or rebuild)
+- Upload to `docs/staging/`, zero-token chunk preview, **Vectorize** into a new/existing
+  collection with an explicit `database` (qdrant/vectra), per-job `chunk_size`/`overlap_percent`
+  (defaults 500/30), append or rebuild
 - Background jobs (max 2 concurrent, search never blocked) with sidebar progress
   and a **clear** button for finished jobs
 - Provenance snapshot per collection: chunk size/overlap, embed model, source sha

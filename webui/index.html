@@ -35,6 +35,14 @@ tr.disabled td:first-child { color: #666; text-decoration: line-through; }
 button { background: #245; color: #cde; border: 1px solid #468; border-radius: 4px; padding: 4px 10px; cursor: pointer; margin: 1px; }
 button.danger { background: #422; border-color: #a44; color: #faa; }
 button:disabled { opacity: .4; }
+button:active { transform: translateY(1px); filter: brightness(1.25); }
+button:focus-visible { outline: 2px solid #6af; outline-offset: 1px; }
+button.busy { cursor: progress; opacity: .75; }
+button.busy .spin { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid #6af; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: -1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#toast { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 360px; }
+#toast div { background: #1c2a1c; border: 1px solid #484; color: #cfc; padding: 8px 12px; border-radius: 6px; font-size: 13px; box-shadow: 0 2px 10px #0009; }
+#toast div.err { background: #2a1c1c; border-color: #a44; color: #fcc; }
 #detail { margin-top: 16px; border: 1px solid #444; border-radius: 6px; padding: 12px; display: none; }
 #detail h3 { font-size: 16px; margin: 0 0 8px; }
 label { display: block; font-size: 12px; color: #999; margin: 8px 0 2px; }
@@ -106,7 +114,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>recall <input type="number" id="s-recall" min="1" max="1000" title="vector over-fetch fed to the reranker"></span>
     <span>query max <input type="number" id="s-qmax" min="0" title="rerank query truncation (runes, 0 = unlimited)"></span>
     <span>doc max <input type="number" id="s-dmax" min="0" title="rerank document truncation (runes, 0 = unlimited)"></span>
-    <button onclick="saveSettings()">Save settings</button>
+    <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>
   <div id="s-status" class="prov"></div>
   </div>
@@ -117,8 +125,8 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <h2>Collections</h2>
     <span id="col-count" class="prov"></span>
     <span class="spacer"></span>
-    <button onclick="newCollection()">＋ New</button>
-    <button onclick="load()">refresh</button>
+    <button onclick="withBusy(this, () => newCollection())">＋ New</button>
+    <button onclick="withBusy(this, () => load())">refresh</button>
   </div>
   <div class="table-wrap"><table id="tbl"><thead><tr><th>ID</th><th>Collection</th><th>Chunks</th><th>Backend</th><th>Status</th><th>Consumers</th><th>Provenance</th><th></th></tr></thead><tbody></tbody></table></div>
 </div>
@@ -131,11 +139,12 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <label>Tags (comma separated)</label><input type="text" id="f-tags">
   <label>Consumers (comma separated)</label><input type="text" id="f-consumers">
   <label><input type="checkbox" id="f-enabled"> enabled (global search skips disabled)</label>
-  <label>Backend <select id="f-backend"><option value="">(server default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></label>
+  <label>Backend <span class="dim">(fixed — set at vectorize time)</span></label>
+  <div id="f-backend-ro">—</div>
   <div class="row">
-    <button onclick="saveMeta()">Save</button>
-    <button onclick="backfill()">Backfill payload</button>
-    <button class="danger" onclick="delCol()">Delete collection</button>
+    <button onclick="withBusy(this, () => saveMeta())">Save</button>
+    <button onclick="withBusy(this, () => backfill())">Backfill payload</button>
+    <button class="danger" onclick="withBusy(this, () => delCol())">Delete collection</button>
   </div>
   <h2>Recall test</h2>
   <div class="row">
@@ -143,7 +152,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>top_k <input type="number" id="q-topk" value="3" min="1" max="50"></span>
     <span>threshold <input type="number" id="q-thr" value="0" min="0" max="1" step="0.05"></span>
     <label style="display:inline"><input type="checkbox" id="q-rerank" checked> rerank</label>
-    <button onclick="testRecall()">Search</button>
+    <button onclick="withBusy(this, () => testRecall())">Search</button>
   </div>
   <div id="results"></div>
   <div id="killed"></div>
@@ -154,11 +163,11 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <h2>Data Bank</h2>
     <span class="prov">raw files live under docs/ on the server — upload, or scp them yourself</span>
     <span class="spacer"></span>
-    <button onclick="loadFiles()">refresh</button>
+    <button onclick="withBusy(this, () => loadFiles())">refresh</button>
   </div>
   <div class="row">
     <input type="file" id="up-file">
-    <button onclick="upload()">Upload to staging/</button>
+    <button onclick="withBusy(this, () => upload())">Upload to staging/</button>
   </div>
   <div class="table-wrap"><table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
 </div>
@@ -168,30 +177,31 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div class="row">
     <span>collection <input type="text" id="ip-col" list="col-list" placeholder="new_or_existing"></span>
     <datalist id="col-list"></datalist>
-    <span>chunk size <input type="number" id="ip-size" value="0" min="0" max="20000" title="0 = global default"></span>
-    <span>overlap % <input type="number" id="ip-overlap" value="0" min="0" max="99" title="0 = global default"></span>
+    <span>database <select id="ip-backend" title="where these vectors are stored; fixed per collection once written"><option value="">(server default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></span>
+    <span>chunk size <input type="number" id="ip-size" value="500" min="0" max="20000" title="0 = global default"></span>
+    <span>overlap % <input type="number" id="ip-overlap" value="30" min="0" max="99" title="0 = global default"></span>
     <span>mode <select id="ip-mode"><option value="append">append</option><option value="rebuild">rebuild (purge first)</option></select></span>
   </div>
   <div id="ip-warn" class="warn"></div>
   <div class="row">
-    <button onclick="preview()">Preview chunks (zero token)</button>
-    <button onclick="submitIndex()">Vectorize Data → job</button>
+    <button onclick="withBusy(this, () => preview())">Preview chunks (zero token)</button>
+    <button onclick="withBusy(this, () => submitIndex())">Vectorize → job</button>
   </div>
   <div id="preview-out"></div>
 </div>
 
 <div class="panel">
-  <div class="panel-head"><h2>Audit log</h2><span class="spacer"></span><button onclick="loadAudit()">refresh</button></div>
+  <div class="panel-head"><h2>Audit log</h2><span class="spacer"></span><button onclick="withBusy(this, () => loadAudit())">refresh</button></div>
   <pre id="audit"></pre>
 </div>
 </main>
 
 <aside id="side">
-  <h2 style="display:flex;align-items:center;gap:8px">Jobs <span class="spacer" style="flex:1"></span> <button onclick="clearJobs()" title="remove finished jobs">clear</button></h2>
+  <h2 style="display:flex;align-items:center;gap:8px">Jobs <span class="spacer" style="flex:1"></span> <button onclick="withBusy(this, () => clearJobs())" title="remove finished jobs">clear</button></h2>
   <div id="jobs"><small style="color:#666">no jobs yet</small></div>
 </aside>
 </div>
-
+<div id="toast"></div>
 <script>
 let cur = null, ipFile = null, colsCache = [];
 const api = (m, url, body, raw) => {
@@ -207,6 +217,36 @@ const api = (m, url, body, raw) => {
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m]));
 const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
 const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'M' : n > 1024 ? (n / 1024).toFixed(0) + 'K' : n + 'B';
+
+/* ---- feedback: busy buttons + toast ---- */
+function toast(msg, kind) {
+  const box = document.getElementById('toast');
+  const d = document.createElement('div');
+  if (kind === 'err') d.className = 'err';
+  d.textContent = msg;
+  box.appendChild(d);
+  setTimeout(() => d.remove(), 4000);
+}
+// Wrap an async action so its button shows a spinner and can't be double-fired.
+async function withBusy(btn, fn) {
+  if (!btn || btn.dataset.busy === '1') return;
+  const old = btn.innerHTML;
+  btn.dataset.busy = '1';
+  btn.disabled = true;
+  btn.classList.add('busy');
+  btn.innerHTML = '<span class="spin"></span>' + old;
+  try {
+    return await fn();
+  } catch (e) {
+    toast(e && e.message ? e.message : String(e), 'err');
+    throw e;
+  } finally {
+    btn.dataset.busy = '';
+    btn.disabled = false;
+    btn.classList.remove('busy');
+    btn.innerHTML = old;
+  }
+}
 
 /* ---- collections ---- */
 async function load() {
@@ -242,7 +282,7 @@ async function load() {
     const td = document.createElement('td');
     const b = document.createElement('button');
     b.textContent = 'manage';
-    b.onclick = () => select(c.name);
+    b.onclick = () => withBusy(b, () => select(c.name));
     td.appendChild(b);
     tr.appendChild(td);
     tb.appendChild(tr);
@@ -275,7 +315,8 @@ async function select(name) {
   document.getElementById('f-tags').value = (c.tags || []).join(', ');
   document.getElementById('f-consumers').value = (c.consumers || []).join(', ');
   document.getElementById('f-enabled').checked = !!c.enabled;
-  document.getElementById('f-backend').value = c.backend || '';
+  const be = c.backend || '?';
+  document.getElementById('f-backend-ro').innerHTML = '<span class="badge ' + (be === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(be) + '</span> <small class="dim">fixed — re-Vectorize into the other backend to move</small>';
   document.getElementById('results').innerHTML = '';
   document.getElementById('killed').innerHTML = '';
   load();
@@ -287,8 +328,7 @@ async function saveMeta() {
       description: document.getElementById('f-desc').value,
       tags: csv(document.getElementById('f-tags').value),
       consumers: csv(document.getElementById('f-consumers').value),
-      enabled: document.getElementById('f-enabled').checked,
-      backend: document.getElementById('f-backend').value
+      enabled: document.getElementById('f-enabled').checked
     });
     load();
   } catch (e) { alert('save failed: ' + e.message); }
@@ -396,9 +436,9 @@ async function loadFiles() {
     tr.innerHTML = '<td>' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td><td>' + fmtSize(f.size) + '</td><td>' + badge(f.status) + '</td>';
     const td = document.createElement('td');
     const bp = document.createElement('button'); bp.textContent = 'preview';
-    bp.onclick = () => openIndex(f.path, true);
-    const bi = document.createElement('button'); bi.textContent = 'index…';
-    bi.onclick = () => openIndex(f.path, false);
+    bp.onclick = () => withBusy(bp, () => openIndex(f.path, true));
+    const bi = document.createElement('button'); bi.textContent = 'Vectorize…';
+    bi.onclick = () => withBusy(bi, () => openIndex(f.path, false));
     td.appendChild(bp); td.appendChild(bi);
     tr.appendChild(td);
     tb.appendChild(tr);
@@ -432,17 +472,22 @@ function openIndex(path, autoPreview) {
 function updateWarn() {
   const col = document.getElementById('ip-col').value.trim();
   const mode = document.getElementById('ip-mode').value;
+  const backend = document.getElementById('ip-backend').value;
   const known = colsCache.find(c => c.name === col);
   const w = document.getElementById('ip-warn');
-  if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
+  if (backend && known && known.backend && backend !== known.backend) {
+    w.textContent = '⛔ ' + col + ' is already stored in ' + known.backend + '. Vectorizing into ' + backend + ' will be rejected — pick ' + known.backend + ', or delete/rename the collection.';
+  } else if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
     w.textContent = '⚠ ' + col + ' already has ' + known.chunk_count + ' chunks (' + known.chunk_size + '/' + known.chunk_overlap + '). Appending with different settings creates mixed chunking — use rebuild instead.';
   } else if (known && known.exists && mode === 'rebuild') {
     w.textContent = '⚠ rebuild purges all ' + known.chunk_count + ' existing chunks first, then re-indexes.';
+  } else if (!known && backend) {
+    w.textContent = 'new collection "' + (col || '?') + '" will be created in ' + backend + '.';
   } else if (!known) {
     w.textContent = 'new collection "' + (col || '?') + '" will be created.';
   } else w.textContent = '';
 }
-['ip-col', 'ip-mode', 'ip-size'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
+['ip-col', 'ip-mode', 'ip-size', 'ip-backend'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
 async function preview() {
   const box = document.getElementById('preview-out');
   box.innerHTML = 'chunking…';
@@ -467,13 +512,14 @@ async function submitIndex() {
   try {
     const job = await api('POST', '/api/index', {
       path: ipFile, collection: col,
+      backend: document.getElementById('ip-backend').value,
       chunk_size: +document.getElementById('ip-size').value || 0,
       overlap_percent: +document.getElementById('ip-overlap').value || 0,
       mode: document.getElementById('ip-mode').value
     });
     loadJobs();
     document.getElementById('side').scrollIntoView();
-    alert('job ' + job.id + ' queued — watch the sidebar');
+    toast('job ' + job.id + ' queued — watch the sidebar');
   } catch (e) { alert('submit failed: ' + e.message); }
 }
 
@@ -493,7 +539,7 @@ async function loadJobs() {
     const d = document.createElement('div');
     d.className = 'job ' + (j.state === 'done' ? 'done' : j.state === 'error' ? 'error' : '');
     d.innerHTML = '<b>' + esc(j.id) + '</b> ' + esc(j.state) + ' <small>' + esc(j.stage) + '</small><br>' +
-      esc(j.collection) + (j.rebuild ? ' (rebuild)' : '') + '<br><small>' + esc(j.file.split('/').pop()) + '</small>' +
+      esc(j.collection) + (j.backend ? ' <span class="badge ' + (j.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(j.backend) + '</span>' : '') + (j.rebuild ? ' (rebuild)' : '') + '<br><small>' + esc(j.file.split('/').pop()) + '</small>' +
       '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
       '<small>' + j.done_chunks + '/' + (j.total_chunks || '…') + ' chunks' + (j.chunks ? ' · ' + j.chunks + ' indexed' : '') + (j.error ? '<br>ERR: ' + esc(j.error) : '') + '</small>';
     box.appendChild(d);
