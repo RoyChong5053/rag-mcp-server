@@ -38,14 +38,30 @@ func main() {
 		DocMaxChars:       cfg.Rerank.DocMaxChars,
 	})
 
+	// Resolve the file-backed store dir (and optional memory dir) against the
+	// config file's directory, so a relative "Vectra" lands in the project
+	// folder even when the process CWD differs (e.g. setsid from $HOME).
+	cfgDir, err := filepath.Abs(filepath.Dir(*configPath))
+	if err != nil {
+		log.Fatalf("Resolve config dir: %v", err)
+	}
+	vectraDir := cfg.Storage.VectraDir
+	if vectraDir != "" && !filepath.IsAbs(vectraDir) {
+		vectraDir = filepath.Join(cfgDir, vectraDir)
+	}
+	memoryDir := cfg.Storage.MemoryDir
+	if memoryDir != "" && !filepath.IsAbs(memoryDir) {
+		memoryDir = filepath.Join(cfgDir, memoryDir)
+	}
+
 	// Create engine
 	engineConfig := &engine.EngineConfig{
 		QdrantHost:      cfg.Qdrant.Host,
 		QdrantPort:      cfg.Qdrant.Port,
-		VectraDir:       cfg.Storage.VectraDir,
+		VectraDir:       vectraDir,
 		Backend:         cfg.Storage.Backend,
 		DocsDir:         cfg.DocsDir,
-		MemoryDir:       cfg.Storage.MemoryDir,
+		MemoryDir:       memoryDir,
 		OneAPIBaseURL:   cfg.OneAPI.BaseURL,
 		OneAPIBackupURL: cfg.OneAPI.BackupURL,
 		EmbedModel:      cfg.OneAPI.EmbedModel,
@@ -79,7 +95,7 @@ func main() {
 	log.Printf("MCP endpoint: http://%s/mcp", addr)
 	log.Printf("Qdrant: %s:%d", cfg.Qdrant.Host, cfg.Qdrant.Port)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
-	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, cfg.Storage.VectraDir)
+	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, vectraDir)
 	log.Printf("Registry: %s", cfg.RegistryPath)
 	log.Printf("Settings: %s", settingsPath)
 
