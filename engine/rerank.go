@@ -68,16 +68,16 @@ type RerankResponse struct {
 
 // RerankResult represents a single rerank result
 type RerankResult struct {
-	Index       int     `json:"index"`
-	Score       float64 `json:"relevance_score"`
-	RawScore    float64 `json:"score,omitempty"`
+	Index    int     `json:"index"`
+	Score    float64 `json:"relevance_score"`
+	RawScore float64 `json:"score,omitempty"`
 }
 
 // RerankScoreMode indicates the score scale
 type RerankScoreMode int
 
 const (
-	ScoreModeAuto       RerankScoreMode = iota
+	ScoreModeAuto        RerankScoreMode = iota
 	ScoreModeProbability                 // scores in [0, 1]
 	ScoreModeLogit                       // unbounded, needs sigmoid
 )

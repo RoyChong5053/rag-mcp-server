@@ -56,7 +56,7 @@ func (f *fakeStore) UpsertPoints(collection string, points []Point) error {
 	}
 	return nil
 }
-func (f *fakeStore) Search(collection string, vector []float32, limit int, threshold float64) ([]StoreSearchResult, error) {
+func (f *fakeStore) Search(collection string, vector []float32, limit int, threshold float64, filter map[string]any) ([]StoreSearchResult, error) {
 	if !f.up {
 		return nil, f.down()
 	}

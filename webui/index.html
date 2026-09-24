@@ -2,15 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111">
 <title>RAG Console</title>
 <style>
 :root { color-scheme: dark; }
-body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 0 0 env(safe-area-inset-bottom); }
 #layout { display: flex; align-items: flex-start; gap: 18px; padding: 16px; max-width: 1600px; margin: 0 auto; }
 #main { flex: 1 1 auto; min-width: 0; }
 h1 { font-size: 20px; margin: 0 0 4px; display: inline; }
-#health { color: #888; font-size: 13px; margin: 4px 0 16px; }
+#ver { margin-left: 8px; font-size: 12px; }
+#health { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 16px; }
+.hb { font-size: 12px; padding: 2px 8px; border-radius: 8px; border: 1px solid #444; color: #999; white-space: nowrap; }
+.hb.ok { color: #8d8; border-color: #484; }
+.hb.bad { color: #f99; border-color: #a44; background: #2a1a1a; }
+.hb.wait { color: #9cc; border-color: #488; }
 h2 { font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 4px; margin-top: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; vertical-align: top; }
@@ -40,7 +46,7 @@ button:focus-visible { outline: 2px solid #6af; outline-offset: 1px; }
 button.busy { cursor: progress; opacity: .75; }
 button.busy .spin { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid #6af; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#toast { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 360px; }
+#toast { position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 360px; }
 #toast div { background: #1c2a1c; border: 1px solid #484; color: #cfc; padding: 8px 12px; border-radius: 6px; font-size: 13px; box-shadow: 0 2px 10px #0009; }
 #toast div.err { background: #2a1c1c; border-color: #a44; color: #fcc; }
 #detail { margin-top: 16px; border: 1px solid #444; border-radius: 6px; padding: 12px; display: none; }
@@ -58,10 +64,6 @@ input[type=number] { width: 110px; }
 /* sidebar */
 #side { flex: 0 0 270px; position: sticky; top: 16px; max-height: calc(100vh - 32px); background: #161616; border: 1px solid #333; border-radius: 8px; padding: 12px; overflow-y: auto; box-sizing: border-box; }
 #side h2 { margin-top: 0; }
-@media (max-width: 900px) {
-  #layout { flex-direction: column; }
-  #side { flex: 0 0 auto; position: static; width: 100%; max-height: none; }
-}
 .job { border: 1px solid #444; border-radius: 5px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
 .job .bar { height: 6px; background: #333; border-radius: 3px; margin: 6px 0; }
 .job .bar i { display: block; height: 100%; background: #6af; border-radius: 3px; }
@@ -89,14 +91,51 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 .b-vec { color: #9cc; border-color: #488; }
 .b-off { color: #777; }
 .b-orphan { color: #e8a33d; border-color: #a80; }
+/* modal */
+.modal-back { position: fixed; inset: 0; background: #000a; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+.modal-back.hidden { display: none; }
+.modal { background: #1a1f26; border: 1px solid #444; border-radius: 10px; padding: 16px; max-width: 440px; width: 100%; box-shadow: 0 10px 40px #000b; box-sizing: border-box; }
+.modal h3 { margin: 0 0 8px; font-size: 16px; }
+.modal #m-body { font-size: 14px; overflow-wrap: anywhere; }
+.modal .row { justify-content: flex-end; margin-top: 14px; }
+
+/* --- mobile ------------------------------------------------------------ */
+@media (max-width: 900px) {
+  #layout { flex-direction: column; }
+  #side { flex: 0 0 auto; position: static; width: 100%; max-height: none; order: -1; }
+}
+@media (max-width: 640px) {
+  #layout { padding: 10px; gap: 12px; }
+  h1 { font-size: 18px; }
+  /* tables become cards: no more sideways dragging */
+  #tbl, #ftbl { table-layout: auto; min-width: 0; }
+  #tbl thead, #ftbl thead { display: none; }
+  #tbl tbody tr, #ftbl tbody tr { display: block; border: 1px solid #333; border-radius: 8px; margin: 0 0 10px; padding: 6px 10px; background: #14181d; }
+  #tbl tbody tr.sel, #ftbl tbody tr.sel { box-shadow: inset 3px 0 0 #6af; }
+  #tbl td, #ftbl td { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; border: none; padding: 4px 0; overflow-wrap: anywhere; }
+  #tbl td::before, #ftbl td::before { content: attr(data-label); flex: 0 0 40%; color: #8a949e; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  #tbl td[data-label=""], #ftbl td[data-label=""] { justify-content: flex-start; padding-top: 8px; }
+  #tbl td[data-label=""]::before, #ftbl td[data-label=""]::before { content: none; }
+  .num { text-align: left; }
+  .table-wrap { overflow-x: visible; }
+  /* form controls: 16px avoids iOS focus-zoom; stack rows for thumb reach */
+  input, select, textarea, button { font-size: 16px; }
+  button { min-height: 40px; padding: 8px 12px; }
+  .row { flex-direction: column; align-items: stretch; gap: 10px; }
+  .row > span, .row > label { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .row input[type=number], .row input[type=text] { width: 100%; box-sizing: border-box; }
+  #detail .row button, #index-panel .row button { width: 100%; }
+  #toast { left: 12px; right: 12px; max-width: none; }
+  #audit { font-size: 11px; }
+}
 </style>
 </head>
 <body>
 <div id="layout">
 <main id="main">
-<h1>RAG Console</h1>
+<h1>RAG Console</h1><span id="ver" class="prov"></span>
 <button onclick="backup()" title="download collections.json">backup registry</button>
-<div id="health">loading…</div>
+<div id="health" class="health"><span class="hb wait">checking…</span></div>
 
 <div class="panel">
   <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend</span></div>
@@ -201,31 +240,56 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div id="jobs"><small style="color:#666">no jobs yet</small></div>
 </aside>
 </div>
+<div id="modal" class="modal-back hidden">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3 id="m-title"></h3>
+    <div id="m-body"></div>
+    <div id="m-input-wrap" style="display:none">
+      <label id="m-input-label"></label>
+      <input type="text" id="m-input">
+    </div>
+    <div id="m-err" class="warn"></div>
+    <div class="row">
+      <button type="button" id="m-cancel">Cancel</button>
+      <button type="button" id="m-ok">OK</button>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 <script>
 let cur = null, ipFile = null, colsCache = [];
-const api = (m, url, body, raw) => {
+// api() bounds every request so a hung backend surfaces as a timeout error
+// instead of an infinite spinner.
+const api = (m, url, body, raw, timeoutMs) => {
   const opt = {method: m};
   if (raw) { opt.body = body; }
   else if (body !== undefined) { opt.headers = {'Content-Type': 'application/json'}; opt.body = JSON.stringify(body); }
+  const ctrl = new AbortController();
+  opt.signal = ctrl.signal;
+  const budget = timeoutMs || 15000;
+  const timer = setTimeout(() => ctrl.abort(), budget);
   return fetch(url, opt).then(async r => {
     const j = await r.json().catch(() => ({}));
     if (!r.ok && r.status !== 202) throw new Error(j.error || r.status);
     return j;
-  });
+  }).catch(e => {
+    if (e.name === 'AbortError') throw new Error('timed out after ' + budget + 'ms');
+    throw e;
+  }).finally(() => clearTimeout(timer));
 };
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m]));
 const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
 const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'M' : n > 1024 ? (n / 1024).toFixed(0) + 'K' : n + 'B';
+const fmtUptime = s => s >= 86400 ? Math.floor(s / 86400) + 'd' + Math.floor(s % 86400 / 3600) + 'h' : s >= 3600 ? Math.floor(s / 3600) + 'h' + Math.floor(s % 3600 / 60) + 'm' : s >= 60 ? Math.floor(s / 60) + 'm' : s + 's';
 
-/* ---- feedback: busy buttons + toast ---- */
+/* ---- feedback: busy buttons + toast + modal ---- */
 function toast(msg, kind) {
   const box = document.getElementById('toast');
   const d = document.createElement('div');
   if (kind === 'err') d.className = 'err';
   d.textContent = msg;
   box.appendChild(d);
-  setTimeout(() => d.remove(), 4000);
+  setTimeout(() => d.remove(), 5000);
 }
 // Wrap an async action so its button shows a spinner and can't be double-fired.
 async function withBusy(btn, fn) {
@@ -247,18 +311,85 @@ async function withBusy(btn, fn) {
     btn.innerHTML = old;
   }
 }
+// In-page dialog (native confirm/prompt look broken on phones).
+// Resolves: input mode -> string|null, confirm mode -> true|null.
+function modal(options) {
+  const o = options || {};
+  const input = !!o.input, requireText = o.requireText || '';
+  const needsInput = input || !!requireText;
+  return new Promise(resolve => {
+    const back = document.getElementById('modal');
+    document.getElementById('m-title').textContent = o.title || '';
+    document.getElementById('m-body').innerHTML = o.body || '';
+    const wrap = document.getElementById('m-input-wrap'), inp = document.getElementById('m-input');
+    if (needsInput) {
+      wrap.style.display = 'block';
+      document.getElementById('m-input-label').textContent = input ? (o.inputLabel || '') : ('Type "' + requireText + '" to confirm');
+      inp.value = input ? (o.inputValue || '') : '';
+      inp.placeholder = input ? (o.placeholder || '') : requireText;
+    } else { wrap.style.display = 'none'; inp.value = ''; }
+    document.getElementById('m-err').textContent = '';
+    const ok = document.getElementById('m-ok'), cancel = document.getElementById('m-cancel');
+    ok.textContent = o.okLabel || 'OK';
+    ok.className = o.danger ? 'danger' : '';
+    back.classList.remove('hidden');
+    const close = val => { back.classList.add('hidden'); document.removeEventListener('keydown', onKey); resolve(val); };
+    ok.onclick = () => {
+      if (requireText && inp.value !== requireText) { document.getElementById('m-err').textContent = 'name mismatch, aborted'; return; }
+      close(needsInput ? (input ? inp.value : true) : true);
+    };
+    cancel.onclick = () => close(null);
+    back.onclick = e => { if (e.target === back) close(null); };
+    const onKey = e => { if (e.key === 'Escape') close(null); else if (e.key === 'Enter') ok.click(); };
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => { (needsInput ? inp : ok).focus(); }, 30);
+  });
+}
+
+/* ---- health + info (render first, probe in background) ---- */
+async function refreshHealth() {
+  const el = document.getElementById('health');
+  el.innerHTML = '<span class="hb wait">checking backends…</span>';
+  try {
+    const h = await api('GET', '/api/health', undefined, false, 8000);
+    const order = ['active_backend', 'qdrant', 'vectra', 'embedding', 'rerank'];
+    const keys = order.filter(k => k in h).concat(Object.keys(h).filter(k => !order.includes(k)));
+    el.innerHTML = '';
+    for (const k of keys) {
+      const v = String(h[k]);
+      const b = document.createElement('span');
+      if (k === 'active_backend') { b.className = 'hb'; b.textContent = 'active: ' + (v || '(config)'); }
+      else { const ok = v === 'ok'; b.className = 'hb ' + (ok ? 'ok' : 'bad'); b.textContent = k + ' ' + (ok ? 'ok' : 'down'); b.title = v; }
+      el.appendChild(b);
+    }
+  } catch (e) {
+    el.innerHTML = '<span class="hb bad">health failed: ' + esc(e.message) + '</span>';
+  }
+}
+async function loadInfo() {
+  try {
+    const i = await api('GET', '/api/info', undefined, false, 5000);
+    document.getElementById('ver').textContent = 'v' + i.version + ' · ' + i.commit + ' · up ' + fmtUptime(i.uptime_seconds);
+  } catch (e) { document.getElementById('ver').textContent = ''; }
+}
 
 /* ---- collections ---- */
 async function load() {
-  try {
-    const h = await api('GET', '/api/health');
-    document.getElementById('health').textContent = Object.entries(h).map(([k, v]) => k + ': ' + v).join('  |  ');
-  } catch (e) { document.getElementById('health').textContent = 'health failed: ' + e.message; }
-  let cols = [];
-  try { cols = await api('GET', '/api/collections'); } catch (e) { return; }
+  renderCollectionsLoading();
+  await Promise.all([refreshHealth(), refreshCollections()]);
+}
+function renderCollectionsLoading() {
+  const tb = document.querySelector('#tbl tbody');
+  if (tb.childElementCount) return; // keep existing rows while refreshing
+  tb.innerHTML = '<tr><td colspan="8" class="dim">loading collections…</td></tr>';
+}
+async function refreshCollections() {
+  const tb = document.querySelector('#tbl tbody');
+  let cols;
+  try { cols = await api('GET', '/api/collections', undefined, false, 8000); }
+  catch (e) { tb.innerHTML = '<tr><td colspan="8" class="dim">collections unavailable: ' + esc(e.message) + '</td></tr>'; return; }
   colsCache = cols;
   document.getElementById('col-list').innerHTML = cols.map(c => '<option value="' + esc(c.name) + '">').join('');
-  const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
   document.getElementById('col-count').textContent = cols.length + ' total · ' + cols.filter(c => c.exists).length + ' present';
   for (const c of cols) {
@@ -272,14 +403,16 @@ async function load() {
     const prov = c.exists
       ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + ' · ' + esc(c.embed_model || '?') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
       : '<span class="dim">no vectors</span>';
-    tr.innerHTML = '<td><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
-      '<td><span class="cname">' + esc(c.name) + '</span>' + (c.display_name ? '<br><small class="dim">' + esc(c.display_name) + '</small>' : '') + '</td>' +
-      '<td class="num">' + (c.exists ? c.chunk_count : '—') + '</td>' +
-      '<td><span class="badge ' + (c.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(c.backend || '?') + '</span></td>' +
-      '<td>' + status + '</td>' +
-      '<td>' + esc((c.consumers || []).join(', ')) + '</td>' +
-      '<td class="prov">' + prov + '</td>';
+    tr.innerHTML =
+      '<td data-label="ID"><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
+      '<td data-label="Collection"><span class="cname">' + esc(c.name) + '</span>' + (c.display_name ? '<br><small class="dim">' + esc(c.display_name) + '</small>' : '') + '</td>' +
+      '<td data-label="Chunks" class="num">' + (c.exists ? c.chunk_count : '—') + '</td>' +
+      '<td data-label="Backend"><span class="badge ' + (c.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(c.backend || '?') + '</span></td>' +
+      '<td data-label="Status">' + status + '</td>' +
+      '<td data-label="Consumers">' + esc((c.consumers || []).join(', ')) + '</td>' +
+      '<td data-label="Provenance" class="prov">' + prov + '</td>';
     const td = document.createElement('td');
+    td.setAttribute('data-label', '');
     const b = document.createElement('button');
     b.textContent = 'manage';
     b.onclick = () => withBusy(b, () => select(c.name));
@@ -289,7 +422,7 @@ async function load() {
   }
 }
 async function newCollection() {
-  const raw = prompt('New collection id (A-Za-z0-9_-, e.g. global_memory):');
+  const raw = await modal({title: 'New collection', input: true, inputLabel: 'Collection id (A-Za-z0-9_-, e.g. global_memory)', okLabel: 'Create'});
   if (raw == null) return;
   const name = raw.trim();
   if (!name) return;
@@ -297,7 +430,7 @@ async function newCollection() {
     await api('POST', '/api/collections', {name: name});
     await load();
     await select(name);
-  } catch (e) { alert('create failed: ' + e.message); }
+  } catch (e) { toast('create failed: ' + e.message, 'err'); }
 }
 async function select(name) {
   cur = name;
@@ -331,23 +464,27 @@ async function saveMeta() {
       enabled: document.getElementById('f-enabled').checked
     });
     load();
-  } catch (e) { alert('save failed: ' + e.message); }
+  } catch (e) { toast('save failed: ' + e.message, 'err'); }
 }
 async function backfill() {
   try {
     const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/backfill', {});
-    alert('backfilled: ' + JSON.stringify(r.payload));
-  } catch (e) { alert('backfill failed: ' + e.message); }
+    toast('backfilled: ' + JSON.stringify(r.payload));
+  } catch (e) { toast('backfill failed: ' + e.message, 'err'); }
 }
 async function delCol() {
-  if (!confirm('PERMANENTLY delete collection "' + cur + '" and all its vectors?')) return;
-  if (prompt('Type the collection name to confirm:') !== cur) { alert('name mismatch, aborted'); return; }
+  const ok = await modal({
+    title: 'Delete collection',
+    body: 'PERMANENTLY delete <b>' + esc(cur) + '</b> and all its vectors?',
+    okLabel: 'Delete', danger: true, requireText: cur
+  });
+  if (!ok) return;
   try {
     await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/delete', {confirm: true});
     cur = null;
     document.getElementById('detail').style.display = 'none';
     load();
-  } catch (e) { alert('delete failed: ' + e.message); }
+  } catch (e) { toast('delete failed: ' + e.message, 'err'); }
 }
 async function testRecall() {
   const q = document.getElementById('q').value;
@@ -359,7 +496,7 @@ async function testRecall() {
       query: q, top_k: +document.getElementById('q-topk').value || 3,
       threshold: +document.getElementById('q-thr').value || 0,
       rerank: document.getElementById('q-rerank').checked
-    });
+    }, false, 60000);
     box.innerHTML = r.results.length ? '' : 'no results';
     for (const x of r.results) {
       const d = document.createElement('div');
@@ -428,13 +565,16 @@ async function saveSettings() {
 const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
 async function loadFiles() {
   let files = [];
-  try { files = await api('GET', '/api/files'); } catch (e) { alert('files failed: ' + e.message); return; }
+  try { files = await api('GET', '/api/files'); } catch (e) { toast('files failed: ' + e.message, 'err'); return; }
   const tb = document.querySelector('#ftbl tbody');
   tb.innerHTML = '';
   for (const f of files) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td>' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td><td>' + fmtSize(f.size) + '</td><td>' + badge(f.status) + '</td>';
+    tr.innerHTML = '<td data-label="File">' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td>' +
+      '<td data-label="Size" class="num">' + fmtSize(f.size) + '</td>' +
+      '<td data-label="Status">' + badge(f.status) + '</td>';
     const td = document.createElement('td');
+    td.setAttribute('data-label', '');
     const bp = document.createElement('button'); bp.textContent = 'preview';
     bp.onclick = () => withBusy(bp, () => openIndex(f.path, true));
     const bi = document.createElement('button'); bi.textContent = 'Vectorize…';
@@ -446,15 +586,15 @@ async function loadFiles() {
 }
 async function upload() {
   const inp = document.getElementById('up-file');
-  if (!inp.files.length) { alert('pick a file first'); return; }
+  if (!inp.files.length) { toast('pick a file first', 'err'); return; }
   const fd = new FormData();
   fd.append('file', inp.files[0]);
   try {
-    const r = await api('POST', '/api/upload', fd, true);
-    alert('uploaded: ' + r.path);
+    const r = await api('POST', '/api/upload', fd, true, 120000);
+    toast('uploaded: ' + r.path);
     inp.value = '';
     loadFiles();
-  } catch (e) { alert('upload failed: ' + e.message); }
+  } catch (e) { toast('upload failed: ' + e.message, 'err'); }
 }
 function openIndex(path, autoPreview) {
   ipFile = path;
@@ -496,7 +636,7 @@ async function preview() {
       path: ipFile,
       chunk_size: +document.getElementById('ip-size').value || 0,
       overlap_percent: +document.getElementById('ip-overlap').value || 0
-    });
+    }, false, 60000);
     box.innerHTML = '<b>' + r.chunks + ' chunks</b> (size ' + r.size + ' / overlap ' + r.overlap + ', zero token spent)';
     for (const s of r.samples) {
       const d = document.createElement('div');
@@ -507,8 +647,11 @@ async function preview() {
 }
 async function submitIndex() {
   const col = document.getElementById('ip-col').value.trim();
-  if (!col) { alert('collection name required'); return; }
-  if (document.getElementById('ip-mode').value === 'rebuild' && !confirm('Rebuild "' + col + '"? Existing vectors are purged first.')) return;
+  if (!col) { toast('collection name required', 'err'); return; }
+  if (document.getElementById('ip-mode').value === 'rebuild') {
+    const ok = await modal({title: 'Rebuild collection', body: 'Rebuild "' + esc(col) + '"? Existing vectors are purged first.', okLabel: 'Rebuild', danger: true});
+    if (!ok) return;
+  }
   try {
     const job = await api('POST', '/api/index', {
       path: ipFile, collection: col,
@@ -519,8 +662,8 @@ async function submitIndex() {
     });
     loadJobs();
     document.getElementById('side').scrollIntoView();
-    toast('job ' + job.id + ' queued — watch the sidebar');
-  } catch (e) { alert('submit failed: ' + e.message); }
+    toast('job ' + job.id + ' queued — watch the side panel');
+  } catch (e) { toast('submit failed: ' + e.message, 'err'); }
 }
 
 /* ---- jobs sidebar ---- */
@@ -530,7 +673,7 @@ async function clearJobs() {
 }
 async function loadJobs() {
   let jobs = [];
-  try { jobs = await api('GET', '/api/jobs'); } catch (e) { return; }
+  try { jobs = await api('GET', '/api/jobs', undefined, false, 5000); } catch (e) { return; }
   const box = document.getElementById('jobs');
   if (!jobs.length) { box.innerHTML = '<small style="color:#666">no jobs yet</small>'; return; }
   box.innerHTML = '';
@@ -546,16 +689,20 @@ async function loadJobs() {
   }
 }
 
-load().then(loadSettings); loadFiles(); loadJobs(); loadAudit();
-setInterval(loadJobs, 2000);
 async function loadAudit() {
   try {
-    const j = await api('GET', '/api/audit?lines=80');
+    const j = await api('GET', '/api/audit?lines=80', undefined, false, 5000);
     const el = document.getElementById('audit');
     el.textContent = j.log;
     el.scrollTop = el.scrollHeight;
   } catch (e) { document.getElementById('audit').textContent = 'audit unavailable: ' + e.message; }
 }
+
+loadInfo();
+load().then(loadSettings);
+loadFiles(); loadJobs(); loadAudit();
+setInterval(() => { if (!document.hidden) loadJobs(); }, 3000);
+setInterval(() => { if (!document.hidden) refreshHealth(); }, 30000);
 </script>
 </body>
 </html>

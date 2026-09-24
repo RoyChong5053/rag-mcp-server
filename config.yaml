@@ -14,6 +14,9 @@ registry_path: "collections.json"
 # Runtime settings (search defaults edited via WebUI). Lives next to the binary.
 settings_path: "settings.json"
 
+# Append-only audit log tailed by the dashboard (MCP calls + tool usage).
+audit_path: "logs/rag-mcp.log"
+
 # Data-bank root browsed by the dashboard (server-local paths).
 docs_dir: "docs"
 

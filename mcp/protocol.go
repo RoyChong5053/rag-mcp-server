@@ -27,7 +27,7 @@ type ResponseError struct {
 // MCP protocol constants
 
 const (
-	JSONRPCVersion = "2.0"
+	JSONRPCVersion  = "2.0"
 	ProtocolVersion = "2025-06-18"
 	ServerName      = "rag-mcp-server"
 	ServerVersion   = "0.1.0"
@@ -36,10 +36,10 @@ const (
 // MCP method names
 
 const (
-	MethodInitialize          = "initialize"
-	MethodNotificationsInit   = "notifications/initialized"
-	MethodToolsList           = "tools/list"
-	MethodToolsCall           = "tools/call"
+	MethodInitialize        = "initialize"
+	MethodNotificationsInit = "notifications/initialized"
+	MethodToolsList         = "tools/list"
+	MethodToolsCall         = "tools/call"
 )
 
 // Standard JSON-RPC error codes
@@ -84,9 +84,9 @@ type ContentBlock struct {
 // InitializeParams represents the params for initialize request
 
 type InitializeParams struct {
-	ProtocolVersion string    `json:"protocolVersion"`
+	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    ClientCapabilities `json:"capabilities"`
-	ClientInfo      ClientInfo `json:"clientInfo"`
+	ClientInfo      ClientInfo         `json:"clientInfo"`
 }
 
 type ClientCapabilities struct {
@@ -101,9 +101,9 @@ type ClientInfo struct {
 // InitializeResult represents the response to initialize
 
 type InitializeResult struct {
-	ProtocolVersion string           `json:"protocolVersion"`
+	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    ServerCapabilities `json:"capabilities"`
-	ServerInfo      ServerInfo       `json:"serverInfo"`
+	ServerInfo      ServerInfo         `json:"serverInfo"`
 }
 
 type ServerCapabilities struct {

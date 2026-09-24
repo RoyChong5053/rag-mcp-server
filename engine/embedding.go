@@ -227,8 +227,13 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	return 0
 }
 
-// Ping tests connectivity to the embedding endpoint
+// Ping tests connectivity to the embedding endpoint. Uses a single attempt
+// (no exponential-backoff retries) so health checks stay fast and quiet.
 func (c *EmbeddingClient) Ping() error {
-	_, err := c.CreateEmbeddings([]string{"test"})
+	req := EmbeddingRequest{Model: c.model, Input: []string{"test"}}
+	_, err := c.callEndpoint(c.baseURL, req)
+	if err != nil && c.backupURL != "" {
+		_, err = c.callEndpoint(c.backupURL, req)
+	}
 	return err
 }

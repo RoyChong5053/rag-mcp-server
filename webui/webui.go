@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,13 @@ import (
 //go:embed index.html
 var indexHTML string
 
+// BuildInfo is process metadata shown in the dashboard header.
+type BuildInfo struct {
+	Version   string
+	Commit    string
+	StartedAt time.Time
+}
+
 // Handler serves the management dashboard and its JSON API.
 // It is meant to bind localhost-only (see AdminConfig); reach it via ssh tunnel.
 type Handler struct {
@@ -26,16 +34,21 @@ type Handler struct {
 	auditPath string
 	docsRoot  string
 	jobs      *Manager
+	build     BuildInfo
 }
 
-func New(eng *engine.Engine, auditPath, docsRoot string) *Handler {
-	return &Handler{eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2)}
+func New(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo) *Handler {
+	if info.StartedAt.IsZero() {
+		info.StartedAt = time.Now()
+	}
+	return &Handler{eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2), build: info}
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", h.serveIndex)
 	mux.HandleFunc("GET /api/health", h.health)
+	mux.HandleFunc("GET /api/info", h.info)
 	mux.HandleFunc("GET /api/collections", h.listCollections)
 	mux.HandleFunc("POST /api/collections", h.createCollection)
 	mux.HandleFunc("GET /api/collections/{name}", h.getCollection)
@@ -64,6 +77,17 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.eng.HealthCheck())
+}
+
+// info reports build/uptime metadata for the dashboard header.
+func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        h.build.Version,
+		"commit":         h.build.Commit,
+		"go_version":     runtime.Version(),
+		"started_at":     h.build.StartedAt.UTC().Format(time.RFC3339),
+		"uptime_seconds": int64(time.Since(h.build.StartedAt).Seconds()),
+	})
 }
 
 // getSettings returns the runtime search settings shared by all frontends.
@@ -360,7 +384,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	}
 	// SearchDebug also reports candidates the threshold killed,
 	// so recall tuning is evidence-based instead of guesswork.
-	res, err := h.eng.SearchDebug(body.Query, r.PathValue("name"), body.TopK, useRerank, threshold)
+	res, err := h.eng.SearchDebug(body.Query, r.PathValue("name"), body.TopK, useRerank, threshold, nil)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

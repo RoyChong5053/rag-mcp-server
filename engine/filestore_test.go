@@ -82,7 +82,7 @@ func TestFileStoreUpsertSearchAndReload(t *testing.T) {
 
 	// Reload from disk with a fresh instance: data must survive.
 	fs2 := NewFileStore(vectra, docs)
-	res, err := fs2.Search("col", []float32{1, 0, 0}, 10, 0)
+	res, err := fs2.Search("col", []float32{1, 0, 0}, 10, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestFileStoreUpsertSearchAndReload(t *testing.T) {
 	}
 
 	// Threshold filters the orthogonal result.
-	res, err = fs2.Search("col", []float32{1, 0, 0}, 10, 0.5)
+	res, err = fs2.Search("col", []float32{1, 0, 0}, 10, 0.5, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestFileStoreUpsertIdempotent(t *testing.T) {
 	if info.ChunkCount != 1 {
 		t.Fatalf("same ID must replace, count=%d want 1", info.ChunkCount)
 	}
-	res, _ := fs.Search("col", []float32{1, 0}, 5, 0)
+	res, _ := fs.Search("col", []float32{1, 0}, 5, 0, nil)
 	if len(res) != 1 || res[0].Payload["text"] != "v2" {
 		t.Fatalf("expected updated text: %+v", res)
 	}
@@ -146,7 +146,7 @@ func TestFileStoreDeleteAndSetPayload(t *testing.T) {
 	if err := fs.SetPayload("col", map[string]any{"indexed_at": "now"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	res, _ := fs.Search("col", []float32{1, 0}, 5, 0)
+	res, _ := fs.Search("col", []float32{1, 0}, 5, 0, nil)
 	if res[0].Payload["indexed_at"] != "now" {
 		t.Fatalf("backfill missing: %+v", res[0].Payload)
 	}
@@ -164,7 +164,7 @@ func TestFileStoreDeleteAndSetPayload(t *testing.T) {
 	if info.ChunkCount != 1 {
 		t.Fatalf("after delete count=%d want 1", info.ChunkCount)
 	}
-	res, _ = fs.Search("col", []float32{1, 0}, 5, 0)
+	res, _ = fs.Search("col", []float32{1, 0}, 5, 0, nil)
 	for _, r := range res {
 		if r.Payload["text"] == "alpha" {
 			t.Fatalf("alpha should have been deleted")
@@ -216,5 +216,103 @@ func TestFileStorePingAndDeleteAll(t *testing.T) {
 	info, _ := fs.GetCollectionInfo("col")
 	if info.ChunkCount != 0 {
 		t.Fatalf("empty filter should clear all, count=%d", info.ChunkCount)
+	}
+}
+
+func TestFileStoreIndexCacheServesRepeatedSearch(t *testing.T) {
+	fs, docs, vectra := newTestStore(t)
+	_ = fs.CreateCollection("col")
+	_ = fs.UpsertPoints("col", []Point{pt(1, filepath.Join(docs, "a.md"), []float32{1, 0}, "alpha")})
+	if _, err := fs.Search("col", []float32{1, 0}, 5, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	var indexPath string
+	_ = filepath.Walk(filepath.Join(vectra, "col"), func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && info.Name() == "index.json" {
+			indexPath = path
+		}
+		return nil
+	})
+	if indexPath == "" {
+		t.Fatal("index.json not found")
+	}
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatal(err)
+	}
+	res, err := fs.Search("col", []float32{1, 0}, 5, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Payload["text"] != "alpha" {
+		t.Fatalf("cache should serve search after file removal: %+v", res)
+	}
+}
+
+func TestFileStorePrewarm(t *testing.T) {
+	fs, docs, _ := newTestStore(t)
+	_ = fs.CreateCollection("col")
+	_ = fs.UpsertPoints("col", []Point{pt(1, filepath.Join(docs, "a.md"), []float32{1, 0}, "alpha")})
+	if err := fs.Prewarm("col"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.PrewarmAll(); err != nil {
+		t.Fatal(err)
+	}
+	res, err := fs.Search("col", []float32{1, 0}, 5, 0, nil)
+	if err != nil || len(res) != 1 {
+		t.Fatalf("search after prewarm: %v %+v", err, res)
+	}
+}
+
+func TestFileStoreDeleteCollectionDropsCache(t *testing.T) {
+	fs, docs, _ := newTestStore(t)
+	_ = fs.CreateCollection("col")
+	_ = fs.UpsertPoints("col", []Point{pt(1, filepath.Join(docs, "a.md"), []float32{1, 0}, "alpha")})
+	if _, err := fs.Search("col", []float32{1, 0}, 5, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.DeleteCollection("col"); err != nil {
+		t.Fatal(err)
+	}
+	fs.cacheMu.Lock()
+	n := len(fs.indexCache)
+	fs.cacheMu.Unlock()
+	if n != 0 {
+		t.Fatalf("delete collection should drop cache entries, got %d", n)
+	}
+}
+
+func TestFileStoreSearchFilter(t *testing.T) {
+	fs, docs, _ := newTestStore(t)
+	_ = fs.CreateCollection("col")
+	src := filepath.Join(docs, "a.md")
+	_ = fs.UpsertPoints("col", []Point{
+		{ID: 1, Vector: []float32{1, 0}, Payload: map[string]any{"text": "alpha", "source_file": src, "metadata": map[string]any{"role": "user"}}},
+		{ID: 2, Vector: []float32{0, 1}, Payload: map[string]any{"text": "beta", "source_file": src, "metadata": map[string]any{"role": "assistant"}}},
+	})
+
+	// Qdrant-style must clause on a nested metadata key.
+	must := map[string]any{"must": []any{map[string]any{"key": "metadata.role", "match": map[string]any{"value": "user"}}}}
+	res, err := fs.Search("col", []float32{1, 0}, 10, 0, must)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Payload["text"] != "alpha" {
+		t.Fatalf("nested metadata filter: %+v", res)
+	}
+
+	// Flat dotted-key form is equivalent.
+	res, err = fs.Search("col", []float32{1, 0}, 10, 0, map[string]any{"metadata.role": "assistant"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Payload["text"] != "beta" {
+		t.Fatalf("flat metadata filter: %+v", res)
+	}
+
+	// No filter still returns everything.
+	res, err = fs.Search("col", []float32{1, 0}, 10, 0, nil)
+	if err != nil || len(res) != 2 {
+		t.Fatalf("unfiltered search: %v %+v", err, res)
 	}
 }

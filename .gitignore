@@ -43,3 +43,7 @@ collections.json.tmp
 # Server-local runtime settings (WebUI-edited search defaults) - never commit
 settings.json
 settings.json.tmp
+
+# Runtime audit log (persisted, server-local) - never commit
+logs/
+*.log

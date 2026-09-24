@@ -15,7 +15,9 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
 			"Omit collection_id to use the active backend's configured default collection; if qdrant is unreachable it automatically fails back to the vectra default (when configured). " +
 			"With no default configured it searches all enabled collections. " +
-			"top_k, threshold and reranking default to server (WebUI) settings when omitted.",
+			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
+			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
+			"or a raw Qdrant filter for advanced clauses.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -35,6 +37,15 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 					"type":        "number",
 					"description": "Optional: minimum similarity score 0-1. Omit for the server default (lower it when top_k is large).",
 				},
+				"metadata": map[string]any{
+					"type":                 "object",
+					"description":          "Optional: exact-match metadata filter, e.g. {\"role\":\"user\"} matches chunks whose metadata.role == user. Applied to both backends.",
+					"additionalProperties": true,
+				},
+				"filter": map[string]any{
+					"type":        "object",
+					"description": "Optional: raw Qdrant filter (advanced). Takes precedence over metadata. Vectra supports match.value clauses only.",
+				},
 			},
 			"required": []string{"query"},
 		},
@@ -51,8 +62,9 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				threshold = &f
 			}
 		}
+		filter := getFilterArg(args)
 
-		results, err := eng.SearchDefault(query, collectionID, topK, threshold)
+		results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
 		if err != nil {
 			return nil, err
 		}
@@ -319,6 +331,27 @@ func getStringSliceArg(args map[string]any, key string) []string {
 		}
 	}
 	return out
+}
+
+// getFilterArg builds a store filter from search_memory args. An explicit
+// "filter" wins; otherwise a flat "metadata" map becomes an AND of exact
+// metadata.<key> matches (supported by both Qdrant and vectra).
+func getFilterArg(args map[string]any) map[string]any {
+	if f, ok := args["filter"].(map[string]any); ok && len(f) > 0 {
+		return f
+	}
+	meta := getStringMapArg(args, "metadata")
+	if len(meta) == 0 {
+		return nil
+	}
+	must := make([]any, 0, len(meta))
+	for k, v := range meta {
+		must = append(must, map[string]any{
+			"key":   "metadata." + k,
+			"match": map[string]any{"value": v},
+		})
+	}
+	return map[string]any{"must": must}
 }
 
 func formatSearchResults(results []engine.SearchResult) string {

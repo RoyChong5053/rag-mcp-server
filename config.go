@@ -15,6 +15,11 @@ type Config struct {
 	Chunking     ChunkingConfig `yaml:"chunking"`
 	Rerank       RerankConfig   `yaml:"rerank"`
 	RegistryPath string         `yaml:"registry_path"`
+	// AuditPath is the append-only log the dashboard tails (MCP method calls +
+	// tool invocations). Relative paths resolve against the config file's
+	// directory so it survives a working-directory change (systemd/setsid).
+	// Empty defaults to logs/rag-mcp.log.
+	AuditPath string `yaml:"audit_path"`
 	// SettingsPath is the runtime settings file (settings.json). It holds the
 	// search defaults edited via the WebUI; missing file = built-in defaults.
 	SettingsPath string `yaml:"settings_path"`
@@ -84,6 +89,7 @@ func DefaultConfig() *Config {
 		},
 		RegistryPath: "collections.json",
 		SettingsPath: "settings.json",
+		AuditPath:    "logs/rag-mcp.log",
 		DocsDir:      "docs",
 		Storage: StorageConfig{
 			Backend:   "qdrant",

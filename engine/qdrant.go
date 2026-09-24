@@ -13,6 +13,9 @@ import (
 type QdrantClient struct {
 	baseURL    string
 	httpClient *http.Client
+	// probeClient is used only by Ping/health checks: it fails fast (~1.5s)
+	// so a dead qdrant never stalls the dashboard for the full data timeout.
+	probeClient *http.Client
 }
 
 // NewQdrantClient creates a new Qdrant client
@@ -23,6 +26,9 @@ func NewQdrantClient(host string, port int) *QdrantClient {
 			// Short enough that a dead/blackholed qdrant fails fast so the
 			// engine can fail over to vectra; LAN round-trips are <1ms.
 			Timeout: 10 * time.Second,
+		},
+		probeClient: &http.Client{
+			Timeout: 1500 * time.Millisecond,
 		},
 	}
 }
@@ -110,13 +116,17 @@ func (c *QdrantClient) UpsertPoints(collection string, points []Point) error {
 	return c.put(fmt.Sprintf("/collections/%s/points", collection), body)
 }
 
-// Search performs a vector search
-func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64) ([]StoreSearchResult, error) {
+// Search performs a vector search. An optional Qdrant filter narrows the
+// candidate set by payload (e.g. {"must":[{"key":"metadata.role","match":{"value":"user"}}]}).
+func (c *QdrantClient) Search(collection string, vector []float32, limit int, threshold float64, filter map[string]any) ([]StoreSearchResult, error) {
 	body := map[string]any{
 		"vector":          vector,
 		"limit":           limit,
 		"score_threshold": threshold,
 		"with_payload":    true,
+	}
+	if len(filter) > 0 {
+		body["filter"] = filter
 	}
 
 	resp, err := c.post(fmt.Sprintf("/collections/%s/points/search", collection), body)
@@ -163,16 +173,25 @@ func (c *QdrantClient) SetPayload(collection string, payload map[string]any, fil
 	return err
 }
 
-// Ping checks if Qdrant is reachable
+// Ping checks if Qdrant is reachable. Uses the short-timeout probe client so
+// health checks and dashboard listings never hang on a blackholed host.
 func (c *QdrantClient) Ping() error {
-	resp, err := c.get("/collections")
+	resp, err := c.probeClient.Get(c.baseURL + "/collections")
 	if err != nil {
-		return fmt.Errorf("qdrant unreachable: %w", err)
+		return unavailable(fmt.Errorf("qdrant unreachable: %w", err))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return unavailable(err)
+	}
+	if resp.StatusCode >= 400 {
+		return unavailable(fmt.Errorf("qdrant error %d: %s", resp.StatusCode, string(body)))
 	}
 	var result struct {
 		Status string `json:"status"`
 	}
-	if err := json.Unmarshal(resp, &result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("invalid qdrant response: %w", err)
 	}
 	if result.Status != "ok" {

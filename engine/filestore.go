@@ -32,6 +32,12 @@ type FileStore struct {
 	root       string
 	sourceRoot string // docs dir; stripped from source paths to key folders
 	mu         sync.RWMutex
+
+	// cacheMu guards indexCache only (a load may populate it while Search
+	// holds mu.RLock). Keys are collection + "\x00" + source key. Entries are
+	// never mutated after insert: writers clone-or-replace via saveIndex.
+	cacheMu    sync.Mutex
+	indexCache map[string]*vectraIndex
 }
 
 // vectraItem mirrors the Vectra/SillyTavern index item.
@@ -79,7 +85,11 @@ func NewFileStore(root, sourceRoot string) *FileStore {
 			sourceRoot = abs
 		}
 	}
-	return &FileStore{root: root, sourceRoot: sourceRoot}
+	return &FileStore{root: root, sourceRoot: sourceRoot, indexCache: map[string]*vectraIndex{}}
+}
+
+func indexCacheKey(collection, key string) string {
+	return collection + "\x00" + key
 }
 
 var _ VectorStore = (*FileStore)(nil)
@@ -194,6 +204,14 @@ func (f *FileStore) saveCatalog(name string, cat *vectraCatalog) error {
 }
 
 func (f *FileStore) loadIndex(name, key string) (*vectraIndex, error) {
+	ck := indexCacheKey(name, key)
+	f.cacheMu.Lock()
+	if idx, ok := f.indexCache[ck]; ok {
+		f.cacheMu.Unlock()
+		return idx, nil
+	}
+	f.cacheMu.Unlock()
+
 	data, err := os.ReadFile(f.indexPath(name, key))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -205,7 +223,11 @@ func (f *FileStore) loadIndex(name, key string) (*vectraIndex, error) {
 	if err := json.Unmarshal(data, &idx); err != nil {
 		return nil, fmt.Errorf("parse index %s/%s: %w", name, key, err)
 	}
-	return &idx, nil
+	loaded := &idx
+	f.cacheMu.Lock()
+	f.indexCache[ck] = loaded
+	f.cacheMu.Unlock()
+	return loaded, nil
 }
 
 func (f *FileStore) saveIndex(name, key string, idx *vectraIndex) error {
@@ -219,7 +241,63 @@ func (f *FileStore) saveIndex(name, key string, idx *vectraIndex) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(f.indexPath(name, key), data)
+	if err := writeFileAtomic(f.indexPath(name, key), data); err != nil {
+		return err
+	}
+	f.cacheMu.Lock()
+	f.indexCache[indexCacheKey(name, key)] = idx
+	f.cacheMu.Unlock()
+	return nil
+}
+
+func (f *FileStore) dropCachedCollection(name string) {
+	prefix := name + "\x00"
+	f.cacheMu.Lock()
+	for k := range f.indexCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(f.indexCache, k)
+		}
+	}
+	f.cacheMu.Unlock()
+}
+
+// Prewarm loads every source index for the collection into the cache so the
+// first search does not pay the full JSON-parse cost. Best-effort: missing
+// sources are skipped.
+func (f *FileStore) Prewarm(collection string) error {
+	f.mu.RLock()
+	cat, err := f.loadCatalog(collection)
+	f.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	if cat == nil {
+		return nil
+	}
+	for _, meta := range cat.Sources {
+		if _, err := f.loadIndex(collection, meta.Key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PrewarmAll warms every collection under the root. Used at process start.
+func (f *FileStore) PrewarmAll() error {
+	entries, err := os.ReadDir(f.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		_ = f.Prewarm(e.Name())
+	}
+	return nil
 }
 
 // --- VectorStore ---------------------------------------------------------
@@ -373,7 +451,8 @@ func (f *FileStore) UpsertPoints(collection string, points []Point) error {
 }
 
 // Search loads every source index and returns the best cosine matches.
-func (f *FileStore) Search(collection string, vector []float32, limit int, threshold float64) ([]StoreSearchResult, error) {
+// An optional payload filter (same shape as DeletePoints) narrows candidates.
+func (f *FileStore) Search(collection string, vector []float32, limit int, threshold float64, filter map[string]any) ([]StoreSearchResult, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -383,6 +462,10 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 	}
 	if cat == nil {
 		return nil, nil
+	}
+	matcher, err := newPayloadMatcher(filter)
+	if err != nil {
+		return nil, err
 	}
 	qNorm := vectorNorm(vector)
 	if qNorm == 0 {
@@ -399,6 +482,16 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 			if len(it.Vector) != len(vector) {
 				continue
 			}
+			payload := cloneAnyMap(it.Metadata)
+			if payload == nil {
+				payload = map[string]any{}
+			}
+			if _, ok := payload["source_file"]; !ok {
+				payload["source_file"] = source
+			}
+			if !matcher(payload) {
+				continue
+			}
 			vNorm := it.Norm
 			if vNorm == 0 {
 				vNorm = vectorNorm(it.Vector)
@@ -406,13 +499,6 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 			score := cosine(vector, qNorm, it.Vector, vNorm)
 			if threshold > 0 && score < threshold {
 				continue
-			}
-			payload := cloneAnyMap(it.Metadata)
-			if payload == nil {
-				payload = map[string]any{}
-			}
-			if _, ok := payload["source_file"]; !ok {
-				payload["source_file"] = source
 			}
 			out = append(out, StoreSearchResult{ID: parsePointID(it.ID), Score: score, Payload: payload})
 		}
@@ -473,6 +559,7 @@ func (f *FileStore) DeleteCollection(name string) error {
 	if err := os.RemoveAll(f.collectionDir(name)); err != nil {
 		return err
 	}
+	f.dropCachedCollection(name)
 	return nil
 }
 
@@ -583,7 +670,8 @@ func cloneAnyMap(m map[string]any) map[string]any {
 
 // newPayloadMatcher builds a predicate from a Qdrant-style filter. An empty
 // filter matches everything. Supported: flat {key: value} and
-// {"must":[{"key":..,"match":{"value":..}}]}.
+// {"must":[{"key":..,"match":{"value":..}}]}. Dotted keys (e.g. "metadata.role")
+// traverse nested payload objects.
 func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error) {
 	if len(filter) == 0 {
 		return func(map[string]any) bool { return true }, nil
@@ -608,11 +696,17 @@ func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error)
 			if !present {
 				return nil, fmt.Errorf("vectra backend: only match.value filters are supported")
 			}
-			conds = append(conds, func(meta map[string]any) bool { return looseEqual(meta[key], val) })
+			conds = append(conds, func(meta map[string]any) bool {
+				got, ok := lookupPath(meta, key)
+				return ok && looseEqual(got, val)
+			})
 		}
 	} else {
 		for k, v := range filter {
-			conds = append(conds, func(meta map[string]any) bool { return looseEqual(meta[k], v) })
+			conds = append(conds, func(meta map[string]any) bool {
+				got, ok := lookupPath(meta, k)
+				return ok && looseEqual(got, v)
+			})
 		}
 	}
 	return func(meta map[string]any) bool {
@@ -623,6 +717,23 @@ func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error)
 		}
 		return true
 	}, nil
+}
+
+// lookupPath resolves a dotted key against nested payload maps.
+func lookupPath(m map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	var cur any = m
+	for _, p := range parts {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = mm[p]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
 func looseEqual(a, b any) bool {

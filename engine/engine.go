@@ -145,6 +145,18 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	return e, nil
 }
 
+// PrewarmVectra loads file-backed indexes into memory so the first search after
+// restart does not pay multi-second JSON parses. Safe to call in the background.
+func (e *Engine) PrewarmVectra() {
+	fs, ok := e.stores[BackendVectra].(*FileStore)
+	if !ok {
+		return
+	}
+	if err := fs.PrewarmAll(); err != nil {
+		log.Printf("vectra prewarm: %v", err)
+	}
+}
+
 // Settings exposes the runtime settings store for management surfaces.
 func (e *Engine) Settings() *settings.Store {
 	return e.settings
@@ -256,6 +268,21 @@ func (e *Engine) listAllStoresDetailed() []storeCollection {
 		if !ok {
 			continue
 		}
+		// A backend marked down recently is skipped outright; otherwise probe
+		// with a short budget before listing so a dead host cannot stall the
+		// dashboard for the full data timeout.
+		if e.backendDown(backend) {
+			log.Printf("ListCollections skipped %s (marked down)", backend)
+			continue
+		}
+		if err := probeWithTimeout(s.Ping, 3*time.Second); err != nil {
+			if err != errProbeTimeout && IsUnavailable(err) {
+				e.markBackendDown(backend)
+			}
+			log.Printf("ListCollections on %s failed: %v", backend, err)
+			continue
+		}
+		e.markBackendUp(backend)
 		cols, err := s.ListCollections()
 		if err != nil {
 			log.Printf("ListCollections on %s failed: %v", backend, err)
@@ -299,8 +326,8 @@ func (e *Engine) Registry() *registry.Registry {
 }
 
 // Search performs a semantic search with optional reranking (single collection).
-func (e *Engine) Search(query string, collectionID string, topK int, useRerank bool, threshold float64) ([]SearchResult, error) {
-	return e.SearchMulti(query, []string{collectionID}, topK, useRerank, threshold)
+func (e *Engine) Search(query string, collectionID string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
+	return e.SearchMulti(query, []string{collectionID}, topK, useRerank, threshold, filter)
 }
 
 // scopeTarget is one (backend, collection) search/write target.
@@ -323,7 +350,7 @@ type scopeTarget struct {
 //
 // A missing primary default is a loud error: silently widening to a global scan
 // dilutes recall and looks like "RAG mysticism" later.
-func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64) ([]SearchResult, error) {
+func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64, filter map[string]any) ([]SearchResult, error) {
 	st := e.settings.Get()
 
 	if topK <= 0 {
@@ -338,13 +365,13 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	if scope := strings.TrimSpace(collectionID); scope != "" {
-		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr)
+		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr, filter)
 	}
 
 	targets := e.defaultSearchTargets()
 	if len(targets) == 0 {
 		// No defaults anywhere: search all enabled collections.
-		return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr)
+		return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr, filter)
 	}
 
 	var lastErr error
@@ -353,7 +380,7 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 			lastErr = fmt.Errorf("backend %s is unavailable", BackendQdrant)
 			continue
 		}
-		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr)
+		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter)
 		if err == nil {
 			e.markBackendUp(t.backend)
 			return res, nil
@@ -396,12 +423,12 @@ func (e *Engine) defaultSearchTargets() []scopeTarget {
 
 // searchResolved searches one explicitly named collection, applying same-name
 // failover when its backend is unreachable.
-func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64) ([]SearchResult, error) {
+func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any) ([]SearchResult, error) {
 	if en := e.registry.Get(scope); en != nil && !en.Enabled {
 		return nil, fmt.Errorf("collection '%s' is disabled", scope)
 	}
 	backend := e.backendOf(scope)
-	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr)
+	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter)
 	if err == nil {
 		e.markBackendUp(backend)
 		return res, nil
@@ -418,7 +445,7 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name collection on %s to fall back to: %w", scope, backend, other, err)
 	}
 	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", scope, backend, other)
-	return e.searchCollection(other, scope, query, topK, useRerank, thr)
+	return e.searchCollection(other, scope, query, topK, useRerank, thr, filter)
 }
 
 // collectionExistsOn is a best-effort existence check that swallows errors.
@@ -442,7 +469,7 @@ func (e *Engine) embedQuery(query string) ([]float32, error) {
 
 // searchCollection embeds the query once and searches one (backend, collection),
 // optionally reranking and trimming to topK.
-func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64) ([]SearchResult, error) {
+func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
 	st := e.settings.Get()
 	rerankOn := useRerank && st.RerankEnabled
 	queryVector, err := e.embedQuery(query)
@@ -460,7 +487,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 			recallCount = topK
 		}
 	}
-	raw, err := store.Search(name, queryVector, recallCount, threshold)
+	raw, err := store.Search(name, queryVector, recallCount, threshold, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +512,8 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 // every Qdrant collection when the registry is empty (backward compatible).
 // Disabled collections are always skipped. Explicitly requested collections
 // that don't exist are a loud error; registry drift is logged and skipped.
-func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64) ([]SearchResult, error) {
+// An optional payload filter (Qdrant filter syntax) is applied to every store.
+func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
 	targets, explicit := e.resolveTargets(collections)
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no collections to search (all disabled or none exist)")
@@ -518,7 +546,7 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			}
 		}
 		backend := e.backendOf(name)
-		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold)
+		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
 		if err != nil {
 			if IsUnavailable(err) {
 				e.markBackendDown(backend)
@@ -621,7 +649,7 @@ type SearchDebugResult struct {
 // SearchDebug runs a single-collection search and reports threshold kills.
 // It embeds once and searches twice (threshold, then 0): no rerank on the
 // killed set, they are shown in raw vector order.
-func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64) (*SearchDebugResult, error) {
+func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any) (*SearchDebugResult, error) {
 	queryVector, err := e.embedQuery(query)
 	if err != nil {
 		return nil, err
@@ -636,7 +664,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		recallCount = st.RerankRecall
 	}
 
-	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold)
+	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold, filter)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -649,7 +677,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 
 	var killed []SearchResult
 	if threshold > 0 {
-		all, err := e.storeFor(collection).Search(collection, queryVector, recallCount, 0)
+		all, err := e.storeFor(collection).Search(collection, queryVector, recallCount, 0, filter)
 		if err == nil {
 			for _, r := range all {
 				if !keptIDs[r.ID] {
@@ -1379,39 +1407,80 @@ func (e *Engine) ListCollections() ([]CollectionInfo, error) {
 	return result, nil
 }
 
-// HealthCheck checks all components. Every configured backend is reported with
-// its own key (qdrant/vectra) so a disabled backend is visible too.
+// HealthCheck checks all components concurrently. Every configured backend is
+// reported with its own key (qdrant/vectra) so a disabled backend is visible
+// too. A backend already marked down is reported from cache without a fresh
+// probe, so a dead qdrant never makes the dashboard wait for a timeout.
 func (e *Engine) HealthCheck() map[string]string {
 	status := make(map[string]string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	set := func(k, v string) { mu.Lock(); status[k] = v; mu.Unlock() }
 
 	for _, backend := range []string{BackendQdrant, BackendVectra} {
 		s, ok := e.stores[backend]
 		if !ok {
 			continue
 		}
-		if err := s.Ping(); err != nil {
-			status[backend] = fmt.Sprintf("error: %v", err)
-		} else {
-			status[backend] = "ok"
+		if e.backendDown(backend) {
+			set(backend, "unavailable (cached)")
+			continue
 		}
+		wg.Add(1)
+		go func(b string, store VectorStore) {
+			defer wg.Done()
+			err := probeWithTimeout(store.Ping, 4*time.Second)
+			switch {
+			case err == errProbeTimeout:
+				set(b, "timeout")
+			case err != nil:
+				if IsUnavailable(err) {
+					e.markBackendDown(b)
+				}
+				set(b, "error: "+err.Error())
+			default:
+				e.markBackendUp(b)
+				set(b, "ok")
+			}
+		}(backend, s)
 	}
-	status["active_backend"] = e.ActiveBackend()
+	set("active_backend", e.ActiveBackend())
 
-	// Check embedding
-	if err := e.embedding.Ping(); err != nil {
-		status["embedding"] = fmt.Sprintf("error: %v", err)
-	} else {
-		status["embedding"] = "ok"
-	}
-
-	// Check rerank
-	if err := e.rerank.Ping(); err != nil {
-		status["rerank"] = fmt.Sprintf("error: %v", err)
-	} else {
-		status["rerank"] = "ok"
-	}
-
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := probeWithTimeout(e.embedding.Ping, 4*time.Second); err != nil {
+			set("embedding", "error: "+err.Error())
+		} else {
+			set("embedding", "ok")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := probeWithTimeout(e.rerank.Ping, 5*time.Second); err != nil {
+			set("rerank", "error: "+err.Error())
+		} else {
+			set("rerank", "ok")
+		}
+	}()
+	wg.Wait()
 	return status
+}
+
+// errProbeTimeout is returned by probeWithTimeout when fn outlives the budget.
+var errProbeTimeout = fmt.Errorf("probe timed out")
+
+// probeWithTimeout bounds a blocking probe. The probe goroutine is abandoned on
+// timeout (its result channel is buffered so it never leaks a blocked send).
+func probeWithTimeout(fn func() error, d time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		return errProbeTimeout
+	}
 }
 
 // convertMetadata converts map[string]any to map[string]string

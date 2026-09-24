@@ -50,7 +50,7 @@ type VectorStore interface {
 	GetCollectionInfo(name string) (*StoreCollectionInfo, error)
 	ListCollections() ([]StoreCollectionInfo, error)
 	UpsertPoints(collection string, points []Point) error
-	Search(collection string, vector []float32, limit int, threshold float64) ([]StoreSearchResult, error)
+	Search(collection string, vector []float32, limit int, threshold float64, filter map[string]any) ([]StoreSearchResult, error)
 	DeletePoints(collection string, filter map[string]any) error
 	DeleteCollection(name string) error
 	SetPayload(collection string, payload map[string]any, filter map[string]any) error
