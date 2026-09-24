@@ -8,6 +8,26 @@ An independent RAG (Retrieval-Augmented Generation) engine exposed via MCP (Mode
 
 ---
 
+## Dashboard responsiveness + ops (2026-09-25, second pass)
+
+- [x] WebUI renders the skeleton first; health/collections probed in background
+      with client-side timeouts; compact per-component health badges
+- [x] concurrent `HealthCheck` + cached-down backends; qdrant 1.5s probe client;
+      `listAllStores` short-probes before listing (no more 10s stall)
+- [x] embed/rerank probe timeouts report `slow` (amber) not `down`
+- [x] phone layout: card tables, 16px controls, larger tap targets, stacked
+      rows, jobs panel first, safe-area; in-page modal replaces alert/confirm
+- [x] jobs polling pauses when the tab is hidden
+- [x] persistent audit log (`audit_path`, default `logs/rag-mcp.log`)
+- [x] `GET /api/info` (version/commit/uptime) shown in the header
+- [x] `search_memory` `metadata`/`filter` args, both backends
+- [ ] one-api: disable/derank the offline fan-out node (gt20) to kill the ~20s
+      embedding tail (external; biggest remaining latency)
+- [ ] one-api panel: Sync now to pick up the 9-tool schema incl. filter/metadata
+- [ ] Path B verification
+
+---
+
 ## Dual backend (2026-09-23)
 
 - [x] `VectorStore` interface; Qdrant and file-based Vectra-compatible backends
