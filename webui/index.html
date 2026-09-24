@@ -16,6 +16,7 @@ h1 { font-size: 20px; margin: 0 0 4px; display: inline; }
 .hb { font-size: 12px; padding: 2px 8px; border-radius: 8px; border: 1px solid #444; color: #999; white-space: nowrap; }
 .hb.ok { color: #8d8; border-color: #484; }
 .hb.bad { color: #f99; border-color: #a44; background: #2a1a1a; }
+.hb.slow { color: #e8a33d; border-color: #a80; }
 .hb.wait { color: #9cc; border-color: #488; }
 h2 { font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 4px; margin-top: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -359,7 +360,12 @@ async function refreshHealth() {
       const v = String(h[k]);
       const b = document.createElement('span');
       if (k === 'active_backend') { b.className = 'hb'; b.textContent = 'active: ' + (v || '(config)'); }
-      else { const ok = v === 'ok'; b.className = 'hb ' + (ok ? 'ok' : 'bad'); b.textContent = k + ' ' + (ok ? 'ok' : 'down'); b.title = v; }
+      else {
+        const state = v === 'ok' ? 'ok' : v === 'slow' ? 'slow' : 'bad';
+        b.className = 'hb ' + state;
+        b.textContent = k + ' ' + state;
+        b.title = v;
+      }
       el.appendChild(b);
     }
   } catch (e) {
