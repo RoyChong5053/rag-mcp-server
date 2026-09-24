@@ -1449,7 +1449,7 @@ func (e *Engine) HealthCheck() map[string]string {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := probeWithTimeout(e.embedding.Ping, 4*time.Second); err != nil {
+		if err := probeWithTimeout(e.embedding.Ping, 8*time.Second); err != nil {
 			set("embedding", "error: "+err.Error())
 		} else {
 			set("embedding", "ok")
@@ -1457,7 +1457,7 @@ func (e *Engine) HealthCheck() map[string]string {
 	}()
 	go func() {
 		defer wg.Done()
-		if err := probeWithTimeout(e.rerank.Ping, 5*time.Second); err != nil {
+		if err := probeWithTimeout(e.rerank.Ping, 8*time.Second); err != nil {
 			set("rerank", "error: "+err.Error())
 		} else {
 			set("rerank", "ok")
