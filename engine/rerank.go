@@ -26,7 +26,11 @@ type RerankClient struct {
 	httpClient *http.Client
 }
 
-// NewRerankClient creates a new rerank client
+// NewRerankClient creates a new rerank client.
+// Timeout is 45s: a 30-doc fan-out through one-api takes ~36s when healthy.
+// Rerank is fail-open (failure degrades to vector order), so a tight budget
+// here only costs ranking quality, never availability. Channel fallback is
+// one-api's job; this client retries at most once.
 func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, docMaxChars int) *RerankClient {
 	return &RerankClient{
 		baseURL:       baseURL,
@@ -36,7 +40,7 @@ func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, do
 		queryMaxChars: queryMaxChars,
 		docMaxChars:   docMaxChars,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: 45 * time.Second,
 		},
 	}
 }
@@ -105,17 +109,60 @@ func (c *RerankClient) Rerank(query string, documents []string, topN int) ([]Rer
 		TopN:      topN,
 	}
 
-	// Try primary endpoint first
-	results, err := c.callEndpoint(c.baseURL, req)
+	// Try primary endpoint first (one short retry); fallback to backup once.
+	results, err := c.callWithRetry(c.baseURL, req)
 	if err != nil && c.backupURL != "" {
 		// Fallback to backup endpoint
-		results, err = c.callEndpoint(c.backupURL, req)
+		results, err = c.callWithRetry(c.backupURL, req)
 	}
 
 	return results, err
 }
 
+// callWithRetry runs one rerank request with a single quick retry.
+// 2 attempts keep the healthy 30-doc fan-out (~36s) inside budget while an
+// offline upstream fails fast instead of hanging the search path.
+func (c *RerankClient) callWithRetry(baseURL string, req RerankRequest) ([]RerankResult, error) {
+	const maxAttempts = 2
+	var err error
+	var results []RerankResult
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		results, err = c.callEndpointWithClient(c.httpClient, baseURL, req)
+		if err == nil {
+			return results, nil
+		}
+		if !rerankRetryable(err) && attempt == 1 {
+			// Non-retryable (auth/validation): one attempt is enough, but
+			// still give the backup endpoint a chance via the caller.
+			return nil, err
+		}
+		if attempt < maxAttempts {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, err
+}
+
+// rerankRetryable reports whether a rerank error deserves another attempt.
+// Transport failures and 429/5xx are retryable; auth/validation fail fast.
+func rerankRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, code := range []string{" 429", " 500", " 502", " 503", " 504", "request failed"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *RerankClient) callEndpoint(baseURL string, req RerankRequest) ([]RerankResult, error) {
+	return c.callEndpointWithClient(c.httpClient, baseURL, req)
+}
+
+func (c *RerankClient) callEndpointWithClient(client *http.Client, baseURL string, req RerankRequest) ([]RerankResult, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal rerank request: %w", err)
@@ -132,7 +179,7 @@ func (c *RerankClient) callEndpoint(baseURL string, req RerankRequest) ([]Rerank
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("rerank request failed: %w", err)
 	}
@@ -221,8 +268,23 @@ func sortResults(results []RerankResult) {
 	}
 }
 
-// Ping tests connectivity to the rerank endpoint
+// Ping tests connectivity to the rerank endpoint with a short 8s budget and
+// no retry, so health checks stay fast and never hold a probe hostage.
 func (c *RerankClient) Ping() error {
-	_, err := c.Rerank("test", []string{"test document"}, 1)
+	probe := &http.Client{Timeout: 8 * time.Second}
+	_, err := c.callEndpointWithClient(probe, c.baseURL, RerankRequest{
+		Model:     c.model,
+		Query:     "test",
+		Documents: []string{"test document"},
+		TopN:      1,
+	})
+	if err != nil && c.backupURL != "" {
+		_, err = c.callEndpointWithClient(probe, c.backupURL, RerankRequest{
+			Model:     c.model,
+			Query:     "test",
+			Documents: []string{"test document"},
+			TopN:      1,
+		})
+	}
 	return err
 }

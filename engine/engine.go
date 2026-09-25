@@ -1411,6 +1411,9 @@ func (e *Engine) ListCollections() ([]CollectionInfo, error) {
 // reported with its own key (qdrant/vectra) so a disabled backend is visible
 // too. A backend already marked down is reported from cache without a fresh
 // probe, so a dead qdrant never makes the dashboard wait for a timeout.
+// Embedding/rerank are never cached as down: each search call fails fast on
+// its own thin-retry budget, and channel fallback is one-api's job. Probes
+// use short Ping budgets (embed 5s, rerank 8s) so health checks never hang.
 func (e *Engine) HealthCheck() map[string]string {
 	status := make(map[string]string)
 	var mu sync.Mutex

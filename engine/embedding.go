@@ -22,7 +22,11 @@ type EmbeddingClient struct {
 	httpClient *http.Client
 }
 
-// NewEmbeddingClient creates a new embedding client
+// NewEmbeddingClient creates a new embedding client.
+// Timeout is 20s: single-query embeds return in ~10s through one-api
+// fan-out; bulk index jobs are batched (32/batch) and async. Fallback
+// across one-api channels is one-api's job, so this client only retries
+// briefly (thin retry) instead of stacking a second fallback layer.
 func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClient {
 	return &EmbeddingClient{
 		baseURL:   baseURL,
@@ -30,7 +34,7 @@ func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClie
 		model:     model,
 		apiKey:    apiKey,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 20 * time.Second,
 		},
 	}
 }
@@ -125,12 +129,13 @@ func retryable(err error) bool {
 	return true
 }
 
-// callWithRetry runs one embedding request with exponential backoff.
-// Honors Retry-After when the server sends one. 6 attempts ≈ up to
-// ~1min of waiting per batch before giving up.
+// callWithRetry runs one embedding request with a short exponential backoff.
+// Honors Retry-After when the server sends one. 3 attempts with 500ms base
+// keep the typical offline case under ~10s: one-api already retried across
+// all its channels, so a second deep retry here only multiplies tail latency.
 func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([][]float32, error) {
-	backoff := 2 * time.Second
-	const maxAttempts = 6
+	backoff := 500 * time.Millisecond
+	const maxAttempts = 3
 	var err error
 	var embeddings [][]float32
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -157,6 +162,10 @@ func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([
 }
 
 func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([][]float32, error) {
+	return c.callEndpointWithClient(c.httpClient, baseURL, req)
+}
+
+func (c *EmbeddingClient) callEndpointWithClient(client *http.Client, baseURL string, req EmbeddingRequest) ([][]float32, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
@@ -173,7 +182,7 @@ func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([]
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("embedding request failed: %w", err)
 	}
@@ -228,12 +237,18 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 }
 
 // Ping tests connectivity to the embedding endpoint. Uses a single attempt
-// (no exponential-backoff retries) so health checks stay fast and quiet.
+// with a short 5s budget (no retries) so health checks stay fast and quiet
+// and never hold a HealthCheck probe hostage.
 func (c *EmbeddingClient) Ping() error {
 	req := EmbeddingRequest{Model: c.model, Input: []string{"test"}}
-	_, err := c.callEndpoint(c.baseURL, req)
+	_, err := c.callEndpointWithClient(c.pingClient(), c.baseURL, req)
 	if err != nil && c.backupURL != "" {
-		_, err = c.callEndpoint(c.backupURL, req)
+		_, err = c.callEndpointWithClient(c.pingClient(), c.backupURL, req)
 	}
 	return err
+}
+
+// pingClient is a short-budget client for health probes only.
+func (c *EmbeddingClient) pingClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second}
 }
