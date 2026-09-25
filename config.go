@@ -85,10 +85,12 @@ type ChunkingConfig struct {
 }
 
 type RerankConfig struct {
-	Enabled       bool `yaml:"enabled"`
-	Recall        int  `yaml:"recall"`
-	QueryMaxChars int  `yaml:"query_max_chars"`
-	DocMaxChars   int  `yaml:"doc_max_chars"`
+	Enabled bool `yaml:"enabled"`
+	Recall  int  `yaml:"recall"`
+	// QueryMaxChars bounds the query (runes) before embedding and reranking;
+	// the head is kept. 0 = unlimited. DocMaxChars bounds rerank documents.
+	QueryMaxChars int `yaml:"query_max_chars"`
+	DocMaxChars   int `yaml:"doc_max_chars"`
 }
 
 func DefaultConfig() *Config {
@@ -128,7 +130,7 @@ func DefaultConfig() *Config {
 		Rerank: RerankConfig{
 			Enabled:       true,
 			Recall:        30,
-			QueryMaxChars: 2000,
+			QueryMaxChars: 500,
 			DocMaxChars:   1000,
 		},
 	}

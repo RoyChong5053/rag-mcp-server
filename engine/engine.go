@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RoyChong5053/rag-mcp-server/chunking"
 	"github.com/RoyChong5053/rag-mcp-server/registry"
@@ -458,9 +459,25 @@ func (e *Engine) collectionExistsOn(backend, name string) bool {
 	return err == nil && exists
 }
 
-// embedQuery embeds a single query string once.
+// boundQuery caps a query to the runtime query_max_chars limit (runes) before
+// it is embedded or reranked. The head is kept, since callers put the actual
+// question first and paste long source material after it. 0 = unlimited.
+func (e *Engine) boundQuery(query string) string {
+	limit := e.settings.Get().QueryMaxChars
+	if limit <= 0 {
+		return query
+	}
+	if n := utf8.RuneCountInString(query); n > limit {
+		log.Printf("Query truncated before embedding: %d -> %d runes (query_max_chars)", n, limit)
+	}
+	return truncateRunes(query, limit)
+}
+
+// embedQuery embeds a single query string once. The query is bounded first so
+// a long pasted message never reaches the embedding model untruncated (the
+// rerank-side bound only runs after embedding, too late to help).
 func (e *Engine) embedQuery(query string) ([]float32, error) {
-	embeddings, err := e.embedding.CreateEmbeddings([]string{query})
+	embeddings, err := e.embedding.CreateEmbeddings([]string{e.boundQuery(query)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}

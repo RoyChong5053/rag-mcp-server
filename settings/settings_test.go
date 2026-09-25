@@ -12,7 +12,7 @@ func base() Settings {
 		DefaultThreshold: 0.25,
 		RerankEnabled:    true,
 		RerankRecall:     30,
-		QueryMaxChars:    2000,
+		QueryMaxChars:    500,
 		DocMaxChars:      1000,
 		FailoverEnabled:  true,
 	}

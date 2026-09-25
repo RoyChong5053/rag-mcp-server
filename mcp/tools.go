@@ -16,6 +16,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 			"Omit collection_id to use the active backend's configured default collection; if qdrant is unreachable it automatically fails back to the vectra default (when configured). " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
+			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
 			"or a raw Qdrant filter for advanced clauses.",
 		InputSchema: map[string]any{

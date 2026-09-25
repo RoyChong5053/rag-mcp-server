@@ -49,5 +49,7 @@ chunking:
 rerank:
   enabled: true
   recall: 30
-  query_max_chars: 2000
+  # query_max_chars caps the query (runes, head kept) before embedding AND
+  # reranking; 0 = unlimited. doc_max_chars caps each rerank document.
+  query_max_chars: 500
   doc_max_chars: 1000

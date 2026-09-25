@@ -167,7 +167,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>threshold <input type="number" id="s-thr" min="0" max="1" step="0.05"></span>
     <label style="display:inline"><input type="checkbox" id="s-rerank"> rerank</label>
     <span>recall <input type="number" id="s-recall" min="1" max="1000" title="vector over-fetch fed to the reranker"></span>
-    <span>query max <input type="number" id="s-qmax" min="0" title="rerank query truncation (runes, 0 = unlimited)"></span>
+    <span>query max <input type="number" id="s-qmax" min="0" title="truncate the query to N chars before embedding &amp; reranking (runes, keeps the head, 0 = unlimited)"></span>
     <span>doc max <input type="number" id="s-dmax" min="0" title="rerank document truncation (runes, 0 = unlimited)"></span>
     <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>

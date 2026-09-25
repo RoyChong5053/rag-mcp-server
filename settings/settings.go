@@ -33,9 +33,13 @@ type Settings struct {
 	RerankEnabled bool `json:"rerank_enabled"`
 	// RerankRecall is the vector over-fetch count fed to the reranker.
 	RerankRecall int `json:"rerank_recall"`
-	// QueryMaxChars / DocMaxChars bound rerank payload sizes (runes).
+	// QueryMaxChars caps the query text (runes) before it is embedded and
+	// reranked; the head is kept (the actual question usually precedes pasted
+	// source material). 0 = unlimited.
 	QueryMaxChars int `json:"query_max_chars"`
-	DocMaxChars   int `json:"doc_max_chars"`
+	// DocMaxChars caps each document handed to the reranker (runes).
+	// 0 = unlimited.
+	DocMaxChars int `json:"doc_max_chars"`
 }
 
 // Patch carries optional settings updates; nil means "leave unchanged".

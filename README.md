@@ -103,7 +103,9 @@ frontends share and that take effect immediately, without a restart:
 - `failover_enabled` — fall back to the vectra default on a qdrant outage
 - `default_top_k`, `default_threshold`
 - `rerank_enabled`, `rerank_recall` (vector over-fetch before reranking)
-- `query_max_chars`, `doc_max_chars` (rerank truncation, runes)
+- `query_max_chars` (query truncation before embedding **and** reranking;
+  runes, head kept, `0` = unlimited), `doc_max_chars` (rerank document
+  truncation, runes)
 
 Edit these from the dashboard's **Search Defaults** panel; `config.yaml` only
 seeds the initial values. A default collection that does not exist in its own
