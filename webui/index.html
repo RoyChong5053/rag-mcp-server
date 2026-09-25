@@ -7,15 +7,15 @@
 <title>RAG Console</title>
 <style>
 :root { color-scheme: dark; }
-body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 0 0 env(safe-area-inset-bottom); }
-#layout { display: flex; align-items: flex-start; gap: 18px; padding: 16px; max-width: 1600px; margin: 0 auto; }
-#main { flex: 1 1 auto; min-width: 0; }
+body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 0 0 env(safe-area-inset-bottom); overflow-x: clip; }
+#layout { display: flex; align-items: flex-start; gap: 18px; padding: 16px; max-width: 1600px; margin: 0 auto; min-width: 0; overflow-x: clip; }
+#main { flex: 1 1 auto; min-width: 0; max-width: 100%; }
 h1 { font-size: 20px; margin: 0 0 4px; display: inline; }
 #ver { margin-left: 8px; font-size: 12px; }
-#health { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 16px; }
-.hb { font-size: 12px; padding: 2px 8px; border-radius: 8px; border: 1px solid #444; color: #999; white-space: nowrap; }
+#health { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 16px; min-width: 0; max-width: 100%; overflow: clip; }
+.hb { font-size: 12px; padding: 2px 8px; border-radius: 8px; border: 1px solid #444; color: #999; white-space: nowrap; min-width: 0; flex: 0 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .hb.ok { color: #8d8; border-color: #484; }
-.hb.bad { color: #f99; border-color: #a44; background: #2a1a1a; }
+.hb.bad { color: #f99; border-color: #a44; background: #2a1a1a; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .hb.slow { color: #e8a33d; border-color: #a80; }
 .hb.wait { color: #9cc; border-color: #488; }
 h2 { font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 4px; margin-top: 28px; }
@@ -53,10 +53,12 @@ button.busy .spin { display: inline-block; width: 10px; height: 10px; margin-rig
 #detail { margin-top: 16px; border: 1px solid #444; border-radius: 6px; padding: 12px; display: none; }
 #detail h3 { font-size: 16px; margin: 0 0 8px; }
 label { display: block; font-size: 12px; color: #999; margin: 8px 0 2px; }
-input[type=text], input[type=number], textarea { background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
+input[type=text], input[type=number], textarea { background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; min-width: 0; max-width: 100%; }
 input[type=text], textarea { width: 100%; box-sizing: border-box; }
 input[type=number] { width: 110px; }
-.row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: end; }
+select { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
+.row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: end; min-width: 0; max-width: 100%; }
+.row > span, .row > label { min-width: 0; max-width: 100%; }
 #results div, #killed div, #preview-out div { border-left: 3px solid #468; margin: 8px 0; padding: 4px 8px; background: #181818; font-size: 13px; white-space: pre-wrap; }
 #killed div { border-color: #a80; }
 #audit { background: #000; color: #9d9; font: 12px monospace; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
@@ -73,8 +75,8 @@ input[type=number] { width: 110px; }
 #index-panel { border: 1px solid #468; border-radius: 6px; padding: 10px; margin-top: 10px; display: none; }
 .warn { color: #e8a33d; font-size: 12px; }
 /* panels */
-.panel { border: 1px solid #2c333b; background: #14181d; border-radius: 10px; padding: 14px 16px; margin-top: 14px; }
-.panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.panel { border: 1px solid #2c333b; background: #14181d; border-radius: 10px; padding: 14px 16px; margin-top: 14px; min-width: 0; max-width: 100%; overflow: hidden; box-sizing: border-box; }
+.panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .panel-head h2 { border: none; margin: 0; padding: 0; }
 .panel-head .spacer { flex: 1; }
 .panel.collections { border-color: #35506b; }
@@ -83,11 +85,11 @@ th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #
 tbody tr { transition: background .08s; }
 tbody tr:hover { background: #1a2028; }
 tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
-.col-id { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7fd6a6; background: #12211a; border: 1px solid #2c5137; border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
-.cname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; word-break: break-word; }
+.col-id { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7fd6a6; background: #12211a; border: 1px solid #2c5137; border-radius: 5px; padding: 1px 6px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+.cname { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; word-break: break-word; min-width: 0; max-width: 100%; }
 .dim { color: #7c8791; }
 .num { text-align: right; font-variant-numeric: tabular-nums; color: #cfe; }
-.prov { overflow-wrap: anywhere; }
+.prov { overflow-wrap: anywhere; word-break: break-word; min-width: 0; max-width: 100%; }
 .b-on { color: #8d8; border-color: #484; }
 .b-vec { color: #9cc; border-color: #488; }
 .b-off { color: #777; }
@@ -99,6 +101,14 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 .modal h3 { margin: 0 0 8px; font-size: 16px; }
 .modal #m-body { font-size: 14px; overflow-wrap: anywhere; }
 .modal .row { justify-content: flex-end; margin-top: 14px; }
+/* login overlay (one-api style gate) */
+#login-back { position: fixed; inset: 0; background: #0c0e11f2; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 200; }
+#login-back.hidden { display: none; }
+#login-box { background: #1a1f26; border: 1px solid #444; border-radius: 10px; padding: 20px; max-width: 360px; width: 100%; box-sizing: border-box; }
+#login-box h3 { margin: 0 0 4px; font-size: 17px; }
+#login-box .sub { font-size: 12px; color: #888; margin-bottom: 10px; }
+#login-box input[type=text], #login-box input[type=password] { background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 8px; width: 100%; box-sizing: border-box; font-size: 16px; }
+#login-err { color: #f99; font-size: 13px; min-height: 18px; margin-top: 8px; }
 
 /* --- mobile ------------------------------------------------------------ */
 @media (max-width: 900px) {
@@ -106,15 +116,19 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   #side { flex: 0 0 auto; position: static; width: 100%; max-height: none; order: -1; }
 }
 @media (max-width: 640px) {
-  #layout { padding: 10px; gap: 12px; }
+  #layout { padding: 10px; gap: 12px; overflow-x: clip; }
+  #health { gap: 4px; }
+  #health .hb { font-size: 11px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  .panel { padding: 10px; }
   h1 { font-size: 18px; }
   /* tables become cards: no more sideways dragging */
   #tbl, #ftbl { table-layout: auto; min-width: 0; }
   #tbl thead, #ftbl thead { display: none; }
-  #tbl tbody tr, #ftbl tbody tr { display: block; border: 1px solid #333; border-radius: 8px; margin: 0 0 10px; padding: 6px 10px; background: #14181d; }
+  #tbl tbody tr, #ftbl tbody tr { display: block; border: 1px solid #333; border-radius: 8px; margin: 0 0 10px; padding: 6px 10px; background: #14181d; min-width: 0; max-width: 100%; box-sizing: border-box; }
   #tbl tbody tr.sel, #ftbl tbody tr.sel { box-shadow: inset 3px 0 0 #6af; }
-  #tbl td, #ftbl td { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; border: none; padding: 4px 0; overflow-wrap: anywhere; }
-  #tbl td::before, #ftbl td::before { content: attr(data-label); flex: 0 0 40%; color: #8a949e; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  #tbl td, #ftbl td { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; border: none; padding: 4px 0; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+  #tbl td::before, #ftbl td::before { content: attr(data-label); flex: 0 0 32%; min-width: 0; color: #8a949e; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  #tbl td > :nth-child(2), #ftbl td > :nth-child(2) { flex: 1 1 auto; min-width: 0; text-align: right; overflow-wrap: anywhere; word-break: break-word; }
   #tbl td[data-label=""], #ftbl td[data-label=""] { justify-content: flex-start; padding-top: 8px; }
   #tbl td[data-label=""]::before, #ftbl td[data-label=""]::before { content: none; }
   .num { text-align: left; }
@@ -136,6 +150,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 <main id="main">
 <h1>RAG Console</h1><span id="ver" class="prov"></span>
 <button onclick="backup()" title="download collections.json">backup registry</button>
+<button id="logout-btn" onclick="logout()" style="display:none" title="log out this browser">logout</button>
 <div id="health" class="health"><span class="hb wait">checking…</span></div>
 
 <div class="panel">
@@ -257,20 +272,78 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   </div>
 </div>
 <div id="toast"></div>
+<div id="login-back" class="hidden">
+  <div id="login-box">
+    <h3>RAG Console 登录</h3>
+    <div class="sub" id="login-sub">请输入管理员账号密码</div>
+    <label>Username</label><input type="text" id="login-user" autocomplete="username">
+    <label>Password</label><input type="password" id="login-pass" autocomplete="current-password">
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="login-remember" checked> 记住我（30天免登录）</label>
+    <div id="login-err"></div>
+    <div class="row" style="justify-content:flex-end"><button id="login-go" onclick="doLogin()">Login</button></div>
+  </div>
+</div>
 <script>
 let cur = null, ipFile = null, colsCache = [];
+// ---- auth (one-api style): Bearer token kept by the browser so the password
+// is typed once. remember-me -> localStorage (30d), else sessionStorage.
+const tokGet = () => localStorage.getItem('rag_token') || sessionStorage.getItem('rag_token') || '';
+const tokSet = (t, remember) => {
+  localStorage.removeItem('rag_token'); sessionStorage.removeItem('rag_token');
+  (remember ? localStorage : sessionStorage).setItem('rag_token', t);
+};
+const tokClear = () => { localStorage.removeItem('rag_token'); sessionStorage.removeItem('rag_token'); };
+function showLogin(msg) {
+  document.getElementById('login-back').classList.remove('hidden');
+  document.getElementById('logout-btn').style.display = 'none';
+  if (msg) document.getElementById('login-err').textContent = msg;
+  setTimeout(() => document.getElementById('login-pass').focus(), 50);
+}
+function hideLogin() {
+  document.getElementById('login-back').classList.add('hidden');
+  document.getElementById('login-err').textContent = '';
+  document.getElementById('logout-btn').style.display = '';
+}
+async function doLogin() {
+  const btn = document.getElementById('login-go');
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/login', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: document.getElementById('login-user').value,
+        password: document.getElementById('login-pass').value,
+        remember: document.getElementById('login-remember').checked})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.status);
+    if (j.auth === 'disabled' || !j.token) { hideLogin(); boot(); return; }
+    tokSet(j.token, document.getElementById('login-remember').checked);
+    document.getElementById('login-pass').value = '';
+    hideLogin();
+    boot();
+  } catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+async function logout() {
+  try { await fetch('/api/logout', {method: 'POST', headers: authHeader()}); } catch (e) {}
+  tokClear();
+  showLogin();
+}
+const authHeader = () => { const t = tokGet(); return t ? {'Authorization': 'Bearer ' + t} : {}; };
 // api() bounds every request so a hung backend surfaces as a timeout error
 // instead of an infinite spinner.
 const api = (m, url, body, raw, timeoutMs) => {
-  const opt = {method: m};
+  const opt = {method: m, headers: {...authHeader()}};
   if (raw) { opt.body = body; }
-  else if (body !== undefined) { opt.headers = {'Content-Type': 'application/json'}; opt.body = JSON.stringify(body); }
+  else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const ctrl = new AbortController();
   opt.signal = ctrl.signal;
   const budget = timeoutMs || 15000;
   const timer = setTimeout(() => ctrl.abort(), budget);
   return fetch(url, opt).then(async r => {
     const j = await r.json().catch(() => ({}));
+    if (r.status === 401) { tokClear(); showLogin('登录已过期，请重新登录'); const e = new Error('unauthorized'); e.status = 401; throw e; }
     if (!r.ok && r.status !== 202) throw new Error(j.error || r.status);
     return j;
   }).catch(e => {
@@ -369,7 +442,12 @@ async function refreshHealth() {
       el.appendChild(b);
     }
   } catch (e) {
-    el.innerHTML = '<span class="hb bad">health failed: ' + esc(e.message) + '</span>';
+    el.innerHTML = '';
+    const b = document.createElement('span');
+    b.className = 'hb bad';
+    b.textContent = 'health failed: ' + e.message;
+    b.title = e.message;
+    el.appendChild(b);
   }
 }
 async function loadInfo() {
@@ -521,7 +599,19 @@ async function testRecall() {
     }
   } catch (e) { box.textContent = 'search failed: ' + e.message; }
 }
-function backup() { window.location = '/api/registry/backup'; }
+function backup() {
+  const t = tokGet();
+  fetch('/api/registry/backup', {headers: t ? {'Authorization': 'Bearer ' + t} : {}}).then(async r => {
+    if (r.status === 401) { tokClear(); showLogin('登录已过期，请重新登录'); return; }
+    if (!r.ok) throw new Error(r.status);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'collections.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }).catch(e => toast('backup failed: ' + e.message, 'err'));
+}
 
 /* ---- search defaults ---- */
 function fillColSelect(id, backend, allLabel) {
@@ -704,11 +794,28 @@ async function loadAudit() {
   } catch (e) { document.getElementById('audit').textContent = 'audit unavailable: ' + e.message; }
 }
 
-loadInfo();
-load().then(loadSettings);
-loadFiles(); loadJobs(); loadAudit();
-setInterval(() => { if (!document.hidden) loadJobs(); }, 3000);
-setInterval(() => { if (!document.hidden) refreshHealth(); }, 30000);
+let booted = false;
+async function boot() {
+  if (booted) { loadInfo(); load().then(loadSettings); loadFiles(); loadJobs(); loadAudit(); return; }
+  booted = true;
+  // Auth gate: /api/me is public; if the server has auth enabled and this
+  // browser holds no valid token, park on the login overlay instead of
+  // firing a burst of 401s.
+  try {
+    const me = await api('GET', '/api/me', undefined, false, 5000);
+    if (me.auth_enabled && !me.ok) { showLogin(); return; }
+    if (me.auth_enabled && me.ok) hideLogin();
+  } catch (e) { if (e.status === 401) { showLogin(); return; } }
+  loadInfo();
+  load().then(loadSettings);
+  loadFiles(); loadJobs(); loadAudit();
+}
+document.getElementById('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+document.getElementById('login-user').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+boot();
+setInterval(() => { if (!document.hidden && document.getElementById('login-back').classList.contains('hidden')) loadJobs(); }, 5000);
+setInterval(() => { if (!document.hidden && document.getElementById('login-back').classList.contains('hidden')) refreshHealth(); }, 60000);
 </script>
 </body>
 </html>

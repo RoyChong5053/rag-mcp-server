@@ -196,6 +196,22 @@ list/search collections, edit metadata, backfill payloads, recall test with
 threshold-kill report, and an audit tail.
 Collection metadata lives in `collections.json` (server-local, gitignored).
 
+### Admin login (optional, one-api style)
+
+Set both `admin.username` and `admin.password_sha256` in `config.yaml`
+(`password_sha256 = hex(sha256(password))`, e.g. `echo -n 's3cret' | sha256sum`).
+All `/api/*` except `health`, `info` and `login` then require
+`Authorization: Bearer <token>`; `/mcp` stays open for one-api/clients.
+The browser keeps the token (`remember-me` = localStorage ~30d, otherwise the
+tab's sessionStorage), so the password is typed once. Sessions persist in
+`sessions.json` (gitignored, 0600) across restarts.
+
+### Audit log rotation
+
+The audit log rotates at startup once it exceeds `audit_max_mb` (default 20,
+keep 3 backups: `.1/.2/.3`), and `/api/audit` tails via seek (last 256KB)
+instead of reading the whole file, so a large log never stalls the dashboard.
+
 ## Data Bank (dashboard)
 
 - `docs/` browser with fresh/stale/unindexed badges (sha256 vs registry provenance)

@@ -17,10 +17,19 @@ An independent RAG (Retrieval-Augmented Generation) engine exposed via MCP (Mode
 - [x] embed/rerank probe timeouts report `slow` (amber) not `down`
 - [x] phone layout: card tables, 16px controls, larger tap targets, stacked
       rows, jobs panel first, safe-area; in-page modal replaces alert/confirm
-- [x] jobs polling pauses when the tab is hidden
-- [x] persistent audit log (`audit_path`, default `logs/rag-mcp.log`)
+- [x] mobile overflow lock (2026-09-25, third pass): `#health` ellipsis +
+      `bad` wraps, global `min-width:0` containment, `select` ellipsis,
+      card label 40%→32%, `overflow-x:clip` on body/layout
+- [x] jobs polling pauses when the tab is hidden (5s) + health 60s + no polling
+      behind the login overlay
+- [x] persistent audit log (`audit_path`, default `logs/rag-mcp.log`) with
+      startup rotation (`audit_max_mb`/`audit_keep`, default 20MB/3) and
+      seek-tail `/api/audit` (last 256KB, no full reads)
 - [x] `GET /api/info` (version/commit/uptime) shown in the header
 - [x] `search_memory` `metadata`/`filter` args, both backends
+- [x] admin login gate (one-api style, 2026-09-25): optional
+      `admin.username` + `password_sha256`, Bearer sessions in `sessions.json`,
+      browser remember-me (localStorage) vs tab session, `/mcp` stays open
 - [ ] one-api: disable/derank the offline fan-out node (gt20) to kill the ~20s
       embedding tail (external; biggest remaining latency)
 - [ ] one-api panel: Sync now to pick up the 9-tool schema incl. filter/metadata

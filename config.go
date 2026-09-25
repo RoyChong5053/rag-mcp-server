@@ -20,6 +20,10 @@ type Config struct {
 	// directory so it survives a working-directory change (systemd/setsid).
 	// Empty defaults to logs/rag-mcp.log.
 	AuditPath string `yaml:"audit_path"`
+	// AuditMaxMB caps one audit file before startup rotation; AuditKeep is how
+	// many rotated backups (.1, .2, ...) to retain. 0 = defaults (20MB, 3).
+	AuditMaxMB int `yaml:"audit_max_mb"`
+	AuditKeep  int `yaml:"audit_keep"`
 	// SettingsPath is the runtime settings file (settings.json). It holds the
 	// search defaults edited via the WebUI; missing file = built-in defaults.
 	SettingsPath string `yaml:"settings_path"`
@@ -47,9 +51,19 @@ type ServerConfig struct {
 // AdminConfig is the management UI + API. Defaults to 0.0.0.0 so all LAN
 // devices can reach it during development; there is no TLS, so restrict the
 // host or firewall the port before exposing it beyond a trusted network.
+//
+// Auth (one-api style): when username + password_sha256 are both set, every
+// /api/* except /api/health, /api/info and /api/login requires
+// `Authorization: Bearer <token>`. The browser keeps the token in
+// localStorage (remember-me) or sessionStorage, so the password is only typed
+// once. password_sha256 = hex(sha256(password)), e.g.
+// `echo -n 's3cret' | sha256sum`. Empty username = auth disabled (legacy).
 type AdminConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host           string `yaml:"host"`
+	Port           int    `yaml:"port"`
+	Username       string `yaml:"username"`
+	PasswordSHA256 string `yaml:"password_sha256"`
+	SessionDays    int    `yaml:"session_days"`
 }
 
 type QdrantConfig struct {
@@ -90,6 +104,8 @@ func DefaultConfig() *Config {
 		RegistryPath: "collections.json",
 		SettingsPath: "settings.json",
 		AuditPath:    "logs/rag-mcp.log",
+		AuditMaxMB:   20,
+		AuditKeep:    3,
 		DocsDir:      "docs",
 		Storage: StorageConfig{
 			Backend:   "qdrant",

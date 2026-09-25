@@ -30,18 +30,62 @@ type BuildInfo struct {
 // Handler serves the management dashboard and its JSON API.
 // It is meant to bind localhost-only (see AdminConfig); reach it via ssh tunnel.
 type Handler struct {
-	eng       *engine.Engine
-	auditPath string
-	docsRoot  string
-	jobs      *Manager
-	build     BuildInfo
+	eng         *engine.Engine
+	auditPath   string
+	docsRoot    string
+	jobs        *Manager
+	build       BuildInfo
+	sessions    *SessionManager
+	adminUser   string
+	adminPass   string // hex(sha256(password))
+	sessionDays int
+}
+
+// AdminAuth carries the optional login gate (empty username = disabled).
+type AdminAuth struct {
+	Username       string
+	PasswordSHA256 string
+	SessionDays    int
+	SessionFile    string
 }
 
 func New(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo) *Handler {
+	return NewWithAuth(eng, auditPath, docsRoot, info, AdminAuth{})
+}
+
+func NewWithAuth(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo, auth AdminAuth) *Handler {
 	if info.StartedAt.IsZero() {
 		info.StartedAt = time.Now()
 	}
-	return &Handler{eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2), build: info}
+	days := auth.SessionDays
+	if days <= 0 {
+		days = 30
+	}
+	return &Handler{
+		eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2), build: info,
+		sessions: NewSessionManager(auth.SessionFile),
+		adminUser: strings.TrimSpace(auth.Username), adminPass: strings.TrimSpace(auth.PasswordSHA256),
+		sessionDays: days,
+	}
+}
+
+// authEnabled reports whether a login gate is configured.
+func (h *Handler) authEnabled() bool { return h.adminUser != "" && h.adminPass != "" }
+
+// requireAuth guards stateful/private APIs. /api/health, /api/info and
+// /api/login stay public so probes and the login itself keep working.
+func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.authEnabled() {
+			next(w, r)
+			return
+		}
+		if h.sessions.Valid(BearerToken(r.Header.Get("Authorization"))) {
+			next(w, r)
+			return
+		}
+		writeErr(w, http.StatusUnauthorized, fmt.Errorf("login required"))
+	}
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -49,24 +93,27 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /", h.serveIndex)
 	mux.HandleFunc("GET /api/health", h.health)
 	mux.HandleFunc("GET /api/info", h.info)
-	mux.HandleFunc("GET /api/collections", h.listCollections)
-	mux.HandleFunc("POST /api/collections", h.createCollection)
-	mux.HandleFunc("GET /api/collections/{name}", h.getCollection)
-	mux.HandleFunc("POST /api/collections/{name}/meta", h.setMeta)
-	mux.HandleFunc("POST /api/collections/{name}/delete", h.deleteCollection)
-	mux.HandleFunc("POST /api/collections/{name}/backfill", h.backfill)
-	mux.HandleFunc("POST /api/collections/{name}/search", h.search)
-	mux.HandleFunc("GET /api/files", h.handleFiles)
-	mux.HandleFunc("POST /api/upload", h.handleUpload)
-	mux.HandleFunc("POST /api/index", h.handleSubmitIndex)
-	mux.HandleFunc("GET /api/jobs", h.handleJobs)
-	mux.HandleFunc("POST /api/jobs/clear", h.handleClearJobs)
-	mux.HandleFunc("GET /api/jobs/{id}", h.handleJob)
-	mux.HandleFunc("POST /api/preview", h.handlePreview)
-	mux.HandleFunc("GET /api/registry/backup", h.handleBackup)
-	mux.HandleFunc("GET /api/audit", h.audit)
-	mux.HandleFunc("GET /api/settings", h.getSettings)
-	mux.HandleFunc("POST /api/settings", h.setSettings)
+	mux.HandleFunc("POST /api/login", h.login)
+	mux.HandleFunc("POST /api/logout", h.logout)
+	mux.HandleFunc("GET /api/me", h.me)
+	mux.HandleFunc("GET /api/collections", h.requireAuth(h.listCollections))
+	mux.HandleFunc("POST /api/collections", h.requireAuth(h.createCollection))
+	mux.HandleFunc("GET /api/collections/{name}", h.requireAuth(h.getCollection))
+	mux.HandleFunc("POST /api/collections/{name}/meta", h.requireAuth(h.setMeta))
+	mux.HandleFunc("POST /api/collections/{name}/delete", h.requireAuth(h.deleteCollection))
+	mux.HandleFunc("POST /api/collections/{name}/backfill", h.requireAuth(h.backfill))
+	mux.HandleFunc("POST /api/collections/{name}/search", h.requireAuth(h.search))
+	mux.HandleFunc("GET /api/files", h.requireAuth(h.handleFiles))
+	mux.HandleFunc("POST /api/upload", h.requireAuth(h.handleUpload))
+	mux.HandleFunc("POST /api/index", h.requireAuth(h.handleSubmitIndex))
+	mux.HandleFunc("GET /api/jobs", h.requireAuth(h.handleJobs))
+	mux.HandleFunc("POST /api/jobs/clear", h.requireAuth(h.handleClearJobs))
+	mux.HandleFunc("GET /api/jobs/{id}", h.requireAuth(h.handleJob))
+	mux.HandleFunc("POST /api/preview", h.requireAuth(h.handlePreview))
+	mux.HandleFunc("GET /api/registry/backup", h.requireAuth(h.handleBackup))
+	mux.HandleFunc("GET /api/audit", h.requireAuth(h.audit))
+	mux.HandleFunc("GET /api/settings", h.requireAuth(h.getSettings))
+	mux.HandleFunc("POST /api/settings", h.requireAuth(h.setSettings))
 	return mux
 }
 
@@ -87,6 +134,50 @@ func (h *Handler) info(w http.ResponseWriter, r *http.Request) {
 		"go_version":     runtime.Version(),
 		"started_at":     h.build.StartedAt.UTC().Format(time.RFC3339),
 		"uptime_seconds": int64(time.Since(h.build.StartedAt).Seconds()),
+		"auth_enabled":   h.authEnabled(),
+	})
+}
+
+// login verifies username/password and issues a Bearer token.
+// Body: {username, password, remember?}. remember=true -> session_days TTL,
+// otherwise 12h. Always 401 with the same message on any mismatch.
+func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
+	if !h.authEnabled() {
+		writeJSON(w, http.StatusOK, map[string]any{"auth": "disabled"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Remember bool   `json:"remember"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	if strings.TrimSpace(body.Username) != h.adminUser || !VerifyPassword(h.adminPass, body.Password) {
+		writeErr(w, http.StatusUnauthorized, fmt.Errorf("invalid credentials"))
+		return
+	}
+	ttl := 12 * time.Hour
+	if body.Remember {
+		ttl = time.Duration(h.sessionDays) * 24 * time.Hour
+	}
+	tok, exp := h.sessions.Issue(ttl)
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "expires_at": exp.Format(time.RFC3339)})
+}
+
+func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
+	h.sessions.Revoke(BearerToken(r.Header.Get("Authorization")))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// me reports whether the request's token is valid (used by the UI boot).
+func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"auth_enabled": h.authEnabled(),
+		"ok":           !h.authEnabled() || h.sessions.Valid(BearerToken(r.Header.Get("Authorization"))),
+		"user":         h.adminUser,
 	})
 }
 
@@ -399,13 +490,49 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 			lines = n
 		}
 	}
-	data, err := os.ReadFile(h.auditPath)
+	// Tail without loading the whole file: seek to the last 256KB at most,
+	// then cut to the requested line count. Keeps the dashboard snappy even
+	// when the audit log has grown to tens of MB between rotations.
+	const maxTail = 256 << 10
+	f, err := os.Open(h.auditPath)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("audit log unavailable: %w", err))
 		return
 	}
-	// Tail: walk back N newlines without loading line-split of a huge file twice
-	text := string(data)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("audit log unavailable: %w", err))
+		return
+	}
+	start := int64(0)
+	if st.Size() > maxTail {
+		start = st.Size() - maxTail
+	}
+	if _, err := f.Seek(start, 0); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	buf := make([]byte, 0, 64<<10)
+	chunk := make([]byte, 32<<10)
+	for {
+		n, rerr := f.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	text := string(buf)
+	// If we started mid-line, drop the first partial line.
+	if start > 0 {
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[i+1:]
+		} else {
+			text = ""
+		}
+	}
 	cut := 0
 	count := 0
 	for i := len(text) - 1; i >= 0; i-- {

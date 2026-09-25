@@ -44,6 +44,10 @@ collections.json.tmp
 settings.json
 settings.json.tmp
 
+# Admin login sessions (Bearer tokens) - never commit
+sessions.json
+sessions.json.tmp
+
 # Runtime audit log (persisted, server-local) - never commit
 logs/
 *.log

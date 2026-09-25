@@ -42,6 +42,43 @@ func buildInfo() (string, string) {
 	return version, c
 }
 
+// rotateAudit renames an overgrown audit log to .1 (.1->.2, etc.) at startup.
+// maxMB<=0 defaults to 20, keep<=0 defaults to 3. Missing file = no-op.
+func rotateAudit(path string, maxMB, keep int) {
+	if maxMB <= 0 {
+		maxMB = 20
+	}
+	if keep <= 0 {
+		keep = 3
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return
+	}
+	if st.Size() <= int64(maxMB)<<20 {
+		return
+	}
+	// Drop the oldest beyond keep, then shift down.
+	oldest := path + "." + itoa(keep)
+	_ = os.Remove(oldest)
+	for i := keep - 1; i >= 1; i-- {
+		_ = os.Rename(path+"."+itoa(i), path+"."+itoa(i+1))
+	}
+	_ = os.Rename(path, path+".1")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	b := make([]byte, 0, 4)
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
@@ -71,6 +108,9 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(auditPath), 0o755); err != nil {
 		log.Fatalf("Create audit dir: %v", err)
 	}
+	// Startup rotation so the audit log can't grow without bound across
+	// restarts/deploys. Keeps auditPath + .1 ... .N (configurable).
+	rotateAudit(auditPath, cfg.AuditMaxMB, cfg.AuditKeep)
 	auditFile, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatalf("Open audit log %s: %v", auditPath, err)
@@ -157,6 +197,11 @@ func main() {
 	log.Printf("Registry: %s", cfg.RegistryPath)
 	log.Printf("Settings: %s", settingsPath)
 	log.Printf("Audit: %s", auditPath)
+	if cfg.Admin.Username != "" {
+		log.Printf("Admin auth: enabled (user=%s)", cfg.Admin.Username)
+	} else {
+		log.Printf("Admin auth: disabled (set admin.username + password_sha256 to enable)")
+	}
 
 	// Management dashboard + API. Binds per cfg.Admin.Host (default 0.0.0.0 so
 	// any LAN device can reach it during development; there is no TLS).
@@ -166,10 +211,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("Resolve docs dir: %v", err)
 		}
-		admin := webui.New(eng, auditPath, docsAbs, webui.BuildInfo{
+		admin := webui.NewWithAuth(eng, auditPath, docsAbs, webui.BuildInfo{
 			Version:   ver,
 			Commit:    com,
 			StartedAt: time.Now(),
+		}, webui.AdminAuth{
+			Username:       cfg.Admin.Username,
+			PasswordSHA256: cfg.Admin.PasswordSHA256,
+			SessionDays:    cfg.Admin.SessionDays,
+			SessionFile:    filepath.Join(cfgDir, "sessions.json"),
 		})
 		go func() {
 			log.Printf("Admin dashboard: http://%s (no TLS; docs=%s)", adminAddr, docsAbs)
