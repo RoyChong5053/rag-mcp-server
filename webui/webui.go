@@ -63,7 +63,7 @@ func NewWithAuth(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo,
 	}
 	return &Handler{
 		eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2), build: info,
-		sessions: NewSessionManager(auth.SessionFile),
+		sessions:  NewSessionManager(auth.SessionFile),
 		adminUser: strings.TrimSpace(auth.Username), adminPass: strings.TrimSpace(auth.PasswordSHA256),
 		sessionDays: days,
 	}
@@ -186,9 +186,19 @@ func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.eng.Settings().Get())
 }
 
-// setSettings applies a partial settings patch. A non-empty default_collection
-// must exist in Qdrant: a typo here would otherwise silently widen searches to
-// a global scan, which is hard to notice and looks like flaky recall.
+// settingsResponse is the flat settings object plus non-blocking advisories,
+// so the dashboard can persist an offline edit and still tell the operator
+// which default collection could not be verified.
+type settingsResponse struct {
+	settings.Settings
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// setSettings applies a partial settings patch. It never blocks on backend
+// reachability: a default collection is only a routing hint, and refusing to
+// save while qdrant is down would defeat the very failover the setting exists
+// to configure. Names that cannot be verified are returned as warnings; a typo
+// still fails loudly at the first search (it never silently widens).
 func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 	var patch settings.Patch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
@@ -203,37 +213,35 @@ func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.ActiveBackend = &b
 	}
-	validate := func(field **string, backend string) error {
+
+	var warnings []string
+	check := func(field **string, backend string) {
 		if *field == nil {
-			return nil
+			return
 		}
 		name := strings.TrimSpace(**field)
 		*field = &name
 		if name == "" {
-			return nil
+			return
 		}
 		exists, err := h.eng.CollectionExistsOn(backend, name)
-		if err != nil {
-			return err
+		switch {
+		case err != nil && engine.IsUnavailable(err):
+			warnings = append(warnings, fmt.Sprintf("%s unreachable; '%s' saved but not verified", backend, name))
+		case err != nil:
+			warnings = append(warnings, fmt.Sprintf("could not check '%s' on %s: %v", name, backend, err))
+		case !exists:
+			warnings = append(warnings, fmt.Sprintf("'%s' not found in %s; search/store will fail until it exists", name, backend))
 		}
-		if !exists {
-			return fmt.Errorf("collection '%s' not found in %s; refusing a default that cannot be searched", name, backend)
-		}
-		return nil
 	}
-	if err := validate(&patch.DefaultCollectionQdrant, engine.BackendQdrant); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := validate(&patch.DefaultCollectionVectra, engine.BackendVectra); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
+	check(&patch.DefaultCollectionQdrant, engine.BackendQdrant)
+	check(&patch.DefaultCollectionVectra, engine.BackendVectra)
+
 	if err := h.eng.Settings().Update(patch); err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("save settings: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, h.eng.Settings().Get())
+	writeJSON(w, http.StatusOK, settingsResponse{Settings: h.eng.Settings().Get(), Warnings: warnings})
 }
 
 func (h *Handler) listCollections(w http.ResponseWriter, r *http.Request) {

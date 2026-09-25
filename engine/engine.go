@@ -376,7 +376,7 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	var lastErr error
-	for _, t := range targets {
+	for i, t := range targets {
 		if t.backend == BackendQdrant && e.backendDown(BackendQdrant) {
 			lastErr = fmt.Errorf("backend %s is unavailable", BackendQdrant)
 			continue
@@ -392,7 +392,14 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 			log.Printf("Default search: %s/'%s' unavailable, trying next target: %v", t.backend, t.collection, err)
 			continue
 		}
-		return nil, err
+		// A logical error on the primary target is a real misconfiguration
+		// (e.g. a typo'd default) and must fail loudly. On a fallback it only
+		// means that replica isn't present, so keep walking the chain.
+		if i == 0 {
+			return nil, err
+		}
+		lastErr = err
+		log.Printf("Default search: fallback %s/'%s' failed, trying next target: %v", t.backend, t.collection, err)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no searchable default collection configured")
@@ -400,25 +407,61 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	return nil, lastErr
 }
 
+// defaultCollection returns the configured default collection for one backend.
+func (e *Engine) defaultCollection(backend string, st settings.Settings) string {
+	if backend == BackendVectra {
+		return strings.TrimSpace(st.DefaultCollectionVectra)
+	}
+	return strings.TrimSpace(st.DefaultCollectionQdrant)
+}
+
 // defaultSearchTargets returns the default collection targets for a caller that
 // omitted collection_id, in priority order.
+//
+// Routing is name-centric so qdrant and vectra act as interchangeable replicas
+// and a qdrant outage never requires flipping active_backend:
+//   - the active backend's default is primary;
+//   - if it is empty but failover is on, the other backend's configured default
+//     becomes primary (a write/search still lands somewhere sensible);
+//   - for a qdrant primary with failover on, the vectra fallbacks are the
+//     explicitly configured vectra default first, then the same-name replica.
+//
+// An empty result means "no default configured at all"; callers then widen to
+// all enabled collections.
 func (e *Engine) defaultSearchTargets() []scopeTarget {
 	st := e.settings.Get()
-	if e.ActiveBackend() == BackendVectra {
-		if n := strings.TrimSpace(st.DefaultCollectionVectra); n != "" {
-			return []scopeTarget{{backend: BackendVectra, collection: n}}
+	active := e.ActiveBackend()
+	other := otherBackend(active)
+
+	var primary scopeTarget
+	if n := e.defaultCollection(active, st); n != "" {
+		primary = scopeTarget{backend: active, collection: n}
+	} else if other != "" && st.FailoverEnabled {
+		if n := e.defaultCollection(other, st); n != "" {
+			primary = scopeTarget{backend: other, collection: n}
 		}
+	}
+	if primary.collection == "" {
 		return nil
 	}
-	var out []scopeTarget
-	if n := strings.TrimSpace(st.DefaultCollectionQdrant); n != "" {
-		out = append(out, scopeTarget{backend: BackendQdrant, collection: n})
+
+	out := []scopeTarget{primary}
+	if !st.FailoverEnabled || primary.backend == BackendVectra {
+		return out
 	}
-	if st.FailoverEnabled {
-		if n := strings.TrimSpace(st.DefaultCollectionVectra); n != "" {
-			out = append(out, scopeTarget{backend: BackendVectra, collection: n})
+
+	// qdrant primary: append vectra fallbacks without duplicates.
+	seen := map[string]bool{primary.backend + "/" + primary.collection: true}
+	add := func(collection string) {
+		collection = strings.TrimSpace(collection)
+		if collection == "" || seen[BackendVectra+"/"+collection] {
+			return
 		}
+		seen[BackendVectra+"/"+collection] = true
+		out = append(out, scopeTarget{backend: BackendVectra, collection: collection})
 	}
+	add(e.defaultCollection(BackendVectra, st)) // explicitly configured vectra default
+	add(primary.collection)                     // zero-config same-name replica
 	return out
 }
 
@@ -969,31 +1012,36 @@ func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]stri
 }
 
 // defaultWriteTarget resolves where an omitted collection_id write goes: the
-// active backend's default collection, with qdrant→vectra failover.
+// same backend/collection priority chain as a default search, filtered to the
+// first reachable backend (a write cannot be replayed later like a search).
+// This makes qdrant→vectra failover automatic without a manual backend switch.
 func (e *Engine) defaultWriteTarget() (scopeTarget, error) {
-	st := e.settings.Get()
-	if e.ActiveBackend() == BackendVectra {
-		name := strings.TrimSpace(st.DefaultCollectionVectra)
-		if name == "" {
-			return scopeTarget{}, fmt.Errorf("no collection_id given and no default_collection_vectra configured; pass collection_id or set a default in the management dashboard")
+	targets := e.defaultSearchTargets()
+	if len(targets) == 0 {
+		return scopeTarget{}, fmt.Errorf("no collection_id given and no default collection configured; pass collection_id or set a default in the management dashboard")
+	}
+	for _, t := range targets {
+		if e.backendDown(t.backend) {
+			continue
 		}
-		return scopeTarget{backend: BackendVectra, collection: name}, nil
-	}
-	name := strings.TrimSpace(st.DefaultCollectionQdrant)
-	if name == "" {
-		return scopeTarget{}, fmt.Errorf("no collection_id given and no default_collection_qdrant configured; pass collection_id or set a default in the management dashboard")
-	}
-	if st.FailoverEnabled {
-		fallback := strings.TrimSpace(st.DefaultCollectionVectra)
-		if e.backendDown(BackendQdrant) || e.backendUnreachable(BackendQdrant) {
-			if fallback == "" {
-				return scopeTarget{}, fmt.Errorf("qdrant is unreachable and no default_collection_vectra is configured for failover; pass collection_id or configure a vectra default")
-			}
-			log.Printf("Default write: qdrant unavailable, using vectra default '%s'", fallback)
-			return scopeTarget{backend: BackendVectra, collection: fallback}, nil
+		if e.backendUnreachable(t.backend) {
+			continue
 		}
+		if t.backend != targets[0].backend {
+			log.Printf("Default write: %s unavailable, using %s/'%s'", targets[0].backend, t.backend, t.collection)
+		}
+		return t, nil
 	}
-	return scopeTarget{backend: BackendQdrant, collection: name}, nil
+	return scopeTarget{}, fmt.Errorf("no reachable default backend for an omitted collection_id; tried %s (is qdrant down with no vectra fallback configured?)", targetList(targets))
+}
+
+// targetList renders a failover chain for error messages/logs.
+func targetList(targets []scopeTarget) string {
+	parts := make([]string, len(targets))
+	for i, t := range targets {
+		parts[i] = t.backend + "/" + t.collection
+	}
+	return strings.Join(parts, ", ")
 }
 
 // writeMemoryRaw persists ad-hoc memory text under <memoryDir>/<date>/.

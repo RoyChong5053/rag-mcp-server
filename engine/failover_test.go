@@ -127,6 +127,7 @@ func TestDefaultSearchTargets(t *testing.T) {
 	want := []scopeTarget{
 		{backend: BackendQdrant, collection: "global_memory"},
 		{backend: BackendVectra, collection: "gm_vectra"},
+		{backend: BackendVectra, collection: "global_memory"}, // same-name replica
 	}
 	if len(got) != len(want) {
 		t.Fatalf("targets = %+v, want %+v", got, want)
@@ -180,11 +181,61 @@ func TestDefaultWriteTargetFailover(t *testing.T) {
 		t.Fatalf("up qdrant target = %+v, want qdrant/global_memory", target2)
 	}
 
-	// No vectra default and qdrant down -> loud error
+	// No configured vectra default and qdrant down -> automatic same-name
+	// replica on vectra, no error (this is the zero-config failover path).
 	st.DefaultCollectionVectra = ""
 	e3 := newTestEngine(t, st, newFakeStore(false), newFakeStore(true))
-	if _, err := e3.defaultWriteTarget(); err == nil {
-		t.Fatal("expected error when qdrant down and no vectra fallback configured")
+	target3, err := e3.defaultWriteTarget()
+	if err != nil {
+		t.Fatalf("same-name failover should not error: %v", err)
+	}
+	if target3.backend != BackendVectra || target3.collection != "global_memory" {
+		t.Fatalf("same-name target = %+v, want vectra/global_memory", target3)
+	}
+
+	// No defaults at all -> loud error (nothing to route to).
+	e4 := newTestEngine(t, settings.Settings{FailoverEnabled: true}, newFakeStore(false), newFakeStore(true))
+	if _, err := e4.defaultWriteTarget(); err == nil {
+		t.Fatal("expected error when no default collection is configured")
+	}
+}
+
+// A qdrant primary with no separate vectra default falls back to the
+// same-name collection on vectra, so a qdrant outage needs no config change.
+func TestDefaultSearchTargetsSameNameReplica(t *testing.T) {
+	st := settings.Settings{
+		ActiveBackend:           BackendQdrant,
+		DefaultCollectionQdrant: "global_memory",
+		FailoverEnabled:         true,
+	}
+	e := newTestEngine(t, st, newFakeStore(true), newFakeStore(true))
+	got := e.defaultSearchTargets()
+	want := []scopeTarget{
+		{backend: BackendQdrant, collection: "global_memory"},
+		{backend: BackendVectra, collection: "global_memory"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("target[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// With no qdrant default but a vectra default configured, the vectra default
+// becomes primary instead of erroring.
+func TestDefaultSearchTargetsVectraDefaultOnly(t *testing.T) {
+	st := settings.Settings{
+		ActiveBackend:           BackendQdrant,
+		DefaultCollectionVectra: "gm_vectra",
+		FailoverEnabled:         true,
+	}
+	e := newTestEngine(t, st, newFakeStore(true), newFakeStore(true))
+	got := e.defaultSearchTargets()
+	if len(got) != 1 || got[0].backend != BackendVectra || got[0].collection != "gm_vectra" {
+		t.Fatalf("targets = %+v, want [vectra/gm_vectra]", got)
 	}
 }
 

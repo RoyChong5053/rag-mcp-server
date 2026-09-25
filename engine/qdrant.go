@@ -44,11 +44,18 @@ func (c *QdrantClient) CreateCollection(name string) error {
 	return c.put(fmt.Sprintf("/collections/%s", name), body)
 }
 
-// CollectionExists checks if a collection exists
+// CollectionExists checks if a collection exists.
+// A transport/5xx failure is surfaced as unavailable instead of being folded
+// into "not found": the engine must be able to tell a down qdrant from a
+// missing collection so it can mark the backend down and fail over. Only a
+// genuine 404 (a plain, non-unavailable qdrant error) means "absent".
 func (c *QdrantClient) CollectionExists(name string) (bool, error) {
 	_, err := c.get(fmt.Sprintf("/collections/%s", name))
 	if err != nil {
-		return false, nil // Collection doesn't exist
+		if IsUnavailable(err) {
+			return false, err
+		}
+		return false, nil // 404: collection doesn't exist
 	}
 	return true, nil
 }

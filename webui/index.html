@@ -619,12 +619,26 @@ function fillColSelect(id, backend, allLabel) {
   const cols = colsCache.filter(c => (c.backend || 'qdrant') === backend);
   sel.innerHTML = '<option value="">' + allLabel + '</option>' + cols.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
 }
+// Keep a saved value selectable even when its collection isn't currently
+// listed (e.g. qdrant is down, so its collections are skipped). Without this
+// the select silently blanks and the next Save would wipe the default.
+function ensureOption(id, value) {
+  if (!value) return;
+  const sel = document.getElementById(id);
+  if ([...sel.options].some(o => o.value === value)) return;
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = value + ' (unlisted)';
+  sel.appendChild(o);
+}
 async function loadSettings() {
   const st = document.getElementById('s-status');
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { st.textContent = 'settings failed: ' + e.message; return; }
   fillColSelect('s-col-qdrant', 'qdrant', '(search all enabled)');
   fillColSelect('s-col-vectra', 'vectra', '(no vectra default)');
+  ensureOption('s-col-qdrant', s.default_collection_qdrant);
+  ensureOption('s-col-vectra', s.default_collection_vectra);
   document.getElementById('s-active').value = s.active_backend || '';
   document.getElementById('s-col-qdrant').value = s.default_collection_qdrant || '';
   document.getElementById('s-col-vectra').value = s.default_collection_vectra || '';
@@ -640,8 +654,9 @@ async function loadSettings() {
 async function saveSettings() {
   const st = document.getElementById('s-status');
   st.textContent = 'saving…';
+  st.style.color = '';
   try {
-    await api('POST', '/api/settings', {
+    const res = await api('POST', '/api/settings', {
       active_backend: document.getElementById('s-active').value,
       default_collection_qdrant: document.getElementById('s-col-qdrant').value,
       default_collection_vectra: document.getElementById('s-col-vectra').value,
@@ -653,8 +668,16 @@ async function saveSettings() {
       query_max_chars: +document.getElementById('s-qmax').value || 0,
       doc_max_chars: +document.getElementById('s-dmax').value || 0
     });
-    st.textContent = 'saved ' + new Date().toLocaleTimeString();
-  } catch (e) { st.textContent = 'save failed: ' + e.message; }
+    // Saved regardless of backend reachability; a backend that was offline
+    // shows up as an advisory warning, not a failed save (failover must stay
+    // configurable while qdrant is down).
+    if (res && Array.isArray(res.warnings) && res.warnings.length) {
+      st.textContent = 'saved with warnings: ' + res.warnings.join('; ');
+      st.style.color = '#b8860b';
+    } else {
+      st.textContent = 'saved ' + new Date().toLocaleTimeString();
+    }
+  } catch (e) { st.textContent = 'save failed: ' + e.message; st.style.color = '#c00'; }
 }
 
 /* ---- data bank ---- */

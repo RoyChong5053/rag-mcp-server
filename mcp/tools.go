@@ -13,7 +13,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
-			"Omit collection_id to use the active backend's configured default collection; if qdrant is unreachable it automatically fails back to the vectra default (when configured). " +
+			"Omit collection_id to use the configured default collection; if qdrant is unreachable it automatically falls back to the vectra default, then the same-name vectra collection. " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
@@ -76,7 +76,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "store_memory",
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
-			"Omit collection_id to write to the active backend's default collection, with automatic vectra failover when qdrant is unreachable. " +
+			"Omit collection_id to write to the configured default collection, with automatic vectra failover (configured vectra default, then the same-name collection) when qdrant is unreachable. " +
 			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
 			"so it can be browsed in the data bank and re-indexed.",
 		InputSchema: map[string]any{
