@@ -260,8 +260,10 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 }
 
 // Ping tests connectivity to the embedding endpoint. Uses a single attempt
-// with a short 5s budget (no retries) so health checks stay fast and quiet
-// and never hold a HealthCheck probe hostage.
+// with a 15s budget (no retries): GPU answers in ~1s but a CPU-only fan-out
+// needs 5-10s for one text. The engine's 8s probeWithTimeout still bounds
+// dashboard latency (over-budget shows amber "slow", never "down"), so a
+// generous client here turns slow-but-working into "slow", not a hard error.
 func (c *EmbeddingClient) Ping() error {
 	req := EmbeddingRequest{Model: c.model, Input: []string{"test"}}
 	_, err := c.callEndpointWithClient(c.pingClient(), c.baseURL, req)
@@ -273,5 +275,5 @@ func (c *EmbeddingClient) Ping() error {
 
 // pingClient is a short-budget client for health probes only.
 func (c *EmbeddingClient) pingClient() *http.Client {
-	return &http.Client{Timeout: 5 * time.Second}
+	return &http.Client{Timeout: 15 * time.Second}
 }
