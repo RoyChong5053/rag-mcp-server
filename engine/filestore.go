@@ -607,13 +607,15 @@ func (f *FileStore) SetPayload(collection string, payload map[string]any, filter
 }
 
 // Ping verifies the root is present and writable.
+// Failures are wrapped as unavailable so HealthCheck/listAllStores and the
+// downUntil cache treat a dead vectra disk symmetrically with a dead qdrant.
 func (f *FileStore) Ping() error {
 	if err := os.MkdirAll(f.root, 0o755); err != nil {
-		return fmt.Errorf("vectra root unavailable: %w", err)
+		return unavailable(fmt.Errorf("vectra root unavailable: %w", err))
 	}
 	probe := filepath.Join(f.root, ".ping")
 	if err := os.WriteFile(probe, []byte("ok"), 0o644); err != nil {
-		return fmt.Errorf("vectra root not writable: %w", err)
+		return unavailable(fmt.Errorf("vectra root not writable: %w", err))
 	}
 	_ = os.Remove(probe)
 	return nil

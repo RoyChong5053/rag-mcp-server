@@ -23,10 +23,12 @@ type EmbeddingClient struct {
 }
 
 // NewEmbeddingClient creates a new embedding client.
-// Timeout is 20s: single-query embeds return in ~10s through one-api
-// fan-out; bulk index jobs are batched (32/batch) and async. Fallback
-// across one-api channels is one-api's job, so this client only retries
-// briefly (thin retry) instead of stacking a second fallback layer.
+// Timeout is 120s to match one-api RELAY_TIMEOUT on m64: single-query
+// embeds return in ~10s through GPU fan-out, but CPU-only fan-out
+// (LOQ down, 5 weak nodes) needs tens of seconds per shard. Bulk index
+// jobs are batched (32/batch) and async. Fallback across one-api channels
+// is one-api's job, so this client only retries briefly (thin retry)
+// instead of stacking a second fallback layer.
 func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClient {
 	return &EmbeddingClient{
 		baseURL:   baseURL,
@@ -34,7 +36,7 @@ func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClie
 		model:     model,
 		apiKey:    apiKey,
 		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
+			Timeout: 120 * time.Second,
 		},
 	}
 }
@@ -53,14 +55,35 @@ type EmbeddingResponse struct {
 	} `json:"data"`
 }
 
-// embedBatchSize caps texts per embedding request so large documents
-// don't blow up into a single giant HTTP call (timeouts / 413s).
-const embedBatchSize = 32
+// defaultEmbedBatchSize is the GPU fast path (RTX4060). The CPU slow path
+// (LOQ down or VRAM full) should use 8 or lower via BatchSize.
+const defaultEmbedBatchSize = 32
 
-// CreateEmbeddings generates embeddings for the given texts
+// BatchSize caps texts per embedding POST. 0/negative = default (32).
+// Set per index job from settings.embed_batch_size so operators can flip
+// between GPU-fast (32) and CPU-slow (8) in the WebUI without a restart.
+// Single-text query embeds never reach the batch loop, so search latency is
+// unaffected by this value.
+func (c *EmbeddingClient) batchSize() int {
+	return defaultEmbedBatchSize
+}
+
+// CreateEmbeddings generates embeddings for the given texts with an explicit
+// per-POST batch cap. Use CreateEmbeddings for the default (32); index jobs
+// pass settings.embed_batch_size so CPU-only nights use 8.
 func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) {
+	return c.CreateEmbeddingsBatched(texts, 0)
+}
+
+// CreateEmbeddingsBatched is CreateEmbeddings with a caller-chosen batch cap
+// (<=0 = default). Batches are sent sequentially to preserve chunk order.
+func (c *EmbeddingClient) CreateEmbeddingsBatched(texts []string, batchSize int) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
+	}
+	bs := batchSize
+	if bs <= 0 {
+		bs = defaultEmbedBatchSize
 	}
 
 	req := EmbeddingRequest{
@@ -69,7 +92,7 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 	}
 
 	// Small input: single request (fast path, preserves old behavior)
-	if len(texts) <= embedBatchSize {
+	if len(texts) <= bs {
 		// Try primary endpoint first
 		embeddings, err := c.callWithRetry(c.baseURL, req)
 		if err != nil && c.backupURL != "" {
@@ -81,8 +104,8 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 
 	// Large input: batch sequentially to avoid timeouts
 	all := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); start += embedBatchSize {
-		end := start + embedBatchSize
+	for start := 0; start < len(texts); start += bs {
+		end := start + bs
 		if end > len(texts) {
 			end = len(texts)
 		}
@@ -92,7 +115,7 @@ func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) 
 			embeddings, err = c.callWithRetry(c.backupURL, batchReq)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("batch [%d:%d]: %w", start, end, err)
+			return nil, fmt.Errorf("batch [%d:%d]/%d (batch_size=%d): %w", start, end, len(texts), bs, err)
 		}
 		all = append(all, embeddings...)
 	}

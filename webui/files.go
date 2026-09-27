@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,14 @@ import (
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 )
+
+// otherName reports the opposite backend for log lines (qdrant<->vectra).
+func otherName(backend string) string {
+	if backend == engine.BackendQdrant {
+		return engine.BackendVectra
+	}
+	return engine.BackendQdrant
+}
 
 // Files larger than this skip hashing in listings (shown as status unknown-hash).
 const maxHashBytes = 50 << 20
@@ -208,6 +217,11 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 	// different backend than the one the registry says it lives in, and refuse
 	// to create a same-name collection in the other store: either would leave
 	// vectors split across backends and silently break recall.
+	// Best-effort opposite check: when the other backend is unreachable
+	// (LOQ/qdrant down while vectorizing into vectra, or vice versa) we
+	// log a warning and let the job in. A real conflict (exists on both
+	// reachable stores) still returns 409; only non-unavailable errors
+	// return 502.
 	if backend != "" {
 		if en := h.eng.Registry().Get(body.Collection); en != nil && en.Backend != "" && en.Backend != backend {
 			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' is fixed to %s; refusing to index into %s", body.Collection, en.Backend, backend))
@@ -215,10 +229,13 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		exists, err := h.eng.CollectionExistsOnOther(backend, body.Collection)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err)
-			return
-		}
-		if exists {
+			if engine.IsUnavailable(err) {
+				log.Printf("SubmitIndex: opposite-backend check skipped (%s unreachable), allowing vectorize into %s/'%s'", otherName(backend), backend, body.Collection)
+			} else {
+				writeErr(w, http.StatusBadGateway, err)
+				return
+			}
+		} else if exists {
 			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' already exists in the other backend; delete or rename it before vectorizing into %s", body.Collection, backend))
 			return
 		}

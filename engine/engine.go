@@ -377,8 +377,8 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 
 	var lastErr error
 	for i, t := range targets {
-		if t.backend == BackendQdrant && e.backendDown(BackendQdrant) {
-			lastErr = fmt.Errorf("backend %s is unavailable", BackendQdrant)
+		if e.backendDown(t.backend) {
+			lastErr = fmt.Errorf("backend %s is unavailable (cached)", t.backend)
 			continue
 		}
 		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter)
@@ -607,10 +607,26 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 		}
 		backend := e.backendOf(name)
 		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
-		if err != nil {
-			if IsUnavailable(err) {
-				e.markBackendDown(backend)
+		if err != nil && IsUnavailable(err) {
+			// Explicit scope gets the same same-name failover as
+			// searchResolved so a qdrant outage never hard-fails a
+			// named vectra replica (and vice versa).
+			e.markBackendDown(backend)
+			if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, name) {
+				log.Printf("SearchMulti: '%s' %s unavailable, using same-name collection on %s", name, backend, other)
+				results, err = e.stores[other].Search(name, queryVector, recallCount, threshold, filter)
+				if err == nil {
+					e.markBackendUp(other)
+					for _, r := range results {
+						sr := qdrantToSearchResult(r, name)
+						sr.Backend = other
+						merged = append(merged, sr)
+					}
+					continue
+				}
 			}
+		}
+		if err != nil {
 			if explicit {
 				return nil, fmt.Errorf("search failed on '%s' (%s): %w", name, backend, err)
 			}
@@ -701,16 +717,48 @@ func trimResults(results []SearchResult, topK int) []SearchResult {
 // SearchDebugResult pairs kept results with candidates the threshold killed.
 // Killed items are fetched with threshold=0 over the same recall window,
 // so tuners see exactly what a higher threshold would have kept.
+// Observability fields (query truncation, timings, score mode) let the RAG
+// console diagnose recall metaphysics: long pastes silently truncated,
+// CPU-slow embeds, jina-logit vs qwen-prob scales, saturated/weak reranks.
 type SearchDebugResult struct {
 	Results []SearchResult `json:"results"`
 	Killed  []SearchResult `json:"killed"`
+	// Query observability
+	QueryOriginalLen  int    `json:"query_original_len"`
+	QueryTruncatedLen int    `json:"query_truncated_len"`
+	QueryPreview      string `json:"query_preview"`
+	QueryTruncated    bool   `json:"query_truncated"`
+	Backend           string `json:"backend"`
+	Reranked          bool   `json:"reranked"`
+	ScoreMode         string `json:"score_mode"`
+	TopScore          float64 `json:"top_score"`
+	EmbedMs           int64  `json:"embed_ms"`
+	RerankMs          int64  `json:"rerank_ms"`
+	TookMs            int64  `json:"took_ms"`
 }
 
 // SearchDebug runs a single-collection search and reports threshold kills.
 // It embeds once and searches twice (threshold, then 0): no rerank on the
-// killed set, they are shown in raw vector order.
+// killed set, they are shown in raw vector order. On backend-unreachable it
+// fails over to the same-name collection on the other backend like
+// searchResolved, so the WebUI recall tester keeps working while qdrant is
+// down (and vice versa).
 func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any) (*SearchDebugResult, error) {
+	t0 := time.Now()
+	// Truncation observability: boundQuery keeps the head; the console needs
+	// both lengths plus a preview to tell "long paste silently cut" apart
+	// from "genuinely no recall".
+	origLen := utf8.RuneCountInString(query)
+	bounded := e.boundQuery(query)
+	truncLen := utf8.RuneCountInString(bounded)
+	preview := bounded
+	if utf8.RuneCountInString(preview) > 300 {
+		preview = string([]rune(preview)[:300]) + "…"
+	}
+
+	tEmbed := time.Now()
 	queryVector, err := e.embedQuery(query)
+	embedMs := time.Since(tEmbed).Milliseconds()
 	if err != nil {
 		return nil, err
 	}
@@ -724,10 +772,20 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		recallCount = st.RerankRecall
 	}
 
+	backend := e.backendOf(collection)
 	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold, filter)
+	if err != nil && IsUnavailable(err) {
+		e.markBackendDown(backend)
+		if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, collection) {
+			log.Printf("SearchDebug: '%s' %s unavailable, using same-name collection on %s", collection, backend, other)
+			backend = other
+			kept, err = e.stores[other].Search(collection, queryVector, recallCount, threshold, filter)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
+	e.markBackendUp(backend)
 	results := make([]SearchResult, 0, len(kept))
 	keptIDs := make(map[any]bool, len(kept))
 	for _, r := range kept {
@@ -737,27 +795,59 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 
 	var killed []SearchResult
 	if threshold > 0 {
-		all, err := e.storeFor(collection).Search(collection, queryVector, recallCount, 0, filter)
-		if err == nil {
-			for _, r := range all {
-				if !keptIDs[r.ID] {
-					killed = append(killed, qdrantToSearchResult(r, collection))
+		if s, ok := e.stores[backend]; ok {
+			if all, err := s.Search(collection, queryVector, recallCount, 0, filter); err == nil {
+				for _, r := range all {
+					if !keptIDs[r.ID] {
+						killed = append(killed, qdrantToSearchResult(r, collection))
+					}
 				}
 			}
 		}
 	}
 
+	reranked := false
+	var rerankMs int64
+	scoreMode := "vector-only"
 	if useRerank && len(results) > 1 {
-		if reranked, err := e.applyRerank(query, results, topK); err == nil {
-			results = reranked
+		tRerank := time.Now()
+		if out, err := e.applyRerank(query, results, topK); err == nil {
+			results = out
+			reranked = true
 		} else {
 			log.Printf("Rerank failed, falling back to vector order: %v", err)
 			results = trimResults(results, topK)
 		}
+		rerankMs = time.Since(tRerank).Milliseconds()
+		scoreMode = e.rerank.ScoreModeName()
 	} else {
 		results = trimResults(results, topK)
 	}
-	return &SearchDebugResult{Results: results, Killed: killed}, nil
+	var topScore float64
+	if len(results) > 0 {
+		topScore = results[0].Score
+	}
+	out := &SearchDebugResult{
+		Results: results, Killed: killed,
+		QueryOriginalLen: origLen, QueryTruncatedLen: truncLen,
+		QueryPreview: preview, QueryTruncated: truncLen < origLen,
+		Backend: backend, Reranked: reranked, ScoreMode: scoreMode,
+		TopScore: topScore, EmbedMs: embedMs, RerankMs: rerankMs,
+		TookMs: time.Since(t0).Milliseconds(),
+	}
+	// RAG-metaphysics warnings, distilled from ST Vector-Storage-5053:
+	// saturated (all scores pinned near 0) vs weakly relevant (best < 0.5).
+	if reranked && len(results) > 0 {
+		if topScore < 0.01 {
+			log.Printf("SearchDebug warn: reranker scores look saturated (best %.4f, mode %s) — check model scale", topScore, scoreMode)
+		} else if topScore < 0.5 {
+			log.Printf("SearchDebug warn: all reranked candidates weakly relevant (best %.3f, mode %s)", topScore, scoreMode)
+		}
+	}
+	if out.QueryTruncated {
+		log.Printf("SearchDebug: query truncated %d -> %d runes preview=%.100q", origLen, truncLen, preview)
+	}
+	return out, nil
 }
 
 func (e *Engine) applyRerank(query string, results []SearchResult, topK int) ([]SearchResult, error) {
@@ -1171,8 +1261,13 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		return &IndexResult{ChunksIndexed: 0, Collection: collectionID}, used, nil
 	}
 
-	// Embed all chunks
-	embeddings, err := e.embedding.CreateEmbeddings(chunks)
+	// Embed all chunks. Batch cap comes from settings.embed_batch_size:
+	// 32 GPU-fast vs 8 CPU-slow (LOQ down / VRAM full). 0 = default 32.
+	bs := e.settings.Get().EmbedBatchSize
+	if bs > 0 {
+		log.Printf("Index '%s': embedding %d chunks (batch_size=%d)", collectionID, len(chunks), bs)
+	}
+	embeddings, err := e.embedding.CreateEmbeddingsBatched(chunks, bs)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to embed chunks: %w", err)
 	}

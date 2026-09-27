@@ -40,6 +40,12 @@ type Settings struct {
 	// DocMaxChars caps each document handed to the reranker (runes).
 	// 0 = unlimited.
 	DocMaxChars int `json:"doc_max_chars"`
+	// EmbedBatchSize caps texts per embedding POST from index jobs.
+	// 32 is the GPU fast path (RTX4060); 8 or lower is the CPU slow path
+	// (LOQ down or VRAM full: 5 weak nodes). 0/negative = 32 default.
+	// WebUI-editable so scenario-4 (qdrant online but GPU busy) needs no
+	// restart and no fake qdrant outage to trigger slow logic.
+	EmbedBatchSize int `json:"embed_batch_size"`
 }
 
 // Patch carries optional settings updates; nil means "leave unchanged".
@@ -55,6 +61,7 @@ type Patch struct {
 	RerankRecall            *int     `json:"rerank_recall"`
 	QueryMaxChars           *int     `json:"query_max_chars"`
 	DocMaxChars             *int     `json:"doc_max_chars"`
+	EmbedBatchSize          *int     `json:"embed_batch_size"`
 }
 
 // Store is a concurrency-safe runtime settings store backed by a JSON file.
@@ -136,6 +143,9 @@ func (s *Store) Update(p Patch) error {
 	}
 	if p.DocMaxChars != nil {
 		s.data.DocMaxChars = *p.DocMaxChars
+	}
+	if p.EmbedBatchSize != nil {
+		s.data.EmbedBatchSize = *p.EmbedBatchSize
 	}
 
 	return s.save()

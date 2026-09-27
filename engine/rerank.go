@@ -213,6 +213,20 @@ func (c *RerankClient) callEndpointWithClient(client *http.Client, baseURL strin
 	return rerankResp.Results, nil
 }
 
+// ScoreModeName reports the configured model scale for observability:
+// qwen3/probability models emit [0,1] directly; jina/bge/logit models emit
+// unbounded logits converted via sigmoid. Distilled from ST Vector-Storage.
+func (c *RerankClient) ScoreModeName() string {
+	modelLower := strings.ToLower(c.model)
+	if strings.Contains(modelLower, "qwen3") || strings.Contains(modelLower, "minicpm") || strings.Contains(modelLower, "probability") {
+		return "probability"
+	}
+	if strings.Contains(modelLower, "jina") || strings.Contains(modelLower, "bge") || strings.Contains(modelLower, "gte") || strings.Contains(modelLower, "logit") {
+		return "logit"
+	}
+	return "auto"
+}
+
 // detectScoreMode determines if scores are probability or logit
 func (c *RerankClient) detectScoreMode(results []RerankResult) RerankScoreMode {
 	if len(results) == 0 {
