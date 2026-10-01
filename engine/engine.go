@@ -201,6 +201,17 @@ func (e *Engine) ActiveBackend() string {
 	return e.defaultBackend
 }
 
+// backendDownTTL is how long a failed backend stays marked down. Long enough
+// that a dead host costs one probe instead of one full timeout per request,
+// short enough that recovery is noticed promptly (the next request after
+// expiry re-probes with the fast dial budget).
+const backendDownTTL = 60 * time.Second
+
+// errBackendDown is the synthetic error used when a request skips a backend
+// whose down-cache is warm, so the normal IsUnavailable failover runs without
+// ever touching the dead host (no timeout, no health probe).
+var errBackendDown = unavailable(fmt.Errorf("backend marked down (cached)"))
+
 // backendDown reports whether backend was marked unreachable recently.
 func (e *Engine) backendDown(backend string) bool {
 	e.healthMu.Lock()
@@ -215,7 +226,7 @@ func (e *Engine) markBackendDown(backend string) {
 	if e.downUntil == nil {
 		e.downUntil = make(map[string]time.Time)
 	}
-	e.downUntil[backend] = time.Now().Add(15 * time.Second)
+	e.downUntil[backend] = time.Now().Add(backendDownTTL)
 }
 
 func (e *Engine) markBackendUp(backend string) {
@@ -472,6 +483,11 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 		return nil, fmt.Errorf("collection '%s' is disabled", scope)
 	}
 	backend := e.backendOf(scope)
+	// A backend already known down must not be probed again: go straight to
+	// the same-name replica so a dead qdrant costs ~0ms instead of a timeout.
+	if e.backendDown(backend) {
+		return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, errBackendDown)
+	}
 	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter)
 	if err == nil {
 		e.markBackendUp(backend)
@@ -484,12 +500,24 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 		return nil, err
 	}
 	e.markBackendDown(backend)
+	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err)
+}
+
+// searchSameNameFailover searches the same-name collection on the paired
+// backend after the primary was found unavailable (or was already cached down).
+// A missing replica is a loud error so the caller knows its data is not
+// reachable instead of getting an empty result.
+func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error) ([]SearchResult, error) {
 	other := otherBackend(backend)
-	if other == "" || !e.collectionExistsOn(other, scope) {
-		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name collection on %s to fall back to: %w", scope, backend, other, err)
+	if other == "" || e.backendDown(other) || !e.collectionExistsOn(other, name) {
+		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name collection on %s to fall back to: %w", name, backend, other, cause)
 	}
-	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", scope, backend, other)
-	return e.searchCollection(other, scope, query, topK, useRerank, thr, filter)
+	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", name, backend, other)
+	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter)
+	if err == nil {
+		e.markBackendUp(other)
+	}
+	return res, err
 }
 
 // collectionExistsOn is a best-effort existence check that swallows errors.
@@ -606,13 +634,19 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			}
 		}
 		backend := e.backendOf(name)
-		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
+		var results []StoreSearchResult
+		var err error
+		if e.backendDown(backend) {
+			err = errBackendDown
+		} else {
+			results, err = e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
+		}
 		if err != nil && IsUnavailable(err) {
 			// Explicit scope gets the same same-name failover as
 			// searchResolved so a qdrant outage never hard-fails a
 			// named vectra replica (and vice versa).
 			e.markBackendDown(backend)
-			if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, name) {
+			if other := otherBackend(backend); other != "" && !e.backendDown(other) && e.collectionExistsOn(other, name) {
 				log.Printf("SearchMulti: '%s' %s unavailable, using same-name collection on %s", name, backend, other)
 				results, err = e.stores[other].Search(name, queryVector, recallCount, threshold, filter)
 				if err == nil {
@@ -773,10 +807,15 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	}
 
 	backend := e.backendOf(collection)
-	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold, filter)
+	var kept []StoreSearchResult
+	if e.backendDown(backend) {
+		err = errBackendDown
+	} else {
+		kept, err = e.storeFor(collection).Search(collection, queryVector, recallCount, threshold, filter)
+	}
 	if err != nil && IsUnavailable(err) {
 		e.markBackendDown(backend)
-		if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, collection) {
+		if other := otherBackend(backend); other != "" && !e.backendDown(other) && e.collectionExistsOn(other, collection) {
 			log.Printf("SearchDebug: '%s' %s unavailable, using same-name collection on %s", collection, backend, other)
 			backend = other
 			kept, err = e.stores[other].Search(collection, queryVector, recallCount, threshold, filter)

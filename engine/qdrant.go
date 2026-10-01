@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -20,15 +21,42 @@ type QdrantClient struct {
 
 // NewQdrantClient creates a new Qdrant client
 func NewQdrantClient(host string, port int) *QdrantClient {
+	// A dead/blackholed host must fail fast so the engine can fail over to
+	// vectra. Data requests get a 2s TCP connect budget (search responses can
+	// still take up to the 10s overall cap); the probe client gets 1.5s total.
+	dataTransport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	probeTransport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   1 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          4,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 	return &QdrantClient{
 		baseURL: fmt.Sprintf("http://%s:%d", host, port),
 		httpClient: &http.Client{
 			// Short enough that a dead/blackholed qdrant fails fast so the
 			// engine can fail over to vectra; LAN round-trips are <1ms.
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: dataTransport,
 		},
 		probeClient: &http.Client{
-			Timeout: 1500 * time.Millisecond,
+			Timeout:   1500 * time.Millisecond,
+			Transport: probeTransport,
 		},
 	}
 }

@@ -8,9 +8,16 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+// rerankDownTTL is how long the rerank circuit breaker stays open after a
+// failure. A dead/absent reranker (LOQ off) is skipped for this window so
+// searches degrade to vector order instantly instead of paying the timeout
+// again; the first successful call clears it.
+const rerankDownTTL = 2 * time.Minute
 
 // RerankClient calls one-api's rerank endpoint
 type RerankClient struct {
@@ -24,6 +31,12 @@ type RerankClient struct {
 	// WebUI edits take effect without a restart. It overrides the static values.
 	limits     func() (int, int)
 	httpClient *http.Client
+
+	// healthMu guards downUntil, the rerank circuit breaker. After a failure
+	// the reranker is skipped for rerankDownTTL so a search degrades to vector
+	// order instantly instead of paying the timeout again.
+	healthMu  sync.Mutex
+	downUntil time.Time
 }
 
 // NewRerankClient creates a new rerank client.
@@ -96,6 +109,12 @@ func (c *RerankClient) Rerank(query string, documents []string, topN int) ([]Rer
 	queryMax, docMax := c.effectiveLimits()
 	query = truncateRunes(query, queryMax)
 
+	// Circuit breaker: a recent failure skips rerank entirely so a dead
+	// upstream never costs the full timeout on every search.
+	if c.isDown() {
+		return nil, fmt.Errorf("rerank temporarily disabled after a recent failure")
+	}
+
 	// Truncate documents
 	boundedDocs := make([]string, len(documents))
 	for i, doc := range documents {
@@ -115,8 +134,32 @@ func (c *RerankClient) Rerank(query string, documents []string, topN int) ([]Rer
 		// Fallback to backup endpoint
 		results, err = c.callWithRetry(c.backupURL, req)
 	}
+	if err != nil {
+		c.markDown()
+	} else {
+		c.markUp()
+	}
 
 	return results, err
+}
+
+// isDown reports whether the rerank circuit breaker is open.
+func (c *RerankClient) isDown() bool {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	return time.Now().Before(c.downUntil)
+}
+
+func (c *RerankClient) markDown() {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	c.downUntil = time.Now().Add(rerankDownTTL)
+}
+
+func (c *RerankClient) markUp() {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	c.downUntil = time.Time{}
 }
 
 // callWithRetry runs one rerank request with a single quick retry.
@@ -145,11 +188,16 @@ func (c *RerankClient) callWithRetry(baseURL string, req RerankRequest) ([]Reran
 
 // rerankRetryable reports whether a rerank error deserves another attempt.
 // Transport failures and 429/5xx are retryable; auth/validation fail fast.
+// A client timeout is NOT retryable: the upstream is absent or overloaded,
+// and a second full timeout would only double the stall (fail-open instead).
 func rerankRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
+	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "Client.Timeout exceeded") {
+		return false
+	}
 	for _, code := range []string{" 429", " 500", " 502", " 503", " 504", "request failed"} {
 		if strings.Contains(msg, code) {
 			return true
