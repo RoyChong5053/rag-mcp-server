@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
+	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/registry"
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
@@ -33,7 +34,7 @@ type Handler struct {
 	eng         *engine.Engine
 	auditPath   string
 	docsRoot    string
-	jobs        *Manager
+	jobs        *jobs.Manager
 	build       BuildInfo
 	sessions    *SessionManager
 	adminUser   string
@@ -50,10 +51,16 @@ type AdminAuth struct {
 }
 
 func New(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo) *Handler {
-	return NewWithAuth(eng, auditPath, docsRoot, info, AdminAuth{})
+	return NewWithJobs(eng, auditPath, docsRoot, info, AdminAuth{}, jobs.NewManager(eng, 2))
 }
 
 func NewWithAuth(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo, auth AdminAuth) *Handler {
+	return NewWithJobs(eng, auditPath, docsRoot, info, auth, jobs.NewManager(eng, 2))
+}
+
+// NewWithJobs builds the handler with a caller-supplied job registry so the
+// dashboard and the MCP tools share one background-task table.
+func NewWithJobs(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo, auth AdminAuth, jobsMgr *jobs.Manager) *Handler {
 	if info.StartedAt.IsZero() {
 		info.StartedAt = time.Now()
 	}
@@ -62,7 +69,7 @@ func NewWithAuth(eng *engine.Engine, auditPath, docsRoot string, info BuildInfo,
 		days = 30
 	}
 	return &Handler{
-		eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: NewManager(eng, 2), build: info,
+		eng: eng, auditPath: auditPath, docsRoot: docsRoot, jobs: jobsMgr, build: info,
 		sessions:  NewSessionManager(auth.SessionFile),
 		adminUser: strings.TrimSpace(auth.Username), adminPass: strings.TrimSpace(auth.PasswordSHA256),
 		sessionDays: days,

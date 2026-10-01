@@ -231,6 +231,11 @@ func (e *Engine) usesCPUCompute() bool {
 	return e.ActiveBackend() == BackendVectra || e.backendDown(BackendQdrant)
 }
 
+// CPUComputeMode reports the cached compute class (true = CPU fallback). It is
+// the cheap variant used by callers that surface timing estimates without
+// probing qdrant.
+func (e *Engine) CPUComputeMode() bool { return e.usesCPUCompute() }
+
 // cpuComputeMode is the accurate compute-mode check used once per index job; it
 // may probe qdrant so a just-powered-off host flips to CPU before the first big
 // embedding batch. An active vectra backend is CPU without probing.

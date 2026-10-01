@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
+	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 	"github.com/RoyChong5053/rag-mcp-server/webui"
@@ -182,8 +183,13 @@ func main() {
 	// Create MCP server
 	mcpServer := mcp.NewServer()
 
+	// Shared background-task registry: the dashboard and the MCP tools submit
+	// long work here so a tool call can return a pollable job instead of
+	// blocking past the client's request timeout.
+	jobsMgr := jobs.NewManager(eng, 2)
+
 	// Register all RAG tools
-	mcp.RegisterTools(mcpServer, eng)
+	mcp.RegisterTools(mcpServer, eng, jobsMgr)
 
 	// HTTP handler
 	http.HandleFunc("/mcp", mcpServer.HandleMCP)
@@ -211,7 +217,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Resolve docs dir: %v", err)
 		}
-		admin := webui.NewWithAuth(eng, auditPath, docsAbs, webui.BuildInfo{
+		admin := webui.NewWithJobs(eng, auditPath, docsAbs, webui.BuildInfo{
 			Version:   ver,
 			Commit:    com,
 			StartedAt: time.Now(),
@@ -220,7 +226,7 @@ func main() {
 			PasswordSHA256: cfg.Admin.PasswordSHA256,
 			SessionDays:    cfg.Admin.SessionDays,
 			SessionFile:    filepath.Join(cfgDir, "sessions.json"),
-		})
+		}, jobsMgr)
 		go func() {
 			log.Printf("Admin dashboard: http://%s (no TLS; docs=%s)", adminAddr, docsAbs)
 			if err := http.ListenAndServe(adminAddr, admin.Routes()); err != nil {

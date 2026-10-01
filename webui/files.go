@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
+	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
 
 // otherName reports the opposite backend for log lines (qdrant<->vectra).
@@ -255,7 +256,9 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.jobs.List())
+	// The dashboard table is index-oriented; generic MCP search/store jobs are
+	// polled via job_status and kept out of this list to avoid flooding it.
+	writeJSON(w, http.StatusOK, h.jobs.ListKind(jobs.KindIndex))
 }
 
 // handleClearJobs drops finished jobs from the sidebar; in-flight jobs stay.

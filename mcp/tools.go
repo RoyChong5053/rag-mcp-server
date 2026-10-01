@@ -4,12 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
+	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
 
-// RegisterTools registers all RAG MCP tools with the server
-func RegisterTools(server *Server, eng *engine.Engine) {
+// syncWait is how long a tool call blocks for a result before handing the
+// caller a pollable job. On the GPU path most calls finish well inside this;
+// on the CPU fallback the caller gets a job_id and an estimate instead of
+// hanging past the MCP client's request timeout.
+const syncWait = 10 * time.Second
+
+// RegisterTools registers all RAG MCP tools with the server. jobsMgr is the
+// shared background-task registry (same instance the dashboard uses), so a
+// long operation has one identity no matter which surface started it.
+func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
@@ -65,12 +75,13 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		filter := getFilterArg(args)
 
-		results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
-		if err != nil {
-			return nil, err
-		}
-
-		return formatSearchResults(results), nil
+		return boundedRun(jobsMgr, jobs.KindSearch, estimateSearchSeconds(eng), syncWait, func() (any, error) {
+			results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
+			if err != nil {
+				return nil, err
+			}
+			return formatSearchResults(results), nil
+		})
 	})
 
 	server.RegisterTool(Tool{
@@ -102,12 +113,13 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		collectionID, _ := args["collection_id"].(string)
 		metadata := getStringMapArg(args, "metadata")
 
-		result, err := eng.StoreMemory(text, collectionID, metadata)
-		if err != nil {
-			return nil, err
-		}
-
-		return fmt.Sprintf("Stored %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
+		return boundedRun(jobsMgr, jobs.KindStore, estimateStoreSeconds(eng, len(text)), syncWait, func() (any, error) {
+			result, err := eng.StoreMemory(text, collectionID, metadata)
+			if err != nil {
+				return nil, err
+			}
+			return fmt.Sprintf("Stored %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
+		})
 	})
 
 	server.RegisterTool(Tool{
@@ -281,6 +293,150 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		return fmt.Sprintf("Deleted collection '%s'", collectionID), nil
 	})
+
+	server.RegisterTool(Tool{
+		Name: "job_status",
+		Description: "Check a background job returned by an earlier search_memory/store_memory call that exceeded the " +
+			"synchronous window. Returns running progress, the final result once done, or the error. Poll with the " +
+			"job_id after the estimate_seconds you were given; do not resubmit the original call.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"job_id": map[string]any{
+					"type":        "string",
+					"description": "Job id returned by search_memory/store_memory (e.g. job-7)",
+				},
+			},
+			"required": []string{"job_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		id, _ := args["job_id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("job_id is required")
+		}
+		j := jobsMgr.Get(id)
+		if j == nil {
+			return nil, fmt.Errorf("unknown job %q (it may have been trimmed after completion)", id)
+		}
+		switch j.State {
+		case jobs.StateDone:
+			if j.Result != nil {
+				return j.Result, nil
+			}
+			return fmt.Sprintf("Job %s done: indexed %d chunks into collection '%s'", j.ID, j.Chunks, j.Collection), nil
+		case jobs.StateError:
+			return nil, fmt.Errorf("job %s failed: %s", j.ID, j.Error)
+		default:
+			return formatJobPending(j), nil
+		}
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "job_list",
+		Description: "List recent background jobs (index jobs plus async search/store calls) with their state and progress.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	}, func(args map[string]any) (any, error) {
+		all := jobsMgr.List()
+		if len(all) == 0 {
+			return "No background jobs.", nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d job(s):\n", len(all))
+		for _, j := range all {
+			switch j.Kind {
+			case jobs.KindIndex:
+				fmt.Fprintf(&b, "- %s [%s] %s/%s %s (%d/%d chunks)%s\n", j.ID, j.Kind, j.Collection, j.Backend, j.State, j.DoneChunks, j.TotalChunks, errSuffix(j))
+			default:
+				fmt.Fprintf(&b, "- %s [%s] %s%s\n", j.ID, j.Kind, j.State, errSuffix(j))
+			}
+		}
+		return b.String(), nil
+	})
+}
+
+// boundedRun submits fn to the shared registry and waits up to wait. On
+// success it returns the result. If the work is still running it returns a
+// structured pending payload the caller can poll. A failure is returned as-is.
+func boundedRun(mgr *jobs.Manager, kind string, estimate int, wait time.Duration, fn func() (any, error)) (any, error) {
+	job := mgr.Submit(kind, fn)
+	done, finished := mgr.Await(job.ID, wait)
+	if !finished {
+		return formatJobPendingWithEstimate(done, estimate), nil
+	}
+	if done == nil {
+		return nil, fmt.Errorf("job %s disappeared", job.ID)
+	}
+	if done.State == jobs.StateError {
+		return nil, fmt.Errorf("%s", done.Error)
+	}
+	return done.Result, nil
+}
+
+// formatJobPending renders a pollable job handle. The estimate is a coarse
+// prediction of the remaining wall time, refined over time.
+func formatJobPendingWithEstimate(j *jobs.Job, estimate int) string {
+	payload := map[string]any{
+		"status":           "pending",
+		"job_id":           j.ID,
+		"kind":             j.Kind,
+		"state":            j.State,
+		"stage":            j.Stage,
+		"estimate_seconds": estimate,
+		"hint": fmt.Sprintf("Still running in the background. Call job_status with job_id=%q after about %d seconds (or do other work first). Do not resubmit — the work is already in progress.", j.ID, estimate),
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	return string(b)
+}
+
+func formatJobPending(j *jobs.Job) string {
+	payload := map[string]any{
+		"status": "pending",
+		"job_id": j.ID,
+		"kind":   j.Kind,
+		"state":  j.State,
+		"stage":  j.Stage,
+	}
+	if j.Kind == jobs.KindIndex {
+		payload["done_chunks"] = j.DoneChunks
+		payload["total_chunks"] = j.TotalChunks
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	return string(b)
+}
+
+func errSuffix(j *jobs.Job) string {
+	if j.Error != "" {
+		return ": " + j.Error
+	}
+	return ""
+}
+
+// estimateSearchSeconds is a coarse prediction of how long a search will take
+// on the current compute path. Only used to tell the caller when to poll.
+func estimateSearchSeconds(eng *engine.Engine) int {
+	if eng.CPUComputeMode() {
+		return 30
+	}
+	return 3
+}
+
+// estimateStoreSeconds is a coarse prediction for a store_memory call based on
+// the text size and compute path.
+func estimateStoreSeconds(eng *engine.Engine, textLen int) int {
+	chunks := textLen/350 + 1 // effective chunk ~= size*(1-overlap) = 350
+	if eng.CPUComputeMode() {
+		if chunks <= 4 {
+			return 15
+		}
+		return 15 + chunks*3
+	}
+	if chunks <= 32 {
+		return 5
+	}
+	return 5 + chunks/4
 }
 
 // Helper functions
