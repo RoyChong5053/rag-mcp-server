@@ -221,8 +221,9 @@ func (m *Manager) runIndex(job *Job, absPath, collection, backend string, opts *
 	})
 }
 
-// Await blocks until the job reaches done/error or d elapses. The bool reports
-// whether the job is terminal. A missing job counts as terminal.
+// Await blocks until the job reaches done/error or d elapses. d<0 waits
+// indefinitely, d==0 returns immediately. The bool reports whether the job is
+// terminal. A missing job counts as terminal.
 func (m *Manager) Await(id string, d time.Duration) (*Job, bool) {
 	m.mu.Lock()
 	j, ok := m.jobs[id]
@@ -234,8 +235,18 @@ func (m *Manager) Await(id string, d time.Duration) (*Job, bool) {
 	if !ok {
 		return nil, true
 	}
-	if d <= 0 {
-		d = 10 * time.Second
+	// Fast path: already finished (avoids the d==0 select race).
+	select {
+	case <-ch:
+		return m.Get(id), true
+	default:
+	}
+	if d == 0 {
+		return m.Get(id), false
+	}
+	if d < 0 {
+		<-ch
+		return m.Get(id), true
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()

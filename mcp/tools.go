@@ -28,7 +28,8 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
-			"or a raw Qdrant filter for advanced clauses.",
+			"or a raw Qdrant filter for advanced clauses. " +
+			"If the search does not finish within wait_seconds (default 10s) it returns {status:pending, job_id}: poll it with job_status. Pass a larger wait_seconds to block instead (synchronous callers like TavernLab) or 0 to always get a job.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -57,6 +58,10 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 					"type":        "object",
 					"description": "Optional: raw Qdrant filter (advanced). Takes precedence over metadata. Vectra supports match.value clauses only.",
 				},
+				"wait_seconds": map[string]any{
+					"type":        "number",
+					"description": "Optional: how long to block for a result before returning a pollable job. Omit for the server default (10s). 0 returns a job immediately; a large value keeps a synchronous caller (e.g. TavernLab) waiting instead of taking the job path; negative waits until done (bounded by the client timeout).",
+				},
 			},
 			"required": []string{"query"},
 		},
@@ -75,7 +80,7 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		}
 		filter := getFilterArg(args)
 
-		return boundedRun(jobsMgr, jobs.KindSearch, estimateSearchSeconds(eng), syncWait, func() (any, error) {
+		return boundedRun(jobsMgr, jobs.KindSearch, estimateSearchSeconds(eng), getWaitDuration(args), func() (any, error) {
 			results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
 			if err != nil {
 				return nil, err
@@ -89,7 +94,8 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
 			"Omit collection_id to write to the configured default collection, with automatic vectra failover (configured vectra default, then the same-name collection) when qdrant is unreachable. " +
 			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
-			"so it can be browsed in the data bank and re-indexed.",
+			"so it can be browsed in the data bank and re-indexed. " +
+			"If the write does not finish within wait_seconds (default 10s) it returns {status:pending, job_id}: poll it with job_status. Pass a larger wait_seconds to block until done.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -105,6 +111,10 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 					"type":        "object",
 					"description": "Optional metadata to attach to the chunks",
 				},
+				"wait_seconds": map[string]any{
+					"type":        "number",
+					"description": "Optional: how long to block for the write to finish before returning a pollable job. Omit for the server default (10s). 0 returns a job immediately; a large value keeps a synchronous caller waiting instead of taking the job path; negative waits until done (bounded by the client timeout).",
+				},
 			},
 			"required": []string{"text"},
 		},
@@ -113,7 +123,7 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		collectionID, _ := args["collection_id"].(string)
 		metadata := getStringMapArg(args, "metadata")
 
-		return boundedRun(jobsMgr, jobs.KindStore, estimateStoreSeconds(eng, len(text)), syncWait, func() (any, error) {
+		return boundedRun(jobsMgr, jobs.KindStore, estimateStoreSeconds(eng, len(text)), getWaitDuration(args), func() (any, error) {
 			result, err := eng.StoreMemory(text, collectionID, metadata)
 			if err != nil {
 				return nil, err
@@ -412,6 +422,28 @@ func errSuffix(j *jobs.Job) string {
 		return ": " + j.Error
 	}
 	return ""
+}
+
+// getWaitDuration reads the optional wait_seconds argument. Omitted uses the
+// default synchronous window; 0 returns a job immediately; a negative value
+// waits until the work finishes (bounded only by the client's own timeout).
+// Values are clamped to one hour so a typo cannot pin a worker forever.
+func getWaitDuration(args map[string]any) time.Duration {
+	v, ok := args["wait_seconds"]
+	if !ok {
+		return syncWait
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return syncWait
+	}
+	if f < 0 {
+		return -1 // wait indefinitely
+	}
+	if f > 3600 {
+		f = 3600
+	}
+	return time.Duration(f * float64(time.Second))
 }
 
 // estimateSearchSeconds is a coarse prediction of how long a search will take

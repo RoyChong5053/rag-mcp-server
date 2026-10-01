@@ -52,6 +52,24 @@ func TestBoundedRunReturnsPendingPayload(t *testing.T) {
 	t.Fatal("job never reached done")
 }
 
+func TestGetWaitDuration(t *testing.T) {
+	if got := getWaitDuration(map[string]any{}); got != syncWait {
+		t.Fatalf("default = %v, want %v", got, syncWait)
+	}
+	if got := getWaitDuration(map[string]any{"wait_seconds": float64(0)}); got != 0 {
+		t.Fatalf("zero = %v, want immediate", got)
+	}
+	if got := getWaitDuration(map[string]any{"wait_seconds": float64(30)}); got != 30*time.Second {
+		t.Fatalf("30 = %v", got)
+	}
+	if got := getWaitDuration(map[string]any{"wait_seconds": float64(-1)}); got != -1 {
+		t.Fatalf("negative = %v, want indefinite", got)
+	}
+	if got := getWaitDuration(map[string]any{"wait_seconds": float64(999999)}); got != time.Hour {
+		t.Fatalf("clamp = %v, want 1h", got)
+	}
+}
+
 func TestEstimatesArePositiveAndModeAware(t *testing.T) {
 	// nil engine is not usable here; just assert the pure helpers' shape via a
 	// fake through estimateStoreSeconds is covered elsewhere. Search estimate
