@@ -40,11 +40,9 @@ type Settings struct {
 	// DocMaxChars caps each document handed to the reranker (runes).
 	// 0 = unlimited.
 	DocMaxChars int `json:"doc_max_chars"`
-	// EmbedBatchSize caps texts per embedding POST from index jobs.
-	// 32 is the GPU fast path (RTX4060); 8 or lower is the CPU slow path
-	// (LOQ down or VRAM full: 5 weak nodes). 0/negative = 32 default.
-	// WebUI-editable so scenario-4 (qdrant online but GPU busy) needs no
-	// restart and no fake qdrant outage to trigger slow logic.
+	// EmbedBatchSize caps texts per embedding POST from index jobs when the
+	// GPU path is active. 0 = auto (GPU 32, CPU fallback capped to 4). A
+	// positive value overrides the GPU size; the CPU fallback still caps it.
 	EmbedBatchSize int `json:"embed_batch_size"`
 }
 

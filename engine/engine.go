@@ -143,6 +143,14 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 		s := st.Get()
 		return s.QueryMaxChars, s.DocMaxChars
 	})
+	// Embedding concurrency follows the compute mode: parallel on the GPU path,
+	// serial on the CPU fallback so parallel searches/jobs cannot stampede it.
+	embedding.SetConcurrencyProvider(func() int {
+		if e.usesCPUCompute() {
+			return embeddingConcurrencyCPU
+		}
+		return embeddingConcurrencyGPU
+	})
 	return e, nil
 }
 
@@ -206,6 +214,50 @@ func (e *Engine) ActiveBackend() string {
 // short enough that recovery is noticed promptly (the next request after
 // expiry re-probes with the fast dial budget).
 const backendDownTTL = 60 * time.Second
+
+// Embedding compute-mode constants. Qdrant is co-located with the RTX4060, so
+// a reachable qdrant means the GPU path is available; the vectra/CPU fallback
+// is capped so a 32-text batch never stampedes the weak CPU nodes.
+const (
+	embeddingConcurrencyGPU = 4
+	embeddingConcurrencyCPU = 1
+	embedBatchSizeGPU       = 32
+	embedBatchSizeCPU       = 4
+)
+
+// usesCPUCompute is the cheap (cached, no probe) compute-mode check used by the
+// embedding limiter on every request.
+func (e *Engine) usesCPUCompute() bool {
+	return e.ActiveBackend() == BackendVectra || e.backendDown(BackendQdrant)
+}
+
+// cpuComputeMode is the accurate compute-mode check used once per index job; it
+// may probe qdrant so a just-powered-off host flips to CPU before the first big
+// embedding batch. An active vectra backend is CPU without probing.
+func (e *Engine) cpuComputeMode() bool {
+	if e.ActiveBackend() == BackendVectra {
+		return true
+	}
+	if e.backendDown(BackendQdrant) {
+		return true
+	}
+	return e.backendUnreachable(BackendQdrant)
+}
+
+// effectiveEmbedBatchSize resolves the index-time embedding batch size from the
+// compute mode: the GPU path uses settings.embed_batch_size (0 => 32), while
+// the CPU fallback is capped to embedBatchSizeCPU. This removes the manual bs
+// flip when the LOQ powers off.
+func (e *Engine) effectiveEmbedBatchSize(cpuMode bool) int {
+	bs := e.settings.Get().EmbedBatchSize
+	if bs <= 0 {
+		bs = embedBatchSizeGPU
+	}
+	if cpuMode && bs > embedBatchSizeCPU {
+		return embedBatchSizeCPU
+	}
+	return bs
+}
 
 // errBackendDown is the synthetic error used when a request skips a backend
 // whose down-cache is warm, so the normal IsUnavailable failover runs without
@@ -1300,12 +1352,12 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		return &IndexResult{ChunksIndexed: 0, Collection: collectionID}, used, nil
 	}
 
-	// Embed all chunks. Batch cap comes from settings.embed_batch_size:
-	// 32 GPU-fast vs 8 CPU-slow (LOQ down / VRAM full). 0 = default 32.
-	bs := e.settings.Get().EmbedBatchSize
-	if bs > 0 {
-		log.Printf("Index '%s': embedding %d chunks (batch_size=%d)", collectionID, len(chunks), bs)
-	}
+	// Embed all chunks. Batch cap follows the compute mode: GPU uses the
+	// configured embed_batch_size (0 => 32), the CPU fallback is capped at
+	// embedBatchSizeCPU (4) so a 32-text batch never crashes the weak nodes.
+	cpuMode := e.cpuComputeMode()
+	bs := e.effectiveEmbedBatchSize(cpuMode)
+	log.Printf("Index '%s': embedding %d chunks (batch_size=%d, cpu_mode=%v)", collectionID, len(chunks), bs, cpuMode)
 	embeddings, err := e.embedding.CreateEmbeddingsBatched(chunks, bs)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to embed chunks: %w", err)

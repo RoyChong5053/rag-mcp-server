@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,87 @@ type EmbeddingClient struct {
 	model      string
 	apiKey     string
 	httpClient *http.Client
+
+	// limiter caps concurrent embedding POSTs so parallel searches / index
+	// jobs cannot stampede a CPU-only fan-out. Its capacity follows the
+	// compute mode through concurrency (GPU vs CPU fallback).
+	limiter     *dynLimiter
+	concurrency func() int
+}
+
+// defaultEmbedConcurrency bounds concurrent embedding POSTs when no compute
+// mode is wired (standalone callers/tests). The engine overrides it.
+const defaultEmbedConcurrency = 8
+
+// dynLimiter is a counting semaphore whose capacity may change at runtime:
+// GPU mode allows a few parallel embeds, the CPU fallback serializes.
+type dynLimiter struct {
+	mu    sync.Mutex
+	cond  *sync.Cond
+	limit int
+	inUse int
+}
+
+func newDynLimiter(limit int) *dynLimiter {
+	if limit < 1 {
+		limit = 1
+	}
+	l := &dynLimiter{limit: limit}
+	l.cond = sync.NewCond(&l.mu)
+	return l
+}
+
+func (l *dynLimiter) setLimit(n int) {
+	if n < 1 {
+		n = 1
+	}
+	l.mu.Lock()
+	if l.limit != n {
+		l.limit = n
+		l.cond.Broadcast()
+	}
+	l.mu.Unlock()
+}
+
+func (l *dynLimiter) acquire() {
+	l.mu.Lock()
+	for l.inUse >= l.limit {
+		l.cond.Wait()
+	}
+	l.inUse++
+	l.mu.Unlock()
+}
+
+func (l *dynLimiter) release() {
+	l.mu.Lock()
+	if l.inUse > 0 {
+		l.inUse--
+	}
+	l.cond.Signal()
+	l.mu.Unlock()
+}
+
+// SetConcurrencyProvider wires a callback returning the current concurrent
+// embedding-request cap. It is consulted on every acquire so the cap tracks
+// the compute mode (GPU vs CPU fallback) without a restart.
+func (c *EmbeddingClient) SetConcurrencyProvider(f func() int) {
+	c.concurrency = f
+}
+
+func (c *EmbeddingClient) acquire() {
+	if c.limiter == nil {
+		return
+	}
+	if c.concurrency != nil {
+		c.limiter.setLimit(c.concurrency())
+	}
+	c.limiter.acquire()
+}
+
+func (c *EmbeddingClient) release() {
+	if c.limiter != nil {
+		c.limiter.release()
+	}
 }
 
 // NewEmbeddingClient creates a new embedding client.
@@ -38,6 +120,7 @@ func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClie
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
+		limiter: newDynLimiter(defaultEmbedConcurrency),
 	}
 }
 
@@ -185,6 +268,10 @@ func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([
 }
 
 func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([][]float32, error) {
+	// One slot per HTTP attempt, so retries cannot stack on a saturated
+	// CPU-only fan-out either. Ping bypasses this (it uses callEndpointWithClient).
+	c.acquire()
+	defer c.release()
 	return c.callEndpointWithClient(c.httpClient, baseURL, req)
 }
 
