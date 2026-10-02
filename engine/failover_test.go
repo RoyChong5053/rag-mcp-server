@@ -94,6 +94,7 @@ func newTestEngine(t *testing.T, st settings.Settings, qdrant, vectra VectorStor
 		settings:       settings.New("", st),
 		registry:       reg,
 		downUntil:      map[string]time.Time{},
+		config:         &EngineConfig{EmbedModel: "embedding", EmbedProvider: "one-api", VectorDim: 1024, VectorDistance: "Cosine"},
 	}
 }
 

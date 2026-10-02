@@ -41,6 +41,9 @@ oneapi:
   # Fill in on the server after deploy; never commit real keys.
   # See config.local.yaml (gitignored) pattern.
   api_key: "REDACTED"
+  provider_name: "one-api"
+  vector_dim: 1024
+  vector_distance: "Cosine"
 
 chunking:
   chunk_size: 500

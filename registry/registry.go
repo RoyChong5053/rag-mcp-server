@@ -30,6 +30,9 @@ type Entry struct {
 	SourceFile   string      `json:"source_file"`
 	SourceSHA256 string      `json:"source_sha256"`
 	EmbedModel   string      `json:"embed_model"`
+	EmbedProvider string     `json:"embed_provider,omitempty"`
+	VectorDim    int         `json:"vector_dim,omitempty"`
+	VectorDistance string    `json:"vector_distance,omitempty"`
 	CreatedAt    string      `json:"created_at"`
 	UpdatedAt    string      `json:"updated_at"`
 	ChunkCount   int         `json:"chunk_count"`

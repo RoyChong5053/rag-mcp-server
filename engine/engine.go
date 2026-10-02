@@ -48,6 +48,9 @@ type EngineConfig struct {
 	OneAPIBaseURL   string
 	OneAPIBackupURL string
 	EmbedModel      string
+	EmbedProvider   string
+	VectorDim       int
+	VectorDistance  string
 	RerankModel     string
 	APIKey          string
 	ChunkSize       int
@@ -86,11 +89,24 @@ type CollectionInfo struct {
 // A corrupt registry file is a loud error; a missing one starts empty.
 // A nil settings store falls back to one seeded from the engine config.
 func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
+	if config.EmbedProvider == "" {
+		config.EmbedProvider = "one-api"
+	}
+	if config.VectorDim == 0 {
+		config.VectorDim = 1024
+	}
+	if config.VectorDistance == "" {
+		config.VectorDistance = "Cosine"
+	}
 	embedding := NewEmbeddingClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.EmbedModel, config.APIKey)
 	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxChars, config.DocMaxChars)
 
+	qdrant := NewQdrantClient(config.QdrantHost, config.QdrantPort)
+	qdrant.vectorDim = config.VectorDim
+	qdrant.vectorDistance = config.VectorDistance
+
 	stores := map[string]VectorStore{
-		BackendQdrant: NewQdrantClient(config.QdrantHost, config.QdrantPort),
+		BackendQdrant: qdrant,
 	}
 	vectraDir := config.VectraDir
 	if vectraDir == "" {
@@ -1041,6 +1057,9 @@ type Provenance struct {
 	ChunkSize    int
 	ChunkOverlap int
 	EmbedModel   string
+	EmbedProvider string
+	VectorDim    int
+	VectorDistance string
 	Chunks       int
 }
 
@@ -1087,6 +1106,9 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 		SourceFile:   path,
 		SourceSHA256: hex.EncodeToString(sum[:]),
 		EmbedModel:   e.config.EmbedModel,
+		EmbedProvider: e.config.EmbedProvider,
+		VectorDim:   e.config.VectorDim,
+		VectorDistance: e.config.VectorDistance,
 	}
 
 	res, used, err := e.indexTextInternalOn(backend, text, collectionID, metadata, fileName, path, opts, prog)
@@ -1165,6 +1187,9 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 		ChunkSize:    used.Size,
 		ChunkOverlap: used.Overlap,
 		EmbedModel:   e.config.EmbedModel,
+		EmbedProvider: e.config.EmbedProvider,
+		VectorDim:   e.config.VectorDim,
+		VectorDistance: e.config.VectorDistance,
 		Chunks:       res.ChunksIndexed,
 	}, e.backendOf(collectionID))
 	return res, nil
@@ -1337,6 +1362,15 @@ func (e *Engine) recordIndex(collectionID string, prov Provenance, backend strin
 		if prov.EmbedModel != "" {
 			en.EmbedModel = prov.EmbedModel
 		}
+		if prov.EmbedProvider != "" {
+			en.EmbedProvider = prov.EmbedProvider
+		}
+		if prov.VectorDim > 0 {
+			en.VectorDim = prov.VectorDim
+		}
+		if prov.VectorDistance != "" {
+			en.VectorDistance = prov.VectorDistance
+		}
 		if backend != "" {
 			en.Backend = backend
 		}
@@ -1353,6 +1387,35 @@ func (e *Engine) recordIndex(collectionID string, prov Provenance, backend strin
 // indexed before payload enrichment existed.
 func (e *Engine) BackfillPayload(collectionID string, payload map[string]any) error {
 	return e.storeFor(collectionID).SetPayload(collectionID, payload, nil)
+}
+
+// checkProvenanceConflict rejects an append whose current embedding setup
+// would mix incompatible vectors into a collection that already has one.
+// A nil registry entry (unregistered collection) or empty recorded fields
+// (legacy entry) is treated as "unknown" and allowed through — recordIndex
+// will stamp the current provenance, never silently overwrite a conflict.
+func (e *Engine) checkProvenanceConflict(collectionID string) error {
+	en := e.registry.Get(collectionID)
+	if en == nil {
+		return nil
+	}
+	mismatch := []string{}
+	if en.EmbedModel != "" && en.EmbedModel != e.config.EmbedModel {
+		mismatch = append(mismatch, fmt.Sprintf("embed_model: %q vs current %q", en.EmbedModel, e.config.EmbedModel))
+	}
+	if en.EmbedProvider != "" && en.EmbedProvider != e.config.EmbedProvider {
+		mismatch = append(mismatch, fmt.Sprintf("embed_provider: %q vs current %q", en.EmbedProvider, e.config.EmbedProvider))
+	}
+	if en.VectorDim > 0 && en.VectorDim != e.config.VectorDim {
+		mismatch = append(mismatch, fmt.Sprintf("vector_dim: %d vs current %d", en.VectorDim, e.config.VectorDim))
+	}
+	if en.VectorDistance != "" && !strings.EqualFold(en.VectorDistance, e.config.VectorDistance) {
+		mismatch = append(mismatch, fmt.Sprintf("vector_distance: %q vs current %q", en.VectorDistance, e.config.VectorDistance))
+	}
+	if len(mismatch) == 0 {
+		return nil
+	}
+	return fmt.Errorf("collection '%s' provenance conflict (%s): refusing to mix vectors — rebuild the collection or use a new collection name", collectionID, strings.Join(mismatch, "; "))
 }
 
 // indexTextInternal routes to the collection's registry/default backend.
@@ -1421,11 +1484,19 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		}
 	}
 
-	// Ensure collection exists
+	// Ensure collection exists. Before appending to an existing collection,
+	// refuse to mix provenance: if the recorded model/provider/vector space
+	// differs from the current engine config, vectors would be incomparable.
+	// Rebuilding drops the collection first, so it bypasses this gate.
 	store := e.storeForBackend(backend)
 	exists, err := store.CollectionExists(collectionID)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to check collection: %w", err)
+	}
+	if exists {
+		if err := e.checkProvenanceConflict(collectionID); err != nil {
+			return nil, used, err
+		}
 	}
 	if !exists {
 		if err := store.CreateCollection(collectionID); err != nil {
@@ -1496,6 +1567,9 @@ type CollectionDetail struct {
 	SourceFile   string   `json:"source_file,omitempty"`
 	SourceSHA256 string   `json:"source_sha256,omitempty"`
 	EmbedModel   string   `json:"embed_model,omitempty"`
+	EmbedProvider string  `json:"embed_provider,omitempty"`
+	VectorDim    int      `json:"vector_dim,omitempty"`
+	VectorDistance string `json:"vector_distance,omitempty"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	UpdatedAt    string   `json:"updated_at,omitempty"`
 	ChunkSize    int      `json:"chunk_size,omitempty"`
@@ -1538,6 +1612,9 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		d.SourceFile = en.SourceFile
 		d.SourceSHA256 = en.SourceSHA256
 		d.EmbedModel = en.EmbedModel
+		d.EmbedProvider = en.EmbedProvider
+		d.VectorDim = en.VectorDim
+		d.VectorDistance = en.VectorDistance
 		d.CreatedAt = en.CreatedAt
 		d.UpdatedAt = en.UpdatedAt
 		d.ChunkSize = en.Chunk.Size

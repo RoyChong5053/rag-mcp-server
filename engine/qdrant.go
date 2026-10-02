@@ -17,6 +17,10 @@ type QdrantClient struct {
 	// probeClient is used only by Ping/health checks: it fails fast (~1.5s)
 	// so a dead qdrant never stalls the dashboard for the full data timeout.
 	probeClient *http.Client
+	// Vector space for newly created collections. Defaults preserve the
+	// historical Qwen3-Embedding-0.6B shape (1024/Cosine).
+	vectorDim      int
+	vectorDistance string
 }
 
 // NewQdrantClient creates a new Qdrant client
@@ -63,10 +67,18 @@ func NewQdrantClient(host string, port int) *QdrantClient {
 
 // CreateCollection creates a new Qdrant collection with cosine similarity
 func (c *QdrantClient) CreateCollection(name string) error {
+	size := c.vectorDim
+	if size == 0 {
+		size = 1024
+	}
+	dist := c.vectorDistance
+	if dist == "" {
+		dist = "Cosine"
+	}
 	body := map[string]any{
 		"vectors": map[string]any{
-			"size":     1024, // Qwen3-Embedding-0.6B dimension
-			"distance": "Cosine",
+			"size":     size,
+			"distance": dist,
 		},
 	}
 	return c.put(fmt.Sprintf("/collections/%s", name), body)

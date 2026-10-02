@@ -47,6 +47,9 @@ oneapi:
   embed_model: "embedding"
   rerank_model: "reranker"
   api_key: ""
+  provider_name: "one-api"
+  vector_dim: 1024
+  vector_distance: "Cosine"
 
 chunking:
   chunk_size: 500

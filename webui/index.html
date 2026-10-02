@@ -486,7 +486,7 @@ async function refreshCollections() {
       ? '<span class="badge b-orphan">orphan</span>'
       : (c.enabled ? '<span class="badge b-on">enabled</span>' : '<span class="badge b-off">disabled</span>');
     const prov = c.exists
-      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + ' · ' + esc(c.embed_model || '?') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
+      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + ' · ' + esc(c.embed_model || '?') + (c.embed_provider ? ' @' + esc(c.embed_provider) : '') + (c.vector_dim ? ' ' + c.vector_dim + 'd' : '') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
       : '<span class="dim">no vectors</span>';
     tr.innerHTML =
       '<td data-label="ID"><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
@@ -525,7 +525,7 @@ async function select(name) {
   document.getElementById('d-flags').innerHTML =
     (c.exists ? '<b>' + c.chunk_count + '</b> chunks' : '<b>ORPHAN</b> (no vectors)') +
     ' | chunk <b>' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + '</b>' +
-    ' | model <b>' + esc(c.embed_model || '?') + '</b>' +
+    ' | model <b>' + esc(c.embed_model || '?') + '</b>' + (c.embed_provider ? ' @' + esc(c.embed_provider) : '') + (c.vector_dim ? ' ' + c.vector_dim + 'd' : '') +
     ' | sha <b>' + esc((c.source_sha256 || '?').slice(0, 16)) + '</b>' +
     ' | created ' + esc(c.created_at || '?');
   document.getElementById('f-display').value = c.display_name || '';

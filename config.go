@@ -77,6 +77,14 @@ type OneAPIConfig struct {
 	EmbedModel  string `yaml:"embed_model"`
 	RerankModel string `yaml:"rerank_model"`
 	APIKey      string `yaml:"api_key"`
+	// ProviderName labels the embedding provider recorded in collection
+	// provenance (e.g. "one-api", "openrouter"). Default "one-api".
+	ProviderName string `yaml:"provider_name"`
+	// VectorDim/VectorDistance define the vector space new collections are
+	// created with. Recorded in registry provenance so a later provider/model
+	// switch is caught by the consistency gate instead of silently mixing.
+	VectorDim      int    `yaml:"vector_dim"`
+	VectorDistance string `yaml:"vector_distance"`
 }
 
 type ChunkingConfig struct {
@@ -122,10 +130,13 @@ func DefaultConfig() *Config {
 			Port: 6333,
 		},
 		OneAPI: OneAPIConfig{
-			BaseURL:     "http://192.168.100.20:3000",
-			BackupURL:   "http://192.168.10.2:3000",
-			EmbedModel:  "embedding",
-			RerankModel: "reranker",
+			BaseURL:        "http://192.168.100.20:3000",
+			BackupURL:      "http://192.168.10.2:3000",
+			EmbedModel:     "embedding",
+			RerankModel:    "reranker",
+			ProviderName:   "one-api",
+			VectorDim:      1024,
+			VectorDistance: "Cosine",
 		},
 		Chunking: ChunkingConfig{
 			ChunkSize:      500,
