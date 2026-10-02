@@ -49,7 +49,7 @@ func TestCachedDownBackendSearchSkipsProbe(t *testing.T) {
 	e.downUntil[BackendQdrant] = time.Now().Add(time.Minute)
 	e.healthMu.Unlock()
 
-	res, err := e.SearchDefault("q", "global_memory", 5, nil, nil)
+	res, err := e.SearchDefault("q", "global_memory", 5, nil, nil, 3*time.Second)
 	if err != nil {
 		t.Fatalf("SearchDefault: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBothBackendsDownSearchSkipsProbe(t *testing.T) {
 	e.downUntil[BackendVectra] = time.Now().Add(time.Minute)
 	e.healthMu.Unlock()
 
-	if _, err := e.SearchDefault("q", "global_memory", 5, nil, nil); err == nil {
+	if _, err := e.SearchDefault("q", "global_memory", 5, nil, nil, 3*time.Second); err == nil {
 		t.Fatal("expected error when both backends are down")
 	}
 }

@@ -81,7 +81,7 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		filter := getFilterArg(args)
 
 		return boundedRun(jobsMgr, jobs.KindSearch, estimateSearchSeconds(eng), getWaitDuration(args), func() (any, error) {
-			results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
+			results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter, resolveSearchWait(args, eng.RerankRecallWait()))
 			if err != nil {
 				return nil, err
 			}
@@ -395,7 +395,7 @@ func formatJobPendingWithEstimate(j *jobs.Job, estimate int) string {
 		"state":            j.State,
 		"stage":            j.Stage,
 		"estimate_seconds": estimate,
-		"hint": fmt.Sprintf("Still running in the background. Call job_status with job_id=%q after about %d seconds (or do other work first). Do not resubmit — the work is already in progress.", j.ID, estimate),
+		"hint":             fmt.Sprintf("Still running in the background. Call job_status with job_id=%q after about %d seconds (or do other work first). Do not resubmit — the work is already in progress.", j.ID, estimate),
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	return string(b)
@@ -422,6 +422,27 @@ func errSuffix(j *jobs.Job) string {
 		return ": " + j.Error
 	}
 	return ""
+}
+
+// resolveSearchWait picks the embed+reranker deadline for a search. Unlike the
+// job-await budget (getWaitDuration, which defaults to the sync window), this
+// honours the persistent WebUI '死等' setting when a caller omits wait_seconds,
+// so both knobs are usable from MCP tool calls. A non-positive per-call value
+// means "wait indefinitely" for the await path but maps to 0 here so the inner
+// pipeline relies on its own client timeout instead of an inverted ctx deadline.
+func resolveSearchWait(args map[string]any, fallbackSeconds int) time.Duration {
+	v, ok := args["wait_seconds"]
+	if !ok {
+		return time.Duration(fallbackSeconds) * time.Second
+	}
+	f, ok := v.(float64)
+	if !ok || f <= 0 {
+		return time.Duration(fallbackSeconds) * time.Second
+	}
+	if f > 3600 {
+		f = 3600
+	}
+	return time.Duration(f * float64(time.Second))
 }
 
 // getWaitDuration reads the optional wait_seconds argument. Omitted uses the

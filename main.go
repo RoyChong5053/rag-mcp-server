@@ -138,6 +138,13 @@ func main() {
 		FailoverEnabled:  true,
 	})
 
+	// Seed the WebUI '死等' override from config.yaml when set; nil keeps the
+	// engine defaultSearchWaitSeconds fallback and lets operators override it
+	// live via the dashboard (settings.Update appends without clobbering edits).
+	if cfg.Rerank.WaitSeconds > 0 {
+		settingsStore.Update(settings.Patch{RerankRecallWaitSeconds: &cfg.Rerank.WaitSeconds})
+	}
+
 	// Resolve the file-backed store dir (and optional memory dir) against the
 	// config file's directory, so a relative "Vectra" lands in the project
 	// folder even when the process CWD differs (e.g. setsid from $HOME).

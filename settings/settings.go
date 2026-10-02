@@ -33,6 +33,11 @@ type Settings struct {
 	RerankEnabled bool `json:"rerank_enabled"`
 	// RerankRecall is the vector over-fetch count fed to the reranker.
 	RerankRecall int `json:"rerank_recall"`
+	// RerankRecallWaitSeconds overrides the rerank-recall wait budget (embed+reranker
+	// deadline) in seconds. It backs the WebUI '死等' knob and is the persistent,
+	// operator-overridable fallback when a per-call wait_seconds is absent. nil =
+	// unset → engine defaultSearchWaitSeconds. Negative values are treated as unset.
+	RerankRecallWaitSeconds *int `json:"rerank_recall_wait_seconds"`
 	// QueryMaxChars caps the query text (runes) before it is embedded and
 	// reranked; the head is kept (the actual question usually precedes pasted
 	// source material). 0 = unlimited.
@@ -59,6 +64,7 @@ type Patch struct {
 	RerankRecall            *int     `json:"rerank_recall"`
 	QueryMaxChars           *int     `json:"query_max_chars"`
 	DocMaxChars             *int     `json:"doc_max_chars"`
+	RerankRecallWaitSeconds *int     `json:"rerank_recall_wait_seconds"`
 	EmbedBatchSize          *int     `json:"embed_batch_size"`
 }
 

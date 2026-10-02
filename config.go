@@ -91,6 +91,10 @@ type RerankConfig struct {
 	// the head is kept. 0 = unlimited. DocMaxChars bounds rerank documents.
 	QueryMaxChars int `yaml:"query_max_chars"`
 	DocMaxChars   int `yaml:"doc_max_chars"`
+	// WaitSeconds seeds the WebUI '死等' wait budget (embed+reranker deadline) in
+	// seconds; 0 = unset → engine defaultSearchWaitSeconds fallback. Overridden
+	// at runtime by settings.json and per-call args.wait_seconds.
+	WaitSeconds int `yaml:"wait_seconds"`
 }
 
 func DefaultConfig() *Config {
@@ -132,6 +136,7 @@ func DefaultConfig() *Config {
 			Recall:        30,
 			QueryMaxChars: 500,
 			DocMaxChars:   1000,
+			WaitSeconds:   0,
 		},
 	}
 }

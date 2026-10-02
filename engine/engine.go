@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -394,9 +395,26 @@ func (e *Engine) Registry() *registry.Registry {
 	return e.registry
 }
 
+// defaultSearchWaitSeconds bounds embed+rerank when no per-call wait and no
+// WebUI override exist. 10s keeps a no-wait call fast while still leaving room
+// for a healthy ~36s rerank fan-out to finish before the outer job-await gives up.
+const defaultSearchWaitSeconds = 10
+
+// RerankRecallWait returns the persistent rerank-recall wait budget in seconds,
+// resolved from the WebUI-persisted setting (RerankRecallWaitSeconds). A
+// non-positive value means "unset": callers fall back to defaultSearchWaitSeconds.
+// This is the single number that bounds embed+rerank inside Search; per-call
+// overrides come through args.WaitSeconds and win when > 0, so they never race.
+func (e *Engine) RerankRecallWait() int {
+	if st := e.settings.Get(); st.RerankRecallWaitSeconds != nil && *st.RerankRecallWaitSeconds > 0 {
+		return *st.RerankRecallWaitSeconds
+	}
+	return defaultSearchWaitSeconds
+}
+
 // Search performs a semantic search with optional reranking (single collection).
-func (e *Engine) Search(query string, collectionID string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
-	return e.SearchMulti(query, []string{collectionID}, topK, useRerank, threshold, filter)
+func (e *Engine) Search(query string, collectionID string, topK int, useRerank bool, threshold float64, filter map[string]any, wait time.Duration) ([]SearchResult, error) {
+	return e.SearchMulti(query, []string{collectionID}, topK, useRerank, threshold, filter, wait)
 }
 
 // scopeTarget is one (backend, collection) search/write target.
@@ -419,7 +437,7 @@ type scopeTarget struct {
 //
 // A missing primary default is a loud error: silently widening to a global scan
 // dilutes recall and looks like "RAG mysticism" later.
-func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64, filter map[string]any) ([]SearchResult, error) {
+func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64, filter map[string]any, wait time.Duration) ([]SearchResult, error) {
 	st := e.settings.Get()
 
 	if topK <= 0 {
@@ -434,13 +452,13 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	if scope := strings.TrimSpace(collectionID); scope != "" {
-		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr, filter)
+		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr, filter, wait)
 	}
 
 	targets := e.defaultSearchTargets()
 	if len(targets) == 0 {
 		// No defaults anywhere: search all enabled collections.
-		return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr, filter)
+		return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr, filter, wait)
 	}
 
 	var lastErr error
@@ -449,7 +467,7 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 			lastErr = fmt.Errorf("backend %s is unavailable (cached)", t.backend)
 			continue
 		}
-		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter)
+		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter, wait)
 		if err == nil {
 			e.markBackendUp(t.backend)
 			return res, nil
@@ -535,7 +553,7 @@ func (e *Engine) defaultSearchTargets() []scopeTarget {
 
 // searchResolved searches one explicitly named collection, applying same-name
 // failover when its backend is unreachable.
-func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any) ([]SearchResult, error) {
+func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any, wait time.Duration) ([]SearchResult, error) {
 	if en := e.registry.Get(scope); en != nil && !en.Enabled {
 		return nil, fmt.Errorf("collection '%s' is disabled", scope)
 	}
@@ -543,9 +561,9 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 	// A backend already known down must not be probed again: go straight to
 	// the same-name replica so a dead qdrant costs ~0ms instead of a timeout.
 	if e.backendDown(backend) {
-		return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, errBackendDown)
+		return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, errBackendDown, wait)
 	}
-	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter)
+	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter, wait)
 	if err == nil {
 		e.markBackendUp(backend)
 		return res, nil
@@ -557,20 +575,20 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 		return nil, err
 	}
 	e.markBackendDown(backend)
-	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err)
+	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err, wait)
 }
 
 // searchSameNameFailover searches the same-name collection on the paired
 // backend after the primary was found unavailable (or was already cached down).
 // A missing replica is a loud error so the caller knows its data is not
 // reachable instead of getting an empty result.
-func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error) ([]SearchResult, error) {
+func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error, wait time.Duration) ([]SearchResult, error) {
 	other := otherBackend(backend)
 	if other == "" || e.backendDown(other) || !e.collectionExistsOn(other, name) {
 		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name collection on %s to fall back to: %w", name, backend, other, cause)
 	}
 	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", name, backend, other)
-	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter)
+	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter, wait)
 	if err == nil {
 		e.markBackendUp(other)
 	}
@@ -614,7 +632,7 @@ func (e *Engine) embedQuery(query string) ([]float32, error) {
 
 // searchCollection embeds the query once and searches one (backend, collection),
 // optionally reranking and trimming to topK.
-func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
+func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64, filter map[string]any, wait time.Duration) ([]SearchResult, error) {
 	st := e.settings.Get()
 	rerankOn := useRerank && st.RerankEnabled
 	queryVector, err := e.embedQuery(query)
@@ -643,7 +661,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 		merged = append(merged, sr)
 	}
 	if rerankOn && len(merged) > 1 {
-		if reranked, err := e.applyRerank(query, merged, topK); err == nil {
+		if reranked, err := e.applyRerank(query, merged, topK, wait); err == nil {
 			return reranked, nil
 		} else {
 			log.Printf("Rerank failed, falling back to vector order: %v", err)
@@ -658,7 +676,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 // Disabled collections are always skipped. Explicitly requested collections
 // that don't exist are a loud error; registry drift is logged and skipped.
 // An optional payload filter (Qdrant filter syntax) is applied to every store.
-func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
+func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64, filter map[string]any, wait time.Duration) ([]SearchResult, error) {
 	targets, explicit := e.resolveTargets(collections)
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no collections to search (all disabled or none exist)")
@@ -734,7 +752,7 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 
 	// Apply reranking if enabled
 	if rerankOn && len(merged) > 1 {
-		reranked, err := e.applyRerank(query, merged, topK)
+		reranked, err := e.applyRerank(query, merged, topK, wait)
 		if err != nil {
 			log.Printf("Rerank failed, falling back to vector order: %v", err)
 			return trimResults(merged, topK), nil
@@ -815,17 +833,17 @@ type SearchDebugResult struct {
 	Results []SearchResult `json:"results"`
 	Killed  []SearchResult `json:"killed"`
 	// Query observability
-	QueryOriginalLen  int    `json:"query_original_len"`
-	QueryTruncatedLen int    `json:"query_truncated_len"`
-	QueryPreview      string `json:"query_preview"`
-	QueryTruncated    bool   `json:"query_truncated"`
-	Backend           string `json:"backend"`
-	Reranked          bool   `json:"reranked"`
-	ScoreMode         string `json:"score_mode"`
+	QueryOriginalLen  int     `json:"query_original_len"`
+	QueryTruncatedLen int     `json:"query_truncated_len"`
+	QueryPreview      string  `json:"query_preview"`
+	QueryTruncated    bool    `json:"query_truncated"`
+	Backend           string  `json:"backend"`
+	Reranked          bool    `json:"reranked"`
+	ScoreMode         string  `json:"score_mode"`
 	TopScore          float64 `json:"top_score"`
-	EmbedMs           int64  `json:"embed_ms"`
-	RerankMs          int64  `json:"rerank_ms"`
-	TookMs            int64  `json:"took_ms"`
+	EmbedMs           int64   `json:"embed_ms"`
+	RerankMs          int64   `json:"rerank_ms"`
+	TookMs            int64   `json:"took_ms"`
 }
 
 // SearchDebug runs a single-collection search and reports threshold kills.
@@ -834,7 +852,7 @@ type SearchDebugResult struct {
 // fails over to the same-name collection on the other backend like
 // searchResolved, so the WebUI recall tester keeps working while qdrant is
 // down (and vice versa).
-func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any) (*SearchDebugResult, error) {
+func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any, wait time.Duration) (*SearchDebugResult, error) {
 	t0 := time.Now()
 	// Truncation observability: boundQuery keeps the head; the console needs
 	// both lengths plus a preview to tell "long paste silently cut" apart
@@ -907,7 +925,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	scoreMode := "vector-only"
 	if useRerank && len(results) > 1 {
 		tRerank := time.Now()
-		if out, err := e.applyRerank(query, results, topK); err == nil {
+		if out, err := e.applyRerank(query, results, topK, wait); err == nil {
 			results = out
 			reranked = true
 		} else {
@@ -946,15 +964,24 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	return out, nil
 }
 
-func (e *Engine) applyRerank(query string, results []SearchResult, topK int) ([]SearchResult, error) {
-	// Extract texts for reranking
+func (e *Engine) applyRerank(query string, results []SearchResult, topK int, wait time.Duration) ([]SearchResult, error) {
+	if len(results) <= 1 {
+		return results, nil
+	}
+
+	// One deadline bounds the whole rerank fan-out (the slow stage). The R()
+	// context honours it: on timeout we fail open to vector order and never
+	// latch the breaker. Passing wait through lets boundedRun's outer await and
+	// this inner budget agree, so they can never race.
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+
 	texts := make([]string, len(results))
 	for i, r := range results {
 		texts[i] = r.Text
 	}
 
-	// Call rerank
-	rerankResults, err := e.rerank.Rerank(query, texts, topK)
+	rerankResults, err := e.rerank.Rerank(ctx, query, texts, topK, wait)
 	if err != nil {
 		return nil, err
 	}
