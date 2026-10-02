@@ -8,7 +8,12 @@
 package jobs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -211,13 +216,32 @@ func (m *Manager) runIndex(job *Job, absPath, collection, backend string, opts *
 			j.State = StateError
 			j.Stage = "failed"
 			j.Error = err.Error()
-			return
+		} else {
+			j.State = StateDone
+			j.Stage = "done"
+			j.Chunks = res.ChunksIndexed
+			j.DoneChunks = res.ChunksIndexed
+			j.TotalChunks = res.ChunksIndexed
 		}
-		j.State = StateDone
-		j.Stage = "done"
-		j.Chunks = res.ChunksIndexed
-		j.DoneChunks = res.ChunksIndexed
-		j.TotalChunks = res.ChunksIndexed
+		if m.eng != nil {
+			op := "index"
+			if rebuild {
+				op = "reindex"
+			}
+			prov, model, dim, _ := m.eng.ActiveEmbedProvenance()
+			var sum string
+			if data, rerr := readFileSHA(absPath); rerr == nil {
+				sum = data
+			}
+			if herr := m.eng.AppendHistory(engine.HistoryEntry{
+				Op: op, File: absPath, SHA256: sum, Collection: collection, Backend: backend,
+				Mode: map[bool]string{true: "rebuild", false: "append"}[rebuild],
+				Chunks: resChunks(res), EmbedProvider: prov, EmbedModel: model, VectorDim: dim,
+				OK: err == nil, Error: errString(err),
+			}); herr != nil {
+				log.Printf("history append failed: %v", herr)
+			}
+		}
 	})
 }
 
@@ -315,4 +339,31 @@ func (m *Manager) Clear() int {
 	}
 	m.order = kept
 	return removed
+}
+
+func resChunks(res *engine.IndexResult) int {
+	if res == nil {
+		return 0
+	}
+	return res.ChunksIndexed
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func readFileSHA(absPath string) (string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

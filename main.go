@@ -135,7 +135,15 @@ func main() {
 		RerankRecall:     cfg.Rerank.Recall,
 		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
 		DocMaxChars:      cfg.Rerank.DocMaxChars,
+		EmbedBatchSize:   0,
 		FailoverEnabled:  true,
+		BM25Enabled:      true,
+		FusionMethod:     "rrf",
+		EmbedProviders: []settings.EmbedProvider{{
+			ID: cfg.OneAPI.ProviderName, BaseURL: cfg.OneAPI.BaseURL, BackupURL: cfg.OneAPI.BackupURL,
+			Model: cfg.OneAPI.EmbedModel, Dim: cfg.OneAPI.VectorDim, Distance: cfg.OneAPI.VectorDistance,
+			APIKeyEnv: "ONE_API_KEY",
+		}},
 	})
 
 	// Seed the WebUI '死等' override from config.yaml when set; nil keeps the
@@ -180,6 +188,7 @@ func main() {
 		QueryMaxChars:   cfg.Rerank.QueryMaxChars,
 		DocMaxChars:     cfg.Rerank.DocMaxChars,
 		RegistryPath:    cfg.RegistryPath,
+		HistoryPath:    filepath.Join(cfgDir, "logs", "index_history.jsonl"),
 	}
 
 	eng, err := engine.NewEngine(engineConfig, settingsStore)

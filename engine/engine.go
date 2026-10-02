@@ -28,6 +28,11 @@ type Engine struct {
 	config         *EngineConfig
 	registry       *registry.Registry
 	settings       *settings.Store
+
+	// embedMu/embedCache lazily build one EmbeddingClient per configured
+	// provider so switching active_embed_provider does not rebuild the world.
+	embedMu    sync.Mutex
+	embedCache map[string]*EmbeddingClient
 	docsDir        string
 	memoryDir      string
 
@@ -60,6 +65,10 @@ type EngineConfig struct {
 	QueryMaxChars   int
 	DocMaxChars     int
 	RegistryPath    string
+	// HistoryPath is the append-only JSONL audit of every index/reindex/
+	// upload/delete so a raw file stays traceable to its collections even
+	// after the collection itself is deleted. Empty disables history.
+	HistoryPath     string
 }
 
 // SearchResult represents a search result
@@ -151,6 +160,7 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 		config:         config,
 		registry:       reg,
 		settings:       st,
+		embedCache:     map[string]*EmbeddingClient{},
 		docsDir:        config.DocsDir,
 		memoryDir:      config.MemoryDir,
 		downUntil:      make(map[string]time.Time),
@@ -635,15 +645,117 @@ func (e *Engine) boundQuery(query string) string {
 	return truncateRunes(query, limit)
 }
 
-// embedQuery embeds a single query string once. The query is bounded first so
+// activeEmbedProvenance reports which provider/model/vector space NEW
+// embeddings (and their registry provenance) should be stamped with. An
+// empty active_embed_provider falls back to the one-api config values.
+func (e *Engine) activeEmbedProvenance() (provider, model string, dim int, distance string) {
+	st := e.settings.Get()
+	if st.ActiveEmbedProvider == "" {
+		return e.config.EmbedProvider, e.config.EmbedModel, e.config.VectorDim, e.config.VectorDistance
+	}
+	for i := range st.EmbedProviders {
+		p := st.EmbedProviders[i]
+		if p.ID != st.ActiveEmbedProvider {
+			continue
+		}
+		dim := p.Dim
+		if dim == 0 {
+			dim = e.config.VectorDim
+		}
+		dist := p.Distance
+		if dist == "" {
+			dist = e.config.VectorDistance
+		}
+		return p.ID, p.Model, dim, dist
+	}
+	return e.config.EmbedProvider, e.config.EmbedModel, e.config.VectorDim, e.config.VectorDistance
+}
+
+// ActiveEmbedProvenance exposes the current embedding labeling for audit
+// logging (jobs, history). See activeEmbedProvenance.
+func (e *Engine) ActiveEmbedProvenance() (provider, model string, dim int, distance string) {
+	return e.activeEmbedProvenance()
+}
+
+// currentEmbedder returns the embedding client for the active provider,
+// building and caching it on first use. Inactive providers are not touched.
+func (e *Engine) currentEmbedder() *EmbeddingClient {
+	st := e.settings.Get()
+	if st.ActiveEmbedProvider == "" {
+		return e.embedding
+	}
+	var prov *settings.EmbedProvider
+	for i := range st.EmbedProviders {
+		if st.EmbedProviders[i].ID == st.ActiveEmbedProvider {
+			prov = &st.EmbedProviders[i]
+			break
+		}
+	}
+	if prov == nil || prov.BaseURL == "" {
+		return e.embedding
+	}
+	e.embedMu.Lock()
+	defer e.embedMu.Unlock()
+	if c, ok := e.embedCache[prov.ID]; ok {
+		return c
+	}
+	key := ""
+	if prov.APIKeyEnv != "" {
+		key = os.Getenv(prov.APIKeyEnv)
+	}
+	if key == "" {
+		key = e.config.APIKey
+	}
+	c := NewEmbeddingClient(prov.BaseURL, prov.BackupURL, prov.Model, key)
+	e.embedCache[prov.ID] = c
+	return c
+}
+
+// embedQuery binds the current provider's client for one query embed. embeds a single query string once. The query is bounded first so
 // a long pasted message never reaches the embedding model untruncated (the
 // rerank-side bound only runs after embedding, too late to help).
 func (e *Engine) embedQuery(query string) ([]float32, error) {
-	embeddings, err := e.embedding.CreateEmbeddings([]string{e.boundQuery(query)})
+	embeddings, err := e.currentEmbedder().CreateEmbeddings([]string{e.boundQuery(query)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
 	return embeddings[0], nil
+}
+
+// keywordSearcher is implemented by backends that can run BM25 (vectra +
+// qdrant via in-memory scan). Stores that do not implement it silently skip
+// the BM25 leg — keyword recall is an enhancement, not a requirement.
+type keywordSearcher interface {
+	KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error)
+}
+
+// fuseWithBM25 merges a vector result list with a BM25 leg from the same
+// (backend, collection) via RRF. Disabled or unsupported backends return the
+// vector list unchanged.
+func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchResult, recallCount int) []SearchResult {
+	st := e.settings.Get()
+	if !st.BM25Enabled {
+		return vectorList
+	}
+	store, ok := e.stores[backend]
+	if !ok {
+		return vectorList
+	}
+	ks, ok := store.(keywordSearcher)
+	if !ok {
+		return vectorList
+	}
+	kw, err := ks.KeywordSearch(name, query, recallCount)
+	if err != nil || len(kw) == 0 {
+		return vectorList
+	}
+	bm25List := make([]SearchResult, 0, len(kw))
+	for _, r := range kw {
+		sr := qdrantToSearchResult(r, name)
+		sr.Backend = backend
+		bm25List = append(bm25List, sr)
+	}
+	return rrfFuse([][]SearchResult{vectorList, bm25List}, recallCount)
 }
 
 // searchCollection embeds the query once and searches one (backend, collection),
@@ -676,6 +788,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 		sr.Backend = backend
 		merged = append(merged, sr)
 	}
+	merged = e.fuseWithBM25(backend, name, query, merged, recallCount)
 	if rerankOn && len(merged) > 1 {
 		if reranked, err := e.applyRerank(query, merged, topK, wait); err == nil {
 			return reranked, nil
@@ -759,11 +872,13 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			continue
 		}
 		e.markBackendUp(backend)
+		var vecList []SearchResult
 		for _, r := range results {
 			sr := qdrantToSearchResult(r, name)
 			sr.Backend = backend
-			merged = append(merged, sr)
+			vecList = append(vecList, sr)
 		}
+		merged = append(merged, e.fuseWithBM25(backend, name, query, vecList, recallCount)...)
 	}
 
 	// Apply reranking if enabled
@@ -936,6 +1051,8 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		}
 	}
 
+	results = e.fuseWithBM25(backend, collection, query, results, recallCount)
+
 	reranked := false
 	var rerankMs int64
 	scoreMode := "vector-only"
@@ -1102,13 +1219,14 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 	metadata["source"] = path
 
 	sum := sha256.Sum256(data)
+	embedProvider, embedModel, embedDim, embedDistance := e.activeEmbedProvenance()
 	prov := Provenance{
 		SourceFile:   path,
 		SourceSHA256: hex.EncodeToString(sum[:]),
-		EmbedModel:   e.config.EmbedModel,
-		EmbedProvider: e.config.EmbedProvider,
-		VectorDim:   e.config.VectorDim,
-		VectorDistance: e.config.VectorDistance,
+		EmbedModel:   embedModel,
+		EmbedProvider: embedProvider,
+		VectorDim:   embedDim,
+		VectorDistance: embedDistance,
 	}
 
 	res, used, err := e.indexTextInternalOn(backend, text, collectionID, metadata, fileName, path, opts, prog)
@@ -1182,14 +1300,15 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 	if err != nil {
 		return nil, err
 	}
+	embedProvider, embedModel, embedDim, embedDistance := e.activeEmbedProvenance()
 	e.recordIndex(collectionID, Provenance{
 		SourceFile:   "direct_text",
 		ChunkSize:    used.Size,
 		ChunkOverlap: used.Overlap,
-		EmbedModel:   e.config.EmbedModel,
-		EmbedProvider: e.config.EmbedProvider,
-		VectorDim:   e.config.VectorDim,
-		VectorDistance: e.config.VectorDistance,
+		EmbedModel:   embedModel,
+		EmbedProvider: embedProvider,
+		VectorDim:   embedDim,
+		VectorDistance: embedDistance,
 		Chunks:       res.ChunksIndexed,
 	}, e.backendOf(collectionID))
 	return res, nil
@@ -1399,18 +1518,19 @@ func (e *Engine) checkProvenanceConflict(collectionID string) error {
 	if en == nil {
 		return nil
 	}
+	curProvider, curModel, curDim, curDistance := e.activeEmbedProvenance()
 	mismatch := []string{}
-	if en.EmbedModel != "" && en.EmbedModel != e.config.EmbedModel {
-		mismatch = append(mismatch, fmt.Sprintf("embed_model: %q vs current %q", en.EmbedModel, e.config.EmbedModel))
+	if en.EmbedModel != "" && en.EmbedModel != curModel {
+		mismatch = append(mismatch, fmt.Sprintf("embed_model: %q vs current %q", en.EmbedModel, curModel))
 	}
-	if en.EmbedProvider != "" && en.EmbedProvider != e.config.EmbedProvider {
-		mismatch = append(mismatch, fmt.Sprintf("embed_provider: %q vs current %q", en.EmbedProvider, e.config.EmbedProvider))
+	if en.EmbedProvider != "" && en.EmbedProvider != curProvider {
+		mismatch = append(mismatch, fmt.Sprintf("embed_provider: %q vs current %q", en.EmbedProvider, curProvider))
 	}
-	if en.VectorDim > 0 && en.VectorDim != e.config.VectorDim {
-		mismatch = append(mismatch, fmt.Sprintf("vector_dim: %d vs current %d", en.VectorDim, e.config.VectorDim))
+	if en.VectorDim > 0 && en.VectorDim != curDim {
+		mismatch = append(mismatch, fmt.Sprintf("vector_dim: %d vs current %d", en.VectorDim, curDim))
 	}
-	if en.VectorDistance != "" && !strings.EqualFold(en.VectorDistance, e.config.VectorDistance) {
-		mismatch = append(mismatch, fmt.Sprintf("vector_distance: %q vs current %q", en.VectorDistance, e.config.VectorDistance))
+	if en.VectorDistance != "" && !strings.EqualFold(en.VectorDistance, curDistance) {
+		mismatch = append(mismatch, fmt.Sprintf("vector_distance: %q vs current %q", en.VectorDistance, curDistance))
 	}
 	if len(mismatch) == 0 {
 		return nil
@@ -1453,7 +1573,7 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	cpuMode := e.cpuComputeMode()
 	bs := e.effectiveEmbedBatchSize(cpuMode)
 	log.Printf("Index '%s': embedding %d chunks (batch_size=%d, cpu_mode=%v)", collectionID, len(chunks), bs, cpuMode)
-	embeddings, err := e.embedding.CreateEmbeddingsBatched(chunks, bs)
+	embeddings, err := e.currentEmbedder().CreateEmbeddingsBatched(chunks, bs)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to embed chunks: %w", err)
 	}
@@ -1489,6 +1609,10 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	// differs from the current engine config, vectors would be incomparable.
 	// Rebuilding drops the collection first, so it bypasses this gate.
 	store := e.storeForBackend(backend)
+	if qc, ok := store.(*QdrantClient); ok {
+		_, _, embedDim, embedDistance := e.activeEmbedProvenance()
+		qc.setVectorSpace(embedDim, embedDistance)
+	}
 	exists, err := store.CollectionExists(collectionID)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to check collection: %w", err)
@@ -1745,6 +1869,9 @@ func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	if err := e.registry.Delete(name); err != nil {
 		log.Printf("Registry cleanup failed for deleted '%s': %v", name, err)
 	}
+	if err := e.AppendHistory(HistoryEntry{Op: "delete_collection", Collection: name, Backend: e.backendOf(name), OK: true}); err != nil {
+		log.Printf("history append failed: %v", err)
+	}
 	log.Printf("Deleted collection '%s'", name)
 	return nil
 }
@@ -1812,7 +1939,7 @@ func (e *Engine) HealthCheck() map[string]string {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		switch err := probeWithTimeout(e.embedding.Ping, 8*time.Second); {
+		switch err := probeWithTimeout(e.currentEmbedder().Ping, 8*time.Second); {
 		case err == errProbeTimeout:
 			set("embedding", "slow")
 		case err != nil:

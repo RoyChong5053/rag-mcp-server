@@ -65,6 +65,17 @@ func NewQdrantClient(host string, port int) *QdrantClient {
 	}
 }
 
+// setVectorSpace updates the shape used for newly created collections so a
+// provider switch applies to collections created after the switch.
+func (c *QdrantClient) setVectorSpace(dim int, distance string) {
+	if dim > 0 {
+		c.vectorDim = dim
+	}
+	if distance != "" {
+		c.vectorDistance = distance
+	}
+}
+
 // CreateCollection creates a new Qdrant collection with cosine similarity
 func (c *QdrantClient) CreateCollection(name string) error {
 	size := c.vectorDim
@@ -189,6 +200,58 @@ func (c *QdrantClient) Search(collection string, vector []float32, limit int, th
 	}
 
 	return result.Result, nil
+}
+
+// KeywordSearch implements BM25 over a collection's payload text via the
+// scroll API (Qdrant has no native BM25 without sparse vectors). In-memory
+// per call keeps it simple; collections are small enough that this is fine.
+func (c *QdrantClient) KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error) {
+	var docs []*bm25Doc
+	payloads := map[string]map[string]any{}
+	ids := map[string]any{}
+	var offset any
+	for {
+		body := map[string]any{"limit": 1000, "with_payload": true, "with_vector": false}
+		if offset != nil {
+			body["offset"] = offset
+		}
+		resp, err := c.post(fmt.Sprintf("/collections/%s/points/scroll", collection), body)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Result struct {
+				Points []struct {
+					ID      any            `json:"id"`
+					Payload map[string]any `json:"payload"`
+				} `json:"points"`
+				NextOffset any `json:"next_page_offset"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(resp, &result); err != nil {
+			return nil, err
+		}
+		for _, p := range result.Result.Points {
+			text, _ := p.Payload["text"].(string)
+			id := fmt.Sprintf("%v", p.ID)
+			docs = append(docs, &bm25Doc{id: id, text: text})
+			payloads[id] = p.Payload
+			ids[id] = p.ID
+		}
+		if result.Result.NextOffset == nil || len(result.Result.Points) == 0 {
+			break
+		}
+		offset = result.Result.NextOffset
+	}
+	if len(docs) == 0 {
+		return nil, nil
+	}
+	ranked := buildBM25(docs).Rank(query, limit)
+	var out []StoreSearchResult
+	for _, d := range ranked {
+		out = append(out, StoreSearchResult{ID: ids[d.id], Score: 0, Payload: payloads[d.id]})
+	}
+	return out, nil
 }
 
 // DeletePoints deletes points by filter

@@ -511,6 +511,53 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 	return out, nil
 }
 
+// KeywordSearch implements BM25 over a collection's stored chunk text by
+// walking the same source indexes Search uses. No extra index structure is
+// kept: vectra collections are file-backed and already fully in memory.
+func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return nil, err
+	}
+	var docs []*bm25Doc
+	payloads := map[string]map[string]any{}
+	ids := map[string]any{}
+	for source, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			var text string
+			if it.Metadata != nil {
+				text, _ = it.Metadata["text"].(string)
+			}
+			key := source + "#" + it.ID
+			docs = append(docs, &bm25Doc{id: key, text: text})
+			payload := cloneAnyMap(it.Metadata)
+			if payload == nil {
+				payload = map[string]any{}
+			}
+			if _, ok := payload["source_file"]; !ok {
+				payload["source_file"] = source
+			}
+			payloads[key] = payload
+			ids[key] = parsePointID(it.ID)
+		}
+	}
+	if len(docs) == 0 {
+		return nil, nil
+	}
+	ranked := buildBM25(docs).Rank(query, limit)
+	var out []StoreSearchResult
+	for _, d := range ranked {
+		out = append(out, StoreSearchResult{ID: ids[d.id], Score: 0, Payload: payloads[d.id]})
+	}
+	return out, nil
+}
+
 // DeletePoints removes items matching the filter. An empty filter clears the
 // whole collection. Only match.value clauses on payload keys are supported.
 func (f *FileStore) DeletePoints(collection string, filter map[string]any) error {

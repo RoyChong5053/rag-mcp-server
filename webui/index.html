@@ -170,6 +170,8 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>query max <input type="number" id="s-qmax" min="0" title="truncate the query to N chars before embedding &amp; reranking (runes, keeps the head, 0 = unlimited)"></span>
     <span>doc max <input type="number" id="s-dmax" min="0" title="rerank document truncation (runes, 0 = unlimited)"></span>
     <span>embed batch <input type="number" id="s-ebatch" min="0" max="128" title="GPU-mode texts per embedding POST for index jobs. 0 = auto: 32 when qdrant/GPU is reachable, automatically capped to 4 (and serialized) when the vectra/CPU fallback is in charge. A positive value overrides the GPU size; the CPU fallback still caps it."></span>
+    <label style="display:inline"><input type="checkbox" id="s-bm25"> BM25 hybrid</label>
+    <span>provider <select id="s-provider"><option value="">one-api (config)</option></select></span>
     <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>
   <div id="s-status" class="prov"></div>
@@ -225,7 +227,16 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <input type="file" id="up-file">
     <button onclick="withBusy(this, () => upload())">Upload to staging/</button>
   </div>
-  <div class="table-wrap"><table id="ftbl"><thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
+  <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+    <span>per page <select id="fp-size" onchange="fbState.size=+this.value;fbState.page=0;fbApply()"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></span>
+    <span>status <select id="fp-status" onchange="fbState.status=this.value;fbState.page=0;fbApply()"><option value="">all</option><option value="indexed_fresh">indexed · fresh</option><option value="indexed_stale">indexed · changed</option><option value="unindexed">not indexed</option><option value="unknown">unknown</option></select></span>
+    <label style="display:inline"><input type="checkbox" id="fp-recent" checked onchange="fbState.recentFirst=this.checked;fbApply()"> recent uploads first</label>
+    <span class="spacer"></span>
+    <button onclick="fbState.page=Math.max(0,fbState.page-1);fbApply()">‹</button>
+    <span id="fp-page" class="prov"></span>
+    <button onclick="fbState.page++;fbApply()">›</button>
+  </div>
+  <div class="table-wrap"><table id="ftbl"><thead><tr><th data-sort="name" style="cursor:pointer" onclick="fbSetSort('name')">File</th><th data-sort="size" style="cursor:pointer" onclick="fbSetSort('size')">Size</th><th data-sort="status" style="cursor:pointer" onclick="fbSetSort('status')">Status</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div id="index-panel">
@@ -651,6 +662,10 @@ async function loadSettings() {
   document.getElementById('s-qmax').value = s.query_max_chars || 0;
   document.getElementById('s-dmax').value = s.doc_max_chars || 0;
   document.getElementById('s-ebatch').value = s.embed_batch_size || 0;
+  document.getElementById('s-bm25').checked = s.bm25_enabled !== false;
+  const provSel = document.getElementById('s-provider');
+  provSel.innerHTML = '<option value="">one-api (config)</option>' + (s.embed_providers || []).map(p => '<option value="' + esc(p.id) + '">' + esc(p.id) + (p.model ? ' · ' + esc(p.model) : '') + '</option>').join('');
+  provSel.value = s.active_embed_provider || '';
   st.textContent = '';
 }
 async function saveSettings() {
@@ -669,7 +684,9 @@ async function saveSettings() {
       rerank_recall: +document.getElementById('s-recall').value || 30,
       query_max_chars: +document.getElementById('s-qmax').value || 0,
       doc_max_chars: +document.getElementById('s-dmax').value || 0,
-      embed_batch_size: +document.getElementById('s-ebatch').value || 0
+      embed_batch_size: +document.getElementById('s-ebatch').value || 0,
+      bm25_enabled: document.getElementById('s-bm25').checked,
+      active_embed_provider: document.getElementById('s-provider').value
     });
     // Saved regardless of backend reachability; a backend that was offline
     // shows up as an advisory warning, not a failed save (failover must stay
@@ -685,12 +702,30 @@ async function saveSettings() {
 
 /* ---- data bank ---- */
 const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
-async function loadFiles() {
-  let files = [];
-  try { files = await api('GET', '/api/files'); } catch (e) { toast('files failed: ' + e.message, 'err'); return; }
+const fbState = { sort: 'mtime', dir: -1, page: 0, size: 10, status: '', recentFirst: true, recent: [] };
+function fbRender(files) {
   const tb = document.querySelector('#ftbl tbody');
   tb.innerHTML = '';
-  for (const f of files) {
+  let list = files.filter(f => !fbState.status || f.status === fbState.status);
+  const key = fbState.sort;
+  const val = f => key === 'name' ? f.path : key === 'size' ? f.size : key === 'mtime' ? (f.mtime || '') : key === 'status' ? f.status : (f.collection || '');
+  list.sort((a, b) => {
+    let x = val(a), y = val(b);
+    if (typeof x === 'string') { x = x.toLowerCase(); y = (y || '').toLowerCase(); }
+    if (x < y) return -fbState.dir; if (x > y) return fbState.dir; return 0;
+  });
+  if (fbState.recentFirst) {
+    const isRecent = f => fbState.recent.some(r => r.file && r.file.endsWith('/' + f.path));
+    const pinned = list.filter(isRecent);
+    const rest = list.filter(f => !isRecent(f));
+    list = pinned.concat(rest);
+  }
+  const total = list.length;
+  const pages = Math.max(1, Math.ceil(total / fbState.size));
+  if (fbState.page > pages - 1) fbState.page = pages - 1;
+  const slice = list.slice(fbState.page * fbState.size, (fbState.page + 1) * fbState.size);
+  document.getElementById('fp-page').textContent = 'page ' + (fbState.page + 1) + '/' + pages + ' · ' + total + ' files';
+  for (const f of slice) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td data-label="File">' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td>' +
       '<td data-label="Size" class="num">' + fmtSize(f.size) + '</td>' +
@@ -701,10 +736,44 @@ async function loadFiles() {
     bp.onclick = () => withBusy(bp, () => openIndex(f.path, true));
     const bi = document.createElement('button'); bi.textContent = 'Vectorize…';
     bi.onclick = () => withBusy(bi, () => openIndex(f.path, false));
-    td.appendChild(bp); td.appendChild(bi);
+    const bl = document.createElement('button'); bl.textContent = 'logs';
+    bl.onclick = () => withBusy(bl, () => toggleHistory(f, tr));
+    td.appendChild(bp); td.appendChild(bi); td.appendChild(bl);
     tr.appendChild(td);
     tb.appendChild(tr);
   }
+}
+async function toggleHistory(f, tr) {
+  let row = tr.nextElementSibling;
+  if (row && row.dataset && row.dataset.hist === '1') { row.remove(); return; }
+  const hrow = document.createElement('tr');
+  hrow.dataset.hist = '1';
+  const td = document.createElement('td');
+  td.colSpan = 4; td.setAttribute('data-label', '');
+  td.innerHTML = '<small>loading history…</small>';
+  hrow.appendChild(td);
+  tr.parentNode.insertBefore(hrow, tr.nextSibling);
+  try {
+    const items = await api('GET', '/api/files/history?path=' + encodeURIComponent(f.path));
+    if (!items.length) { td.innerHTML = '<small class="dim">no index history yet</small>'; return; }
+    td.innerHTML = items.map(en => '<div class="prov">' + esc(en.ts.replace('T', ' ').slice(0, 19)) + ' · <b>' + esc(en.op) + '</b>' + (en.collection ? ' → ' + esc(en.collection) : '') + (en.backend ? ' [' + esc(en.backend) + ']' : '') + (en.embed_provider ? ' · ' + esc(en.embed_provider) + '/' + esc(en.embed_model || '?') : '') + (en.chunks ? ' · ' + en.chunks + ' chunks' : '') + (en.ok ? '' : ' · <span style="color:#c00">' + esc(en.error || 'failed') + '</span>') + '</div>').join('');
+  } catch (e) { td.innerHTML = '<small style="color:#c00">' + esc(e.message) + '</small>'; }
+}
+async function loadFiles() {
+  await fbReload();
+}
+async function fbReload() {
+  let files = [];
+  try { files = await api('GET', '/api/files'); } catch (e) { toast('files failed: ' + e.message, 'err'); return; }
+  try { fbState.recent = await api('GET', '/api/files/recent-uploads'); } catch (e) { fbState.recent = []; }
+  fbFiles = files;
+  fbRender(files);
+}
+let fbFiles = [];
+function fbApply() { if (fbFiles.length) fbRender(fbFiles); }
+function fbSetSort(key) {
+  if (fbState.sort === key) { fbState.dir = -fbState.dir; } else { fbState.sort = key; fbState.dir = key === 'mtime' ? -1 : 1; }
+  fbApply();
 }
 async function upload() {
   const inp = document.getElementById('up-file');

@@ -111,6 +111,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/collections/{name}/backfill", h.requireAuth(h.backfill))
 	mux.HandleFunc("POST /api/collections/{name}/search", h.requireAuth(h.search))
 	mux.HandleFunc("GET /api/files", h.requireAuth(h.handleFiles))
+	mux.HandleFunc("GET /api/files/history", h.requireAuth(h.handleFileHistory))
+	mux.HandleFunc("GET /api/files/recent-uploads", h.requireAuth(h.handleRecentUploads))
 	mux.HandleFunc("POST /api/upload", h.requireAuth(h.handleUpload))
 	mux.HandleFunc("POST /api/index", h.requireAuth(h.handleSubmitIndex))
 	mux.HandleFunc("GET /api/jobs", h.requireAuth(h.handleJobs))

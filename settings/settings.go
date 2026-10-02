@@ -49,6 +49,32 @@ type Settings struct {
 	// GPU path is active. 0 = auto (GPU 32, CPU fallback capped to 4). A
 	// positive value overrides the GPU size; the CPU fallback still caps it.
 	EmbedBatchSize int `json:"embed_batch_size"`
+	// EmbedProviders lists every embed endpoint the server can talk to
+	// (one-api fan-out, openrouter, ...). Switching providers only affects
+	// new writes: existing collections keep the provenance recorded at
+	// vectorize time and the engine refuses to mix vector spaces.
+	EmbedProviders []EmbedProvider `json:"embed_providers,omitempty"`
+	// ActiveEmbedProvider selects which EmbedProviders entry embedQuery and
+	// index jobs use. Empty = the built-in one-api config (legacy default).
+	ActiveEmbedProvider string `json:"active_embed_provider,omitempty"`
+	// BM25Enabled adds a keyword-retrieval leg to searches; results merge
+	// with vector hits via RRF before rerank. Off = pure vector+rerank.
+	BM25Enabled bool `json:"bm25_enabled"`
+	// FusionMethod picks how the vector and BM25 lists merge: "rrf" (default)
+	// or "weighted".
+	FusionMethod string `json:"fusion_method"`
+}
+
+// EmbedProvider describes one embedding endpoint. APIKeyEnv names an
+// environment variable holding the key; empty falls back to the one-api key.
+type EmbedProvider struct {
+	ID        string `json:"id"`
+	BaseURL   string `json:"base_url"`
+	BackupURL string `json:"backup_url,omitempty"`
+	Model     string `json:"model"`
+	Dim       int    `json:"dim,omitempty"`
+	Distance  string `json:"distance,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 }
 
 // Patch carries optional settings updates; nil means "leave unchanged".
@@ -66,6 +92,10 @@ type Patch struct {
 	DocMaxChars             *int     `json:"doc_max_chars"`
 	RerankRecallWaitSeconds *int     `json:"rerank_recall_wait_seconds"`
 	EmbedBatchSize          *int     `json:"embed_batch_size"`
+	EmbedProviders          *[]EmbedProvider `json:"embed_providers"`
+	ActiveEmbedProvider     *string  `json:"active_embed_provider"`
+	BM25Enabled             *bool    `json:"bm25_enabled"`
+	FusionMethod            *string  `json:"fusion_method"`
 }
 
 // Store is a concurrency-safe runtime settings store backed by a JSON file.
@@ -150,6 +180,21 @@ func (s *Store) Update(p Patch) error {
 	}
 	if p.EmbedBatchSize != nil {
 		s.data.EmbedBatchSize = *p.EmbedBatchSize
+	}
+	if p.RerankRecallWaitSeconds != nil {
+		s.data.RerankRecallWaitSeconds = p.RerankRecallWaitSeconds
+	}
+	if p.EmbedProviders != nil {
+		s.data.EmbedProviders = *p.EmbedProviders
+	}
+	if p.ActiveEmbedProvider != nil {
+		s.data.ActiveEmbedProvider = *p.ActiveEmbedProvider
+	}
+	if p.BM25Enabled != nil {
+		s.data.BM25Enabled = *p.BM25Enabled
+	}
+	if p.FusionMethod != nil {
+		s.data.FusionMethod = *p.FusionMethod
 	}
 
 	return s.save()

@@ -121,6 +121,40 @@ func (h *Handler) listFiles() ([]FileEntry, error) {
 	return out, err
 }
 
+// handleFileHistory returns the index/reindex/upload/delete audit trail for
+// one raw file (?path= relative to the docs root), oldest first.
+func (h *Handler) handleFileHistory(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Query().Get("path")
+	abs, err := jail(h.docsRoot, rel)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, err := h.eng.HistoryForFile(abs)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if entries == nil {
+		entries = []engine.HistoryEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRecentUploads returns recent upload entries (newest first) so the
+// dashboard can pin just-uploaded files to the top regardless of sort.
+func (h *Handler) handleRecentUploads(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.eng.RecentUploads(50)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if entries == nil {
+		entries = []engine.HistoryEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
 func (h *Handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 	entries, err := h.listFiles()
 	if err != nil {
@@ -174,6 +208,9 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel, _ := filepath.Rel(h.docsRoot, abs)
+	if err := h.eng.AppendHistory(engine.HistoryEntry{Op: "upload", File: abs, OK: true}); err != nil {
+		log.Printf("history append failed: %v", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"path":   filepath.ToSlash(rel),
