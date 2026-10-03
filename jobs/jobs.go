@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +64,8 @@ type Job struct {
 	FinishedAt string `json:"finished_at,omitempty"`
 
 	done chan struct{} // closed when the job reaches done/error
+
+	finished bool // guarded by Manager.mu; makes finish idempotent
 }
 
 // Manager runs background jobs. Index jobs are bounded by a worker pool so
@@ -127,17 +130,38 @@ func (m *Manager) update(id string, fn func(*Job)) {
 	}
 }
 
-// finish marks a job terminal and wakes any Await waiter. Exactly once.
+// finish marks a job terminal and wakes any Await waiter. Exactly once:
+// a second call (e.g. the panic guard racing the normal path) is a no-op
+// instead of a close-of-closed-channel panic.
 func (m *Manager) finish(id string, fn func(*Job)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j, ok := m.jobs[id]
-	if !ok {
+	if !ok || j.finished {
 		return
 	}
 	fn(j)
+	j.finished = true
 	j.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	close(j.done)
+}
+
+// recoverJob converts a panic escaping a background job into a job-level
+// error. Without this the panic unwinds past the goroutine and takes the whole
+// server process down, so one bad input (e.g. a tokenizer bug) would drop every
+// in-flight request. The stack is logged for the operator; callers just see the
+// job fail and can retry or fall back.
+func (m *Manager) recoverJob(id string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Printf("job %s panicked: %v\n%s", id, r, debug.Stack())
+	m.finish(id, func(j *Job) {
+		j.State = StateError
+		j.Stage = "failed"
+		j.Error = fmt.Sprintf("internal panic: %v", r)
+	})
 }
 
 // Submit runs a generic background task and returns the queued job. It does
@@ -146,6 +170,7 @@ func (m *Manager) finish(id string, fn func(*Job)) {
 func (m *Manager) Submit(kind string, run func() (any, error)) *Job {
 	job := m.newJob(kind)
 	go func() {
+		defer m.recoverJob(job.ID)
 		m.update(job.ID, func(j *Job) {
 			j.State = StateRunning
 			if j.Stage == "queued" {
@@ -185,7 +210,10 @@ func (m *Manager) SubmitIndex(absPath, collection, backend string, opts *engine.
 		j.Overlap = overlap
 		j.Rebuild = rebuild
 	})
-	go m.runIndex(job, absPath, collection, backend, opts, rebuild)
+	go func() {
+		defer m.recoverJob(job.ID)
+		m.runIndex(job, absPath, collection, backend, opts, rebuild)
+	}()
 	return m.Get(job.ID)
 }
 

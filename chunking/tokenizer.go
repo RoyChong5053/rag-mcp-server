@@ -47,7 +47,17 @@ func loadOnce() {
 		if err != nil {
 			continue
 		}
-		encode = func(s string) int {
+		encode = func(s string) (n int) {
+			// sugarme/tokenizer v0.3.0 can panic inside its normalizer on
+			// certain inputs (index out of range in TransformRange). Catch it
+			// here so a bad string degrades to the rune estimate instead of
+			// unwinding through the caller and killing the server.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("chunking: tokenizer panic recovered: %v", r)
+					n = -1
+				}
+			}()
 			enc, err := tk.EncodeSingle(s)
 			if err != nil {
 				return -1
