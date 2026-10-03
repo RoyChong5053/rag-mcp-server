@@ -62,8 +62,8 @@ type EngineConfig struct {
 	OverlapPercent  int
 	RerankEnabled   bool
 	RerankRecall    int
-	QueryMaxChars   int
-	DocMaxChars     int
+	QueryMaxTokens   int
+	DocMaxTokens     int
 	RegistryPath    string
 	// HistoryPath is the append-only JSONL audit of every index/reindex/
 	// upload/delete so a raw file stays traceable to its collections even
@@ -108,7 +108,7 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 		config.VectorDistance = "Cosine"
 	}
 	embedding := NewEmbeddingClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.EmbedModel, config.APIKey)
-	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxChars, config.DocMaxChars)
+	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxTokens, config.DocMaxTokens)
 
 	qdrant := NewQdrantClient(config.QdrantHost, config.QdrantPort)
 	qdrant.vectorDim = config.VectorDim
@@ -146,8 +146,8 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 			DefaultThreshold: 0.25,
 			RerankEnabled:    config.RerankEnabled,
 			RerankRecall:     config.RerankRecall,
-			QueryMaxChars:    config.QueryMaxChars,
-			DocMaxChars:      config.DocMaxChars,
+			QueryMaxTokens:    config.QueryMaxTokens,
+			DocMaxTokens:      config.DocMaxTokens,
 			FailoverEnabled:  true,
 		})
 	}
@@ -168,7 +168,7 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	// Rerank truncation follows runtime settings without a restart.
 	rerank.SetLimitsProvider(func() (int, int) {
 		s := st.Get()
-		return s.QueryMaxChars, s.DocMaxChars
+		return s.QueryMaxTokens, s.DocMaxTokens
 	})
 	// Embedding concurrency follows the compute mode: parallel on the GPU path,
 	// serial on the CPU fallback so parallel searches/jobs cannot stampede it.
@@ -631,18 +631,19 @@ func (e *Engine) collectionExistsOn(backend, name string) bool {
 	return err == nil && exists
 }
 
-// boundQuery caps a query to the runtime query_max_chars limit (runes) before
-// it is embedded or reranked. The head is kept, since callers put the actual
-// question first and paste long source material after it. 0 = unlimited.
+// boundQuery caps a query to the runtime query_max_tokens limit (jina-v2
+// tokens) before it is embedded or reranked. The head is kept, since callers
+// put the actual question first and paste long source material after it.
+// 0 = unlimited.
 func (e *Engine) boundQuery(query string) string {
-	limit := e.settings.Get().QueryMaxChars
+	limit := e.settings.Get().QueryMaxTokens
 	if limit <= 0 {
 		return query
 	}
-	if n := utf8.RuneCountInString(query); n > limit {
-		log.Printf("Query truncated before embedding: %d -> %d runes (query_max_chars)", n, limit)
+	if n := chunking.TokenLen(query); n > limit {
+		log.Printf("Query truncated before embedding: %d -> %d tokens (query_max_tokens)", n, limit)
 	}
-	return truncateRunes(query, limit)
+	return truncateTokens(query, limit)
 }
 
 // activeEmbedProvenance reports which provider/model/vector space NEW
@@ -1449,7 +1450,7 @@ func (e *Engine) EnsureCollection(name string) error {
 // Returns total count plus up to maxSamples leading chunks.
 func PreviewChunks(text string, size, overlap int, maxSamples int) (int, []string) {
 	if size <= 0 {
-		size = 500
+		size = 512
 	}
 	delimiters := []string{"\n\n", "\n", " ", ""}
 	effective := size - overlap

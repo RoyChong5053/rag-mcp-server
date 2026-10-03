@@ -45,7 +45,7 @@ func SplitRecursive(text string, maxChunkSize int, delimiters []string) []string
 	if maxChunkSize <= 0 {
 		return []string{text}
 	}
-	if runeLen(text) <= maxChunkSize {
+	if TokenLen(text) <= maxChunkSize {
 		return []string{text}
 	}
 
@@ -79,7 +79,7 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 
 	// Check if all parts fit within maxChunkSize (in runes, not bytes)
 	for _, part := range parts {
-		if runeLen(part) > maxChunkSize {
+		if TokenLen(part) > maxChunkSize {
 			return nil // this delimiter produces chunks that are too large
 		}
 	}
@@ -96,10 +96,10 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 		curLen = 0
 	}
 	for _, part := range parts {
-		pl := runeLen(part)
+		pl := TokenLen(part)
 		add := pl
 		if len(cur) > 0 {
-			add += runeLen(delim)
+			add += TokenLen(delim)
 		}
 		if len(cur) > 0 && curLen+add > maxChunkSize {
 			flush()
@@ -118,31 +118,13 @@ func trySplit(text string, maxChunkSize int, delim string) []string {
 
 // tryCharSplit splits text at every character boundary (rune-safe).
 func tryCharSplit(text string, maxChunkSize int) []string {
-	runes := []rune(text)
-	var chunks []string
-	for i := 0; i < len(runes); i += maxChunkSize {
-		end := i + maxChunkSize
-		if end > len(runes) {
-			end = len(runes)
-		}
-		chunks = append(chunks, string(runes[i:end]))
-	}
-	return chunks
+	return SplitByTokens(text, maxChunkSize)
 }
 
-// forceSplit splits text at maxChunkSize boundaries, rune-safe
-// (absolute last resort).
+// forceSplit splits text at maxChunkSize boundaries (absolute last resort).
+// maxChunkSize is now a token budget, so splitting is token-based.
 func forceSplit(text string, maxChunkSize int) []string {
-	runes := []rune(text)
-	var chunks []string
-	for i := 0; i < len(runes); i += maxChunkSize {
-		end := i + maxChunkSize
-		if end > len(runes) {
-			end = len(runes)
-		}
-		chunks = append(chunks, string(runes[i:end]))
-	}
-	return chunks
+	return SplitByTokens(text, maxChunkSize)
 }
 
 // OverlapChunks adds sentence-boundary overlap between adjacent chunks.
@@ -166,17 +148,16 @@ func OverlapChunks(chunks []string, overlapSize int) []string {
 		// Get overlap from previous chunk's end (rune-safe)
 		if i > 0 && halfOverlap > 0 {
 			prev := chunks[i-1]
-			if runeLen(prev) > halfOverlap {
-				prev = sliceRunes(prev, runeLen(prev)-halfOverlap, runeLen(prev))
-			}
+			prev = LastTokens(prev, halfOverlap)
 			prevOverlap = TrimToStartSentence(prev)
 		}
 
-		// Get overlap from next chunk's start (rune-safe)
+		// Get overlap from next chunk's start (token budget, rune-safe)
 		if i < len(chunks)-1 && halfOverlap > 0 {
 			next := chunks[i+1]
-			if runeLen(next) > halfOverlap {
-				next = sliceRunes(next, 0, halfOverlap)
+			parts := SplitByTokens(next, halfOverlap)
+			if len(parts) > 0 {
+				next = parts[0]
 			}
 			nextOverlap = TrimToEndSentence(next)
 		}

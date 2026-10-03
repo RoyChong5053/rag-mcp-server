@@ -12,7 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	"github.com/RoyChong5053/rag-mcp-server/chunking"
 )
 
 // rerankDownTTL is how long the rerank circuit breaker stays open after a
@@ -27,8 +28,8 @@ type RerankClient struct {
 	backupURL     string
 	model         string
 	apiKey        string
-	queryMaxChars int
-	docMaxChars   int
+	queryMaxTokens int
+	docMaxTokens   int
 	// limits, when set, supplies runtime truncation limits (query, doc) so
 	// WebUI edits take effect without a restart. It overrides the static values.
 	limits     func() (int, int)
@@ -46,14 +47,14 @@ type RerankClient struct {
 // Rerank is fail-open (failure degrades to vector order), so a tight budget
 // here only costs ranking quality, never availability. Channel fallback is
 // one-api's job; this client retries at most once.
-func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, docMaxChars int) *RerankClient {
+func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxTokens, docMaxTokens int) *RerankClient {
 	return &RerankClient{
 		baseURL:       baseURL,
 		backupURL:     backupURL,
 		model:         model,
 		apiKey:        apiKey,
-		queryMaxChars: queryMaxChars,
-		docMaxChars:   docMaxChars,
+		queryMaxTokens: queryMaxTokens,
+		docMaxTokens:   docMaxTokens,
 		httpClient: &http.Client{
 			Timeout: 45 * time.Second,
 		},
@@ -69,7 +70,7 @@ func (c *RerankClient) effectiveLimits() (int, int) {
 	if c.limits != nil {
 		return c.limits()
 	}
-	return c.queryMaxChars, c.docMaxChars
+	return c.queryMaxTokens, c.docMaxTokens
 }
 
 // RerankRequest represents the request to one-api's rerank endpoint
@@ -115,7 +116,7 @@ func (c *RerankClient) Rerank(ctx context.Context, query string, documents []str
 
 	// Truncate query
 	queryMax, docMax := c.effectiveLimits()
-	query = truncateRunes(query, queryMax)
+	query = truncateTokens(query, queryMax)
 
 	// Circuit breaker: a recent failure skips rerank entirely so a dead
 	// upstream never costs the full timeout on every search.
@@ -126,7 +127,7 @@ func (c *RerankClient) Rerank(ctx context.Context, query string, documents []str
 	// Truncate documents
 	boundedDocs := make([]string, len(documents))
 	for i, doc := range documents {
-		boundedDocs[i] = truncateRunes(doc, docMax)
+		boundedDocs[i] = truncateTokens(doc, docMax)
 	}
 
 	req := RerankRequest{
@@ -369,13 +370,17 @@ func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
 }
 
-// truncateRunes cuts s to at most max runes (not bytes), appending an ellipsis
-// when clipped. Bytes would split multi-byte CJK runes into invalid UTF-8.
-func truncateRunes(s string, max int) string {
-	if max <= 0 || utf8.RuneCountInString(s) <= max {
+// truncateTokens cuts s to at most max jina-v2 tokens, appending an ellipsis
+// when clipped. Byte-safe because TokenLen/SplitByTokens work on runes.
+func truncateTokens(s string, max int) string {
+	if max <= 0 || chunking.TokenLen(s) <= max {
 		return s
 	}
-	return string([]rune(s)[:max]) + "…"
+	parts := chunking.SplitByTokens(s, max)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0] + "…"
 }
 
 // sortResults sorts results by score descending

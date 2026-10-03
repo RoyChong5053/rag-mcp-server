@@ -26,7 +26,7 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 			"Omit collection_id to use the configured default collection; if qdrant is unreachable it automatically falls back to the vectra default, then the same-name vectra collection. " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
-			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
+			"Long queries are truncated to the server's query_max_tokens setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
 			"or a raw Qdrant filter for advanced clauses. " +
 			"If the search does not finish within wait_seconds (default 10s) it returns {status:pending, job_id}: poll it with job_status. Pass a larger wait_seconds to block instead (synchronous callers like TavernLab) or 0 to always get a job.",

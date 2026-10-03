@@ -38,13 +38,13 @@ type Settings struct {
 	// operator-overridable fallback when a per-call wait_seconds is absent. nil =
 	// unset → engine defaultSearchWaitSeconds. Negative values are treated as unset.
 	RerankRecallWaitSeconds *int `json:"rerank_recall_wait_seconds"`
-	// QueryMaxChars caps the query text (runes) before it is embedded and
+	// QueryMaxTokens caps the query text (tokens) before it is embedded and
 	// reranked; the head is kept (the actual question usually precedes pasted
 	// source material). 0 = unlimited.
-	QueryMaxChars int `json:"query_max_chars"`
-	// DocMaxChars caps each document handed to the reranker (runes).
+	QueryMaxTokens int `json:"query_max_tokens"`
+	// DocMaxTokens caps each document handed to the reranker (tokens).
 	// 0 = unlimited.
-	DocMaxChars int `json:"doc_max_chars"`
+	DocMaxTokens int `json:"doc_max_tokens"`
 	// EmbedBatchSize caps texts per embedding POST from index jobs when the
 	// GPU path is active. 0 = auto (GPU 32, CPU fallback capped to 4). A
 	// positive value overrides the GPU size; the CPU fallback still caps it.
@@ -88,8 +88,8 @@ type Patch struct {
 	DefaultThreshold        *float64 `json:"default_threshold"`
 	RerankEnabled           *bool    `json:"rerank_enabled"`
 	RerankRecall            *int     `json:"rerank_recall"`
-	QueryMaxChars           *int     `json:"query_max_chars"`
-	DocMaxChars             *int     `json:"doc_max_chars"`
+	QueryMaxTokens           *int     `json:"query_max_tokens"`
+	DocMaxTokens             *int     `json:"doc_max_tokens"`
 	RerankRecallWaitSeconds *int     `json:"rerank_recall_wait_seconds"`
 	EmbedBatchSize          *int     `json:"embed_batch_size"`
 	EmbedProviders          *[]EmbedProvider `json:"embed_providers"`
@@ -172,11 +172,11 @@ func (s *Store) Update(p Patch) error {
 	if p.RerankRecall != nil {
 		s.data.RerankRecall = *p.RerankRecall
 	}
-	if p.QueryMaxChars != nil {
-		s.data.QueryMaxChars = *p.QueryMaxChars
+	if p.QueryMaxTokens != nil {
+		s.data.QueryMaxTokens = *p.QueryMaxTokens
 	}
-	if p.DocMaxChars != nil {
-		s.data.DocMaxChars = *p.DocMaxChars
+	if p.DocMaxTokens != nil {
+		s.data.DocMaxTokens = *p.DocMaxTokens
 	}
 	if p.EmbedBatchSize != nil {
 		s.data.EmbedBatchSize = *p.EmbedBatchSize
