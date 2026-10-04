@@ -90,19 +90,15 @@ type OneAPIConfig struct {
 type ChunkingConfig struct {
 	ChunkSize      int `yaml:"chunk_size"`
 	OverlapPercent int `yaml:"overlap_percent"`
-	// TokenizerPath points at a HuggingFace tokenizer.json used to count
-	// chunk/query/doc sizes in tokens. Empty = built-in search paths
-	// (tokenizers/jina-v2.tokenizer.json beside the binary).
-	TokenizerPath string `yaml:"tokenizer_path"`
 }
 
 type RerankConfig struct {
 	Enabled bool `yaml:"enabled"`
 	Recall  int  `yaml:"recall"`
-	// QueryMaxTokens bounds the query (tokens) before embedding and reranking;
-	// the head is kept. 0 = unlimited. DocMaxTokens bounds rerank documents.
-	QueryMaxTokens int `yaml:"query_max_tokens"`
-	DocMaxTokens   int `yaml:"doc_max_tokens"`
+	// QueryMaxChars bounds the query (runes) before embedding and reranking;
+	// the head is kept. 0 = unlimited. DocMaxChars bounds rerank documents.
+	QueryMaxChars int `yaml:"query_max_chars"`
+	DocMaxChars   int `yaml:"doc_max_chars"`
 	// WaitSeconds seeds the WebUI '死等' wait budget (embed+reranker deadline) in
 	// seconds; 0 = unset → engine defaultSearchWaitSeconds fallback. Overridden
 	// at runtime by settings.json and per-call args.wait_seconds.
@@ -143,14 +139,14 @@ func DefaultConfig() *Config {
 			VectorDistance: "Cosine",
 		},
 		Chunking: ChunkingConfig{
-			ChunkSize:      512,
+			ChunkSize:      500,
 			OverlapPercent: 30,
 		},
 		Rerank: RerankConfig{
 			Enabled:       true,
 			Recall:        30,
-			QueryMaxTokens: 448,
-			DocMaxTokens:   560,
+			QueryMaxChars: 500,
+			DocMaxChars:   1000,
 			WaitSeconds:   0,
 		},
 	}

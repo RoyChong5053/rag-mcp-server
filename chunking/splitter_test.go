@@ -36,35 +36,35 @@ func TestSplitRecursive(t *testing.T) {
 		{
 			name:    "split on double newline",
 			text:    "First paragraph\n\nSecond paragraph",
-			maxSize: 2,
+			maxSize: 20,
 			delims:  []string{"\n\n", "\n", " ", ""},
 			wantLen: 2,
 		},
 		{
 			name:    "split on single newline",
 			text:    "Line one\nLine two\nLine three",
-			maxSize: 2,
+			maxSize: 15,
 			delims:  []string{"\n\n", "\n", " ", ""},
 			wantLen: 3,
 		},
 		{
 			name:    "split on space",
 			text:    "word1 word2 word3 word4",
-			maxSize: 2,
+			maxSize: 10,
 			delims:  []string{"\n\n", "\n", " ", ""},
 			wantLen: 4,
 		},
 		{
 			name:    "force split on char",
 			text:    "abcdefghijklmn",
-			maxSize: 3,
+			maxSize: 5,
 			delims:  []string{"\n\n", "\n", " ", ""},
 			wantLen: 3,
 		},
 		{
 			name:    "with forced delimiter",
 			text:    "Section1--Section2--Section3",
-			maxSize: 3,
+			maxSize: 15,
 			delims:  []string{"--", "\n\n", "\n", " ", ""},
 			wantLen: 3,
 		},
@@ -88,24 +88,24 @@ func TestSplitRecursive(t *testing.T) {
 // big delimiters degenerate (e.g. 19k word-chunks from 117KB).
 func TestSplitRecursiveMerges(t *testing.T) {
 	// words pack: "aa bb cc" (8) fits 10, " dd" would exceed
-	chunks := SplitRecursive("aa bb cc dd", 4, []string{" ", ""})
+	chunks := SplitRecursive("aa bb cc dd", 10, []string{" ", ""})
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 packed chunks, got %d: %q", len(chunks), chunks)
 	}
-	if chunks[0] != "aa bb" || chunks[1] != "cc dd" {
+	if chunks[0] != "aa bb cc" || chunks[1] != "dd" {
 		t.Fatalf("unexpected pack: %q", chunks)
 	}
 
-	// lines pack: 5x50-token lines at max 110 tokens -> 2+2+1
-	line := strings.Repeat("x ", 50)
+	// lines pack: 5x100-char lines at max 250 -> 2+2+1
+	line := strings.Repeat("x", 100)
 	text := strings.Join([]string{line, line, line, line, line}, "\n")
-	chunks = SplitRecursive(text, 110, []string{"\n\n", "\n", " ", ""})
+	chunks = SplitRecursive(text, 250, []string{"\n\n", "\n", " ", ""})
 	if len(chunks) != 3 {
 		t.Fatalf("expected 3 packed chunks, got %d", len(chunks))
 	}
 	for i, c := range chunks {
-		if n := TokenLen(c); n > 110 {
-			t.Fatalf("chunk[%d] exceeds max: %d", i, n)
+		if runeLen := utf8.RuneCountInString(c); runeLen > 250 {
+			t.Fatalf("chunk[%d] exceeds max: %d", i, runeLen)
 		}
 		if c == "" {
 			t.Fatalf("chunk[%d] is empty", i)
@@ -114,9 +114,9 @@ func TestSplitRecursiveMerges(t *testing.T) {
 
 	// oversized single piece still falls through to smaller delimiter
 	// ("bbbbbbbbbb" exceeds 5, so "\n" is rejected; char split wins)
-	chunks = SplitRecursive("aaa\n"+strings.Repeat("x ", 6), 5, []string{"\n", " ", ""})
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d: %q", len(chunks), chunks)
+	chunks = SplitRecursive("aaa\nbbbbbbbbbb", 5, []string{"\n", " ", ""})
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %q", len(chunks), chunks)
 	}
 }
 

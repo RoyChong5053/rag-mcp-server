@@ -11,7 +11,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/RoyChong5053/rag-mcp-server/chunking"
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
@@ -134,8 +133,8 @@ func main() {
 		DefaultThreshold: 0.25,
 		RerankEnabled:    cfg.Rerank.Enabled,
 		RerankRecall:     cfg.Rerank.Recall,
-		QueryMaxTokens:    cfg.Rerank.QueryMaxTokens,
-		DocMaxTokens:      cfg.Rerank.DocMaxTokens,
+		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
+		DocMaxChars:      cfg.Rerank.DocMaxChars,
 		EmbedBatchSize:   0,
 		FailoverEnabled:  true,
 		BM25Enabled:      true,
@@ -166,8 +165,6 @@ func main() {
 		memoryDir = filepath.Join(cfgDir, memoryDir)
 	}
 
-	chunking.TokenizerPath = cfg.Chunking.TokenizerPath
-
 	// Create engine
 	engineConfig := &engine.EngineConfig{
 		QdrantHost:      cfg.Qdrant.Host,
@@ -188,8 +185,8 @@ func main() {
 		OverlapPercent:  cfg.Chunking.OverlapPercent,
 		RerankEnabled:   cfg.Rerank.Enabled,
 		RerankRecall:    cfg.Rerank.Recall,
-		QueryMaxTokens:   cfg.Rerank.QueryMaxTokens,
-		DocMaxTokens:     cfg.Rerank.DocMaxTokens,
+		QueryMaxChars:   cfg.Rerank.QueryMaxChars,
+		DocMaxChars:     cfg.Rerank.DocMaxChars,
 		RegistryPath:    cfg.RegistryPath,
 		HistoryPath:    filepath.Join(cfgDir, "logs", "index_history.jsonl"),
 	}
