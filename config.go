@@ -88,8 +88,11 @@ type OneAPIConfig struct {
 }
 
 type ChunkingConfig struct {
-	ChunkSize      int `yaml:"chunk_size"`
-	OverlapPercent int `yaml:"overlap_percent"`
+	ChunkSize      int    `yaml:"chunk_size"`
+	OverlapPercent int    `yaml:"overlap_percent"`
+	// Strategy selects the chunking algorithm: window (default, deterministic
+	// sliding window), adaptive, paragraph, section, sentence, dialogue.
+	Strategy string `yaml:"strategy"`
 }
 
 type RerankConfig struct {
@@ -141,6 +144,7 @@ func DefaultConfig() *Config {
 		Chunking: ChunkingConfig{
 			ChunkSize:      500,
 			OverlapPercent: 30,
+			Strategy:       "window",
 		},
 		Rerank: RerankConfig{
 			Enabled:       true,

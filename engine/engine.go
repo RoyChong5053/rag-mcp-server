@@ -60,6 +60,7 @@ type EngineConfig struct {
 	APIKey          string
 	ChunkSize       int
 	OverlapPercent  int
+	ChunkStrategy   string
 	RerankEnabled   bool
 	RerankRecall    int
 	QueryMaxChars   int
@@ -1136,14 +1137,16 @@ func (e *Engine) applyRerank(query string, results []SearchResult, topK int, wai
 // Zero values fall back to global config. Delimiters are intentionally
 // fixed (parity with the ST toolchain) and not exposed per job.
 type ChunkOptions struct {
-	Size           int `json:"size"`
-	OverlapPercent int `json:"overlap_percent"`
+	Size           int    `json:"size"`
+	OverlapPercent int    `json:"overlap_percent"`
+	Strategy       string `json:"strategy"`
 }
 
 // ResolvedChunkOptions is the effective chunking used by a job.
 type ResolvedChunkOptions struct {
-	Size    int
-	Overlap int
+	Size     int
+	Overlap  int
+	Strategy string
 }
 
 // ProgressFunc reports upsert progress: doneChunks of totalChunks.
@@ -1155,6 +1158,7 @@ type ProgressFunc func(doneChunks, totalChunks int)
 func (e *Engine) ResolveChunkOptions(opts *ChunkOptions) ResolvedChunkOptions {
 	size := e.config.ChunkSize
 	overlapPct := e.config.OverlapPercent
+	strategy := e.config.ChunkStrategy
 	if opts != nil {
 		if opts.Size > 0 {
 			size = opts.Size
@@ -1162,8 +1166,14 @@ func (e *Engine) ResolveChunkOptions(opts *ChunkOptions) ResolvedChunkOptions {
 		if opts.OverlapPercent > 0 && opts.OverlapPercent < 100 {
 			overlapPct = opts.OverlapPercent
 		}
+		if opts.Strategy != "" && chunking.IsValidStrategy(opts.Strategy) {
+			strategy = opts.Strategy
+		}
 	}
-	return ResolvedChunkOptions{Size: size, Overlap: size * overlapPct / 100}
+	if strategy == "" {
+		strategy = chunking.StrategyWindow
+	}
+	return ResolvedChunkOptions{Size: size, Overlap: size * overlapPct / 100, Strategy: strategy}
 }
 
 // Provenance records how a collection's vectors were computed.
@@ -1177,6 +1187,7 @@ type Provenance struct {
 	EmbedProvider string
 	VectorDim    int
 	VectorDistance string
+	ChunkStrategy string
 	Chunks       int
 }
 
@@ -1234,7 +1245,7 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 		return nil, err
 	}
 	prov.Chunks = res.ChunksIndexed
-	prov.ChunkSize, prov.ChunkOverlap = used.Size, used.Overlap
+	prov.ChunkSize, prov.ChunkOverlap, prov.ChunkStrategy = used.Size, used.Overlap, used.Strategy
 	e.recordIndex(collectionID, prov, backend)
 	return res, nil
 }
@@ -1305,6 +1316,7 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 		SourceFile:   "direct_text",
 		ChunkSize:    used.Size,
 		ChunkOverlap: used.Overlap,
+		ChunkStrategy: used.Strategy,
 		EmbedModel:   embedModel,
 		EmbedProvider: embedProvider,
 		VectorDim:   embedDim,
@@ -1447,19 +1459,11 @@ func (e *Engine) EnsureCollection(name string) error {
 
 // PreviewChunks splits text without embedding: zero-token cost tuning.
 // Returns total count plus up to maxSamples leading chunks.
-func PreviewChunks(text string, size, overlap int, maxSamples int) (int, []string) {
+func PreviewChunks(text string, size, overlap int, strategy string, maxSamples int) (int, []string) {
 	if size <= 0 {
 		size = 500
 	}
-	delimiters := []string{"\n\n", "\n", " ", ""}
-	effective := size - overlap
-	if effective <= 0 {
-		effective = size
-	}
-	chunks := chunking.SplitRecursive(text, effective, delimiters)
-	if overlap > 0 {
-		chunks = chunking.OverlapChunks(chunks, overlap)
-	}
+	chunks := chunking.Split(text, chunking.Options{Strategy: strategy, Size: size, Overlap: overlap})
 	samples := chunks
 	if maxSamples > 0 && len(chunks) > maxSamples {
 		samples = chunks[:maxSamples]
@@ -1494,7 +1498,7 @@ func (e *Engine) recordIndex(collectionID string, prov Provenance, backend strin
 			en.Backend = backend
 		}
 		en.ChunkCount = prov.Chunks
-		en.Chunk = registry.ChunkConfig{Size: prov.ChunkSize, Overlap: prov.ChunkOverlap}
+		en.Chunk = registry.ChunkConfig{Size: prov.ChunkSize, Overlap: prov.ChunkOverlap, Strategy: prov.ChunkStrategy}
 	})
 	if err != nil {
 		log.Printf("Registry update failed for '%s': %v", collectionID, err)
@@ -1545,17 +1549,8 @@ func (e *Engine) indexTextInternal(text string, collectionID string, metadata ma
 
 func (e *Engine) indexTextInternalOn(backend string, text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
 	// Chunk the text (per-job options fall back to global config)
-	delimiters := []string{"\n\n", "\n", " ", ""}
 	used := e.ResolveChunkOptions(opts)
-	effectiveChunkSize := used.Size - used.Overlap
-	if effectiveChunkSize <= 0 {
-		effectiveChunkSize = used.Size
-	}
-
-	chunks := chunking.SplitRecursive(text, effectiveChunkSize, delimiters)
-	if used.Overlap > 0 {
-		chunks = chunking.OverlapChunks(chunks, used.Overlap)
-	}
+	chunks := chunking.Split(text, chunking.Options{Strategy: used.Strategy, Size: used.Size, Overlap: used.Overlap})
 
 	// Validate chunks
 	problems := chunking.ValidateChunks(chunks, sourceName)
@@ -1698,6 +1693,7 @@ type CollectionDetail struct {
 	UpdatedAt    string   `json:"updated_at,omitempty"`
 	ChunkSize    int      `json:"chunk_size,omitempty"`
 	ChunkOverlap int      `json:"chunk_overlap,omitempty"`
+	ChunkStrategy string   `json:"chunk_strategy,omitempty"`
 }
 
 // DescribeCollections returns details for one collection, or all collections
@@ -1743,6 +1739,7 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		d.UpdatedAt = en.UpdatedAt
 		d.ChunkSize = en.Chunk.Size
 		d.ChunkOverlap = en.Chunk.Overlap
+		d.ChunkStrategy = en.Chunk.Strategy
 		if en.Backend != "" {
 			d.Backend = en.Backend
 		}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RoyChong5053/rag-mcp-server/chunking"
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
@@ -224,6 +225,7 @@ type indexBody struct {
 	Backend        string `json:"backend"` // "" (default) | qdrant | vectra
 	ChunkSize      int    `json:"chunk_size"`
 	OverlapPercent int    `json:"overlap_percent"`
+	Strategy       string `json:"strategy"`
 	Mode           string `json:"mode"` // append (default) | rebuild
 }
 
@@ -282,12 +284,16 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("chunk_size 0-20000 (0=global), overlap_percent 0-99"))
 		return
 	}
+	if body.Strategy != "" && !chunking.IsValidStrategy(body.Strategy) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown strategy %q (valid: %s)", body.Strategy, strings.Join(chunking.StrategyIDs(), ", ")))
+		return
+	}
 	rebuild := body.Mode == "rebuild"
 	if body.Mode != "" && body.Mode != "append" && body.Mode != "rebuild" {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("mode must be append or rebuild"))
 		return
 	}
-	opts := &engine.ChunkOptions{Size: body.ChunkSize, OverlapPercent: body.OverlapPercent}
+	opts := &engine.ChunkOptions{Size: body.ChunkSize, OverlapPercent: body.OverlapPercent, Strategy: body.Strategy}
 	job := h.jobs.SubmitIndex(abs, body.Collection, backend, opts, rebuild)
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -318,6 +324,7 @@ func (h *Handler) handlePreview(w http.ResponseWriter, r *http.Request) {
 		Path           string `json:"path"`
 		ChunkSize      int    `json:"chunk_size"`
 		OverlapPercent int    `json:"overlap_percent"`
+		Strategy       string `json:"strategy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
@@ -335,13 +342,14 @@ func (h *Handler) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	size := body.ChunkSize
 	overlapPct := body.OverlapPercent
-	resolved := h.eng.ResolveChunkOptions(&engine.ChunkOptions{Size: size, OverlapPercent: overlapPct})
-	count, samples := engine.PreviewChunks(string(data), resolved.Size, resolved.Overlap, 5)
+	resolved := h.eng.ResolveChunkOptions(&engine.ChunkOptions{Size: size, OverlapPercent: overlapPct, Strategy: body.Strategy})
+	count, samples := engine.PreviewChunks(string(data), resolved.Size, resolved.Overlap, resolved.Strategy, 5)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"chunks":  count,
-		"samples": samples,
-		"size":    resolved.Size,
-		"overlap": resolved.Overlap,
+		"chunks":   count,
+		"samples":  samples,
+		"size":     resolved.Size,
+		"overlap":  resolved.Overlap,
+		"strategy": resolved.Strategy,
 	})
 }
 

@@ -246,7 +246,16 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <datalist id="col-list"></datalist>
     <span>database <select id="ip-backend" title="where these vectors are stored; fixed per collection once written"><option value="">(server default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></span>
     <span>chunk size <input type="number" id="ip-size" value="500" min="0" max="20000" title="0 = global default"></span>
-    <span>overlap % <input type="number" id="ip-overlap" value="30" min="0" max="99" title="0 = global default"></span>
+    <span>overlap % <input type="number" id="ip-overlap" value="30" min="0" max="99" title="0 = global default; only the window strategy uses it"></span>
+    <span>strategy <select id="ip-strategy" title="chunking algorithm; empty = server default (window)">
+      <option value="">(server default)</option>
+      <option value="window">window — fixed sliding window</option>
+      <option value="adaptive">adaptive — natural boundaries</option>
+      <option value="paragraph">paragraph</option>
+      <option value="section">section — markdown headers</option>
+      <option value="sentence">sentence</option>
+      <option value="dialogue">dialogue — keep quotes intact</option>
+    </select></span>
     <span>mode <select id="ip-mode"><option value="append">append</option><option value="rebuild">rebuild (purge first)</option></select></span>
   </div>
   <div id="ip-warn" class="warn"></div>
@@ -497,7 +506,7 @@ async function refreshCollections() {
       ? '<span class="badge b-orphan">orphan</span>'
       : (c.enabled ? '<span class="badge b-on">enabled</span>' : '<span class="badge b-off">disabled</span>');
     const prov = c.exists
-      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + ' · ' + esc(c.embed_model || '?') + (c.embed_provider ? ' @' + esc(c.embed_provider) : '') + (c.vector_dim ? ' ' + c.vector_dim + 'd' : '') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
+      ? 'chunk ' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + (c.chunk_strategy ? '/' + esc(c.chunk_strategy) : '') + ' · ' + esc(c.embed_model || '?') + (c.embed_provider ? ' @' + esc(c.embed_provider) : '') + (c.vector_dim ? ' ' + c.vector_dim + 'd' : '') + (c.source_sha256 ? ' · <small>' + esc(c.source_sha256.slice(0, 12)) + '</small>' : '')
       : '<span class="dim">no vectors</span>';
     tr.innerHTML =
       '<td data-label="ID"><span class="col-id">#' + (c.id != null ? c.id : '—') + '</span></td>' +
@@ -535,7 +544,7 @@ async function select(name) {
   document.getElementById('d-name').textContent = c.name;
   document.getElementById('d-flags').innerHTML =
     (c.exists ? '<b>' + c.chunk_count + '</b> chunks' : '<b>ORPHAN</b> (no vectors)') +
-    ' | chunk <b>' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + '</b>' +
+    ' | chunk <b>' + (c.chunk_size || '?') + '/' + (c.chunk_overlap || '?') + (c.chunk_strategy ? '/' + esc(c.chunk_strategy) : '') + '</b>' +
     ' | model <b>' + esc(c.embed_model || '?') + '</b>' + (c.embed_provider ? ' @' + esc(c.embed_provider) : '') + (c.vector_dim ? ' ' + c.vector_dim + 'd' : '') +
     ' | sha <b>' + esc((c.source_sha256 || '?').slice(0, 16)) + '</b>' +
     ' | created ' + esc(c.created_at || '?');
@@ -809,7 +818,7 @@ function updateWarn() {
   if (backend && known && known.backend && backend !== known.backend) {
     w.textContent = '⛔ ' + col + ' is already stored in ' + known.backend + '. Vectorizing into ' + backend + ' will be rejected — pick ' + known.backend + ', or delete/rename the collection.';
   } else if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
-    w.textContent = '⚠ ' + col + ' already has ' + known.chunk_count + ' chunks (' + known.chunk_size + '/' + known.chunk_overlap + '). Appending with different settings creates mixed chunking — use rebuild instead.';
+    w.textContent = '⚠ ' + col + ' already has ' + known.chunk_count + ' chunks (' + known.chunk_size + '/' + known.chunk_overlap + (known.chunk_strategy ? '/' + known.chunk_strategy : '') + '). Appending with different settings creates mixed chunking — use rebuild instead.';
   } else if (known && known.exists && mode === 'rebuild') {
     w.textContent = '⚠ rebuild purges all ' + known.chunk_count + ' existing chunks first, then re-indexes.';
   } else if (!known && backend) {
@@ -818,7 +827,7 @@ function updateWarn() {
     w.textContent = 'new collection "' + (col || '?') + '" will be created.';
   } else w.textContent = '';
 }
-['ip-col', 'ip-mode', 'ip-size', 'ip-backend'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
+['ip-col', 'ip-mode', 'ip-size', 'ip-backend', 'ip-strategy'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
 async function preview() {
   const box = document.getElementById('preview-out');
   box.innerHTML = 'chunking…';
@@ -826,9 +835,10 @@ async function preview() {
     const r = await api('POST', '/api/preview', {
       path: ipFile,
       chunk_size: +document.getElementById('ip-size').value || 0,
-      overlap_percent: +document.getElementById('ip-overlap').value || 0
+      overlap_percent: +document.getElementById('ip-overlap').value || 0,
+      strategy: document.getElementById('ip-strategy').value
     }, false, 60000);
-    box.innerHTML = '<b>' + r.chunks + ' chunks</b> (size ' + r.size + ' / overlap ' + r.overlap + ', zero token spent)';
+    box.innerHTML = '<b>' + r.chunks + ' chunks</b> (strategy ' + (r.strategy || '?') + ', size ' + r.size + ' / overlap ' + r.overlap + ', zero token spent)';
     for (const s of r.samples) {
       const d = document.createElement('div');
       d.textContent = s.slice(0, 300);
@@ -849,6 +859,7 @@ async function submitIndex() {
       backend: document.getElementById('ip-backend').value,
       chunk_size: +document.getElementById('ip-size').value || 0,
       overlap_percent: +document.getElementById('ip-overlap').value || 0,
+      strategy: document.getElementById('ip-strategy').value,
       mode: document.getElementById('ip-mode').value
     });
     loadJobs();

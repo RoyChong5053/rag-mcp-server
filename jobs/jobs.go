@@ -57,6 +57,7 @@ type Job struct {
 	File       string `json:"file,omitempty"`
 	ChunkSize  int    `json:"chunk_size,omitempty"`
 	Overlap    int    `json:"overlap,omitempty"`
+	Strategy   string `json:"strategy,omitempty"`
 	Rebuild    bool   `json:"rebuild,omitempty"`
 
 	CreatedAt  string `json:"created_at"`
@@ -173,8 +174,10 @@ func (m *Manager) Submit(kind string, run func() (any, error)) *Job {
 // to force where the vectors land.
 func (m *Manager) SubmitIndex(absPath, collection, backend string, opts *engine.ChunkOptions, rebuild bool) *Job {
 	size, overlap := 0, 0
+	var strategy string
 	if opts != nil {
 		size, overlap = opts.Size, opts.OverlapPercent
+		strategy = opts.Strategy
 	}
 	job := m.newJob(KindIndex)
 	m.update(job.ID, func(j *Job) {
@@ -183,6 +186,7 @@ func (m *Manager) SubmitIndex(absPath, collection, backend string, opts *engine.
 		j.File = absPath
 		j.ChunkSize = size
 		j.Overlap = overlap
+		j.Strategy = strategy
 		j.Rebuild = rebuild
 	})
 	go m.runIndex(job, absPath, collection, backend, opts, rebuild)

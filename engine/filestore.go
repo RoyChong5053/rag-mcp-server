@@ -63,6 +63,7 @@ type vectraSourceMeta struct {
 	IndexedAt  string `json:"indexed_at,omitempty"`
 	ChunkSize  int    `json:"chunk_size,omitempty"`
 	Overlap    int    `json:"overlap,omitempty"`
+	Strategy   string `json:"strategy,omitempty"`
 	EmbedModel string `json:"embed_model,omitempty"`
 }
 

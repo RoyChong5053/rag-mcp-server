@@ -183,6 +183,7 @@ func main() {
 		APIKey:          cfg.OneAPI.APIKey,
 		ChunkSize:       cfg.Chunking.ChunkSize,
 		OverlapPercent:  cfg.Chunking.OverlapPercent,
+		ChunkStrategy:   cfg.Chunking.Strategy,
 		RerankEnabled:   cfg.Rerank.Enabled,
 		RerankRecall:    cfg.Rerank.Recall,
 		QueryMaxChars:   cfg.Rerank.QueryMaxChars,

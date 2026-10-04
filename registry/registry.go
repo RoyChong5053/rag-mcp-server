@@ -11,8 +11,9 @@ import (
 
 // ChunkConfig snapshots the chunking used for a collection.
 type ChunkConfig struct {
-	Size    int `json:"size"`
-	Overlap int `json:"overlap"`
+	Size     int    `json:"size"`
+	Overlap  int    `json:"overlap"`
+	Strategy string `json:"strategy,omitempty"`
 }
 
 // Entry is the management metadata for one Qdrant collection.
