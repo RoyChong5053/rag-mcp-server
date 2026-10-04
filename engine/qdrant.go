@@ -136,6 +136,30 @@ func (c *QdrantClient) GetCollectionInfo(name string) (*StoreCollectionInfo, err
 	}, nil
 }
 
+// GetVectorSize returns the configured vector dimension of an existing
+// collection. Qdrant fixes this at creation time and rejects any other size.
+func (c *QdrantClient) GetVectorSize(name string) (int, error) {
+	resp, err := c.get(fmt.Sprintf("/collections/%s", name))
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		Result struct {
+			Config struct {
+				Params struct {
+					Vectors struct {
+						Size int `json:"size"`
+					} `json:"vectors"`
+				} `json:"params"`
+			} `json:"config"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return 0, err
+	}
+	return result.Result.Config.Params.Vectors.Size, nil
+}
+
 // ListCollections returns all collections
 func (c *QdrantClient) ListCollections() ([]StoreCollectionInfo, error) {
 	resp, err := c.get("/collections")

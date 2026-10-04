@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -29,12 +30,19 @@ type Engine struct {
 	registry       *registry.Registry
 	settings       *settings.Store
 
+	// observedEmbedDim records the vector length the active embedding model
+	// actually returned on the last successful embed. It is the source of truth
+	// for collection creation and provenance so a provider/model switch whose
+	// dimension differs from the declared config self-heals instead of
+	// hard-failing inside Qdrant.
+	observedEmbedDim atomic.Int32
+
 	// embedMu/embedCache lazily build one EmbeddingClient per configured
 	// provider so switching active_embed_provider does not rebuild the world.
 	embedMu    sync.Mutex
 	embedCache map[string]*EmbeddingClient
-	docsDir        string
-	memoryDir      string
+	docsDir    string
+	memoryDir  string
 
 	// healthMu guards downUntil. A backend marked down is skipped until the
 	// deadline so a dead qdrant doesn't cost a full timeout on every call.
@@ -69,7 +77,7 @@ type EngineConfig struct {
 	// HistoryPath is the append-only JSONL audit of every index/reindex/
 	// upload/delete so a raw file stays traceable to its collections even
 	// after the collection itself is deleted. Empty disables history.
-	HistoryPath     string
+	HistoryPath string
 }
 
 // SearchResult represents a search result
@@ -646,30 +654,47 @@ func (e *Engine) boundQuery(query string) string {
 	return truncateRunes(query, limit)
 }
 
+// noteEmbedDim records the vector length the active model returned so later
+// collection creation and provenance use the real shape, not the declared one.
+func (e *Engine) noteEmbedDim(n int) {
+	if n > 0 {
+		e.observedEmbedDim.Store(int32(n))
+	}
+}
+
 // activeEmbedProvenance reports which provider/model/vector space NEW
 // embeddings (and their registry provenance) should be stamped with. An
 // empty active_embed_provider falls back to the one-api config values.
+// The dimension actually returned by the model wins over the declared config
+// so a plain model swap behind the same alias self-heals.
 func (e *Engine) activeEmbedProvenance() (provider, model string, dim int, distance string) {
+	obs := int(e.observedEmbedDim.Load())
 	st := e.settings.Get()
-	if st.ActiveEmbedProvider == "" {
-		return e.config.EmbedProvider, e.config.EmbedModel, e.config.VectorDim, e.config.VectorDistance
+	if st.ActiveEmbedProvider != "" {
+		for i := range st.EmbedProviders {
+			p := st.EmbedProviders[i]
+			if p.ID != st.ActiveEmbedProvider {
+				continue
+			}
+			dim = p.Dim
+			if dim == 0 {
+				dim = e.config.VectorDim
+			}
+			if obs > 0 {
+				dim = obs
+			}
+			dist := p.Distance
+			if dist == "" {
+				dist = e.config.VectorDistance
+			}
+			return p.ID, p.Model, dim, dist
+		}
 	}
-	for i := range st.EmbedProviders {
-		p := st.EmbedProviders[i]
-		if p.ID != st.ActiveEmbedProvider {
-			continue
-		}
-		dim := p.Dim
-		if dim == 0 {
-			dim = e.config.VectorDim
-		}
-		dist := p.Distance
-		if dist == "" {
-			dist = e.config.VectorDistance
-		}
-		return p.ID, p.Model, dim, dist
+	dim = e.config.VectorDim
+	if obs > 0 {
+		dim = obs
 	}
-	return e.config.EmbedProvider, e.config.EmbedModel, e.config.VectorDim, e.config.VectorDistance
+	return e.config.EmbedProvider, e.config.EmbedModel, dim, e.config.VectorDistance
 }
 
 // ActiveEmbedProvenance exposes the current embedding labeling for audit
@@ -720,6 +745,10 @@ func (e *Engine) embedQuery(query string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
+	if len(embeddings) == 0 {
+		return nil, fmt.Errorf("embedding model returned no vectors")
+	}
+	e.noteEmbedDim(len(embeddings[0]))
 	return embeddings[0], nil
 }
 
@@ -771,6 +800,11 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 	store, ok := e.stores[backend]
 	if !ok {
 		return nil, fmt.Errorf("unknown backend %q", backend)
+	}
+	if qc, ok := store.(*QdrantClient); ok && len(queryVector) > 0 {
+		if have, derr := qc.GetVectorSize(name); derr == nil && have > 0 && have != len(queryVector) {
+			return nil, fmt.Errorf("collection '%s' stores %d-d vectors but the active embedding model returns %d-d: rebuild the collection or switch models", name, have, len(queryVector))
+		}
 	}
 	recallCount := topK
 	if rerankOn {
@@ -1179,16 +1213,16 @@ func (e *Engine) ResolveChunkOptions(opts *ChunkOptions) ResolvedChunkOptions {
 // Provenance records how a collection's vectors were computed.
 // Stored in the registry: "how it was built", never query policy.
 type Provenance struct {
-	SourceFile   string
-	SourceSHA256 string
-	ChunkSize    int
-	ChunkOverlap int
-	EmbedModel   string
-	EmbedProvider string
-	VectorDim    int
+	SourceFile     string
+	SourceSHA256   string
+	ChunkSize      int
+	ChunkOverlap   int
+	EmbedModel     string
+	EmbedProvider  string
+	VectorDim      int
 	VectorDistance string
-	ChunkStrategy string
-	Chunks       int
+	ChunkStrategy  string
+	Chunks         int
 }
 
 // IndexDocument indexes a file into a Qdrant collection
@@ -1232,11 +1266,11 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 	sum := sha256.Sum256(data)
 	embedProvider, embedModel, embedDim, embedDistance := e.activeEmbedProvenance()
 	prov := Provenance{
-		SourceFile:   path,
-		SourceSHA256: hex.EncodeToString(sum[:]),
-		EmbedModel:   embedModel,
-		EmbedProvider: embedProvider,
-		VectorDim:   embedDim,
+		SourceFile:     path,
+		SourceSHA256:   hex.EncodeToString(sum[:]),
+		EmbedModel:     embedModel,
+		EmbedProvider:  embedProvider,
+		VectorDim:      embedDim,
 		VectorDistance: embedDistance,
 	}
 
@@ -1313,15 +1347,15 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 	}
 	embedProvider, embedModel, embedDim, embedDistance := e.activeEmbedProvenance()
 	e.recordIndex(collectionID, Provenance{
-		SourceFile:   "direct_text",
-		ChunkSize:    used.Size,
-		ChunkOverlap: used.Overlap,
-		ChunkStrategy: used.Strategy,
-		EmbedModel:   embedModel,
-		EmbedProvider: embedProvider,
-		VectorDim:   embedDim,
+		SourceFile:     "direct_text",
+		ChunkSize:      used.Size,
+		ChunkOverlap:   used.Overlap,
+		ChunkStrategy:  used.Strategy,
+		EmbedModel:     embedModel,
+		EmbedProvider:  embedProvider,
+		VectorDim:      embedDim,
 		VectorDistance: embedDistance,
-		Chunks:       res.ChunksIndexed,
+		Chunks:         res.ChunksIndexed,
 	}, e.backendOf(collectionID))
 	return res, nil
 }
@@ -1572,6 +1606,11 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to embed chunks: %w", err)
 	}
+	actualDim := 0
+	if len(embeddings) > 0 && len(embeddings[0]) > 0 {
+		actualDim = len(embeddings[0])
+		e.noteEmbedDim(actualDim)
+	}
 
 	// Create Qdrant points with deterministic uint IDs:
 	// high 32 bits = collection hash, low 32 bits = chunk hash.
@@ -1615,6 +1654,11 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	if exists {
 		if err := e.checkProvenanceConflict(collectionID); err != nil {
 			return nil, used, err
+		}
+		if qc, ok := store.(*QdrantClient); ok && actualDim > 0 {
+			if have, derr := qc.GetVectorSize(collectionID); derr == nil && have > 0 && have != actualDim {
+				return nil, used, fmt.Errorf("collection '%s' stores %d-d vectors but the active embedding model returns %d-d: rebuild the collection (purge + reindex) or switch to a %d-d model", collectionID, have, actualDim, have)
+			}
 		}
 	}
 	if !exists {
@@ -1673,27 +1717,27 @@ func (e *Engine) DeleteMemory(collectionID string, filter map[string]any) (int, 
 
 // CollectionDetail merges live store stats with registry metadata.
 type CollectionDetail struct {
-	ID           int      `json:"id"`
-	Name         string   `json:"name"`
-	Backend      string   `json:"backend"`
-	ChunkCount   int      `json:"chunk_count"`
-	Exists       bool     `json:"exists"`
-	DisplayName  string   `json:"display_name,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	Tags         []string `json:"tags,omitempty"`
-	Enabled      bool     `json:"enabled"`
-	Consumers    []string `json:"consumers,omitempty"`
-	SourceFile   string   `json:"source_file,omitempty"`
-	SourceSHA256 string   `json:"source_sha256,omitempty"`
-	EmbedModel   string   `json:"embed_model,omitempty"`
-	EmbedProvider string  `json:"embed_provider,omitempty"`
-	VectorDim    int      `json:"vector_dim,omitempty"`
-	VectorDistance string `json:"vector_distance,omitempty"`
-	CreatedAt    string   `json:"created_at,omitempty"`
-	UpdatedAt    string   `json:"updated_at,omitempty"`
-	ChunkSize    int      `json:"chunk_size,omitempty"`
-	ChunkOverlap int      `json:"chunk_overlap,omitempty"`
-	ChunkStrategy string   `json:"chunk_strategy,omitempty"`
+	ID             int      `json:"id"`
+	Name           string   `json:"name"`
+	Backend        string   `json:"backend"`
+	ChunkCount     int      `json:"chunk_count"`
+	Exists         bool     `json:"exists"`
+	DisplayName    string   `json:"display_name,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Enabled        bool     `json:"enabled"`
+	Consumers      []string `json:"consumers,omitempty"`
+	SourceFile     string   `json:"source_file,omitempty"`
+	SourceSHA256   string   `json:"source_sha256,omitempty"`
+	EmbedModel     string   `json:"embed_model,omitempty"`
+	EmbedProvider  string   `json:"embed_provider,omitempty"`
+	VectorDim      int      `json:"vector_dim,omitempty"`
+	VectorDistance string   `json:"vector_distance,omitempty"`
+	CreatedAt      string   `json:"created_at,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
+	ChunkSize      int      `json:"chunk_size,omitempty"`
+	ChunkOverlap   int      `json:"chunk_overlap,omitempty"`
+	ChunkStrategy  string   `json:"chunk_strategy,omitempty"`
 }
 
 // DescribeCollections returns details for one collection, or all collections
