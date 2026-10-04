@@ -42,3 +42,18 @@ func TestSearchMemoryHasNoWaitSeconds(t *testing.T) {
 		t.Fatal("search_memory still exposes wait_seconds")
 	}
 }
+
+// Multi-collection search is exposed as collection_ids (array of strings).
+func TestSearchMemoryHasCollectionIDs(t *testing.T) {
+	s := NewServer()
+	RegisterTools(s, nil)
+	props, _ := s.tools["search_memory"].InputSchema["properties"].(map[string]any)
+	v, ok := props["collection_ids"]
+	if !ok {
+		t.Fatal("search_memory must expose collection_ids")
+	}
+	m, ok := v.(map[string]any)
+	if !ok || m["type"] != "array" {
+		t.Fatalf("collection_ids must be an array, got %#v", v)
+	}
+}

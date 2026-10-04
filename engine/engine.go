@@ -68,8 +68,12 @@ type EngineConfig struct {
 	// EmbedTimeout/RerankTimeout are the total per-call budgets for one-api.
 	// They must exceed one-api's own channel-failover window; rag-mcp never
 	// cancels mid-failover. 0 = defaultOneAPITimeout (180s).
-	EmbedTimeout   time.Duration
-	RerankTimeout  time.Duration
+	EmbedTimeout  time.Duration
+	RerankTimeout time.Duration
+	// SearchBudget bounds one whole search (embed + stores + rerank) so the
+	// server answers before the caller's outer fail-safe. Checked only at
+	// stage boundaries. 0 = 170s.
+	SearchBudget       time.Duration
 	ChunkSize      int
 	OverlapPercent int
 	ChunkStrategy  string
@@ -454,7 +458,7 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	if scope := strings.TrimSpace(collectionID); scope != "" {
-		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr, filter)
+		return e.searchResolved(query, scope, topK, st.RerankEnabled, thr, filter, e.searchDeadline())
 	}
 
 	targets := e.defaultSearchTargets()
@@ -463,9 +467,13 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 		return e.SearchMulti(query, nil, topK, st.RerankEnabled, thr, filter)
 	}
 
+	deadline := e.searchDeadline()
 	var lastErr error
 	for i, t := range targets {
-		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter)
+		if err := checkSearchBudget(deadline); err != nil {
+			return nil, err
+		}
+		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter, deadline)
 		if err == nil {
 			e.markBackendUp(t.backend)
 			return res, nil
@@ -549,16 +557,38 @@ func (e *Engine) defaultSearchTargets() []scopeTarget {
 	return out
 }
 
+// searchDeadline returns the wall-clock bound for one whole search (embed +
+// stores + rerank). The per-stage budgets alone can exceed the caller's outer
+// fail-safe on the backend-failover path (each attempt re-embeds), so this
+// makes the server answer first. Checked only at stage boundaries: an
+// in-flight HTTP call is never cancelled, so one-api still finishes its own
+// channel failover work.
+func (e *Engine) searchDeadline() time.Time {
+	d := e.config.SearchBudget
+	if d <= 0 {
+		d = 170 * time.Second
+	}
+	return time.Now().Add(d)
+}
+
+// checkSearchBudget errors once the overall search budget has passed.
+func checkSearchBudget(deadline time.Time) error {
+	if !deadline.IsZero() && time.Now().After(deadline) {
+		return fmt.Errorf("search overall budget exceeded (the one-api pipeline did not finish in time; check channel health)")
+	}
+	return nil
+}
+
 // searchResolved searches one explicitly named collection, applying same-name
 // failover when its backend is unreachable. It never skips the named backend
 // because of a cached down mark: it attempts the query and reacts to the result.
 // A not-found is reported with a case-insensitive "did you mean" hint.
-func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any) ([]SearchResult, error) {
+func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any, deadline time.Time) ([]SearchResult, error) {
 	if en := e.registry.Get(scope); en != nil && !en.Enabled {
 		return nil, fmt.Errorf("collection '%s' is disabled", scope)
 	}
 	backend := e.backendOf(scope)
-	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter)
+	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter, deadline)
 	if err == nil {
 		e.markBackendUp(backend)
 		return res, nil
@@ -570,20 +600,20 @@ func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, t
 		return nil, err
 	}
 	e.markBackendDown(backend)
-	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err)
+	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err, deadline)
 }
 
 // searchSameNameFailover searches the same-name collection on the paired
 // backend after the primary was found unavailable. A missing replica is a loud
 // error so the caller knows its data is not reachable instead of getting an
 // empty result.
-func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error) ([]SearchResult, error) {
+func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error, deadline time.Time) ([]SearchResult, error) {
 	other := otherBackend(backend)
 	if other == "" || !e.collectionExistsOn(other, name) {
 		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name replica on %s: %w", name, backend, other, cause)
 	}
 	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", name, backend, other)
-	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter)
+	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter, deadline)
 	if err == nil {
 		e.markBackendUp(other)
 	}
@@ -775,10 +805,14 @@ func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchRe
 }
 
 // searchCollection embeds the query once and searches one (backend, collection),
-// optionally reranking and trimming to topK.
-func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
+// optionally reranking and trimming to topK. deadline is the whole-search
+// wall-clock bound; it is checked only before stages start.
+func (e *Engine) searchCollection(backend, name, query string, topK int, useRerank bool, threshold float64, filter map[string]any, deadline time.Time) ([]SearchResult, error) {
 	st := e.settings.Get()
 	rerankOn := useRerank && st.RerankEnabled
+	if err := checkSearchBudget(deadline); err != nil {
+		return nil, err
+	}
 	queryVector, err := e.embedQuery(query)
 	if err != nil {
 		return nil, err
@@ -811,11 +845,16 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 	}
 	merged = e.fuseWithBM25(backend, name, query, merged, recallCount)
 	if rerankOn && len(merged) > 1 {
-		if reranked, err := e.applyRerank(query, merged, topK); err == nil {
-			return reranked, nil
-		} else {
-			log.Printf("Rerank failed, falling back to vector order: %v", err)
+		// A rerank failure is an error: silently returning vector order would
+		// make recall mysteriously "work differently" between runs.
+		if err := checkSearchBudget(deadline); err != nil {
+			return nil, err
 		}
+		reranked, err := e.applyRerank(query, merged, topK)
+		if err != nil {
+			return nil, fmt.Errorf("rerank failed for '%s': %w", name, err)
+		}
+		return reranked, nil
 	}
 	return trimResults(merged, topK), nil
 }
@@ -823,16 +862,21 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 // SearchMulti searches across several collections and merges the results.
 // An empty collections list means "all enabled collections" (registry), or
 // every Qdrant collection when the registry is empty (backward compatible).
-// Disabled collections are always skipped. Explicitly requested collections
-// that don't exist are a loud error; registry drift is logged and skipped.
-// An optional payload filter (Qdrant filter syntax) is applied to every store.
+// Disabled collections are always skipped. A collection that fails on an
+// explicit request (missing, down, dim mismatch) is skipped with a WARN log
+// rather than aborting the whole batch; if every requested collection fails,
+// that is a loud error. An optional payload filter (Qdrant filter syntax) is
+// applied to every store.
 func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
-	targets, explicit := e.resolveTargets(collections)
+	targets, _ := e.resolveTargets(collections)
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no collections to search (all disabled or none exist)")
 	}
 
 	// Embed the query once
+	if err := checkSearchBudget(e.searchDeadline()); err != nil {
+		return nil, err
+	}
 	queryVector, err := e.embedQuery(query)
 	if err != nil {
 		return nil, err
@@ -850,13 +894,27 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 		}
 	}
 
-	// Search each collection, tag results, merge
+	// Search each collection, tag results, merge. One bad library must not
+	// silence the others: every skip is logged with its reason so the server
+	// log is the report.
+	deadline := e.searchDeadline()
 	var merged []SearchResult
+	var skipped []string
 	for _, name := range targets {
-		if explicit {
-			if en := e.registry.Get(name); en != nil && !en.Enabled {
-				return nil, fmt.Errorf("collection '%s' is disabled", name)
-			}
+		if err := checkSearchBudget(deadline); err != nil {
+			return nil, err
+		}
+		if en := e.registry.Get(name); en != nil && !en.Enabled {
+			log.Printf("SearchMulti skip '%s': collection is disabled", name)
+			skipped = append(skipped, name+" (disabled)")
+			continue
+		}
+		// Dim pre-check: a vector in the wrong space gives garbage scores on
+		// vectra and a hard error on qdrant; skip with a clear reason instead.
+		if en := e.registry.Get(name); en != nil && en.VectorDim > 0 && len(queryVector) > 0 && en.VectorDim != len(queryVector) {
+			log.Printf("SearchMulti skip '%s': dim mismatch (collection %d-d, query %d-d)", name, en.VectorDim, len(queryVector))
+			skipped = append(skipped, name+" (dim mismatch)")
+			continue
 		}
 		backend := e.backendOf(name)
 		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
@@ -880,10 +938,8 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			}
 		}
 		if err != nil {
-			if explicit {
-				return nil, fmt.Errorf("search failed on '%s' (%s): %w", name, backend, err)
-			}
-			log.Printf("Search skipped collection '%s': %v", name, err)
+			log.Printf("SearchMulti skip '%s' (%s): %v", name, backend, err)
+			skipped = append(skipped, name)
 			continue
 		}
 		e.markBackendUp(backend)
@@ -895,17 +951,41 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 		}
 		merged = append(merged, e.fuseWithBM25(backend, name, query, vecList, recallCount)...)
 	}
+	if len(skipped) == len(targets) {
+		return nil, fmt.Errorf("all %d requested collections failed: %s", len(targets), strings.Join(skipped, "; "))
+	}
 
-	// Apply reranking if enabled
+	// Apply reranking if enabled. A rerank failure is an error, never a
+	// silent fall back to vector order.
 	if rerankOn && len(merged) > 1 {
+		if err := checkSearchBudget(deadline); err != nil {
+			return nil, err
+		}
 		reranked, err := e.applyRerank(query, merged, topK)
 		if err != nil {
-			log.Printf("Rerank failed, falling back to vector order: %v", err)
-			return trimResults(merged, topK), nil
+			return nil, err
 		}
 		return reranked, nil
 	}
 	return trimResults(merged, topK), nil
+}
+
+// SearchMultiDefault is SearchMulti with the settings-driven defaults that
+// SearchDefault applies (topK, threshold, rerank flag), for callers that name
+// an explicit list of collections.
+func (e *Engine) SearchMultiDefault(query string, collectionIDs []string, topK int, threshold *float64, filter map[string]any) ([]SearchResult, error) {
+	st := e.settings.Get()
+	if topK <= 0 {
+		topK = st.DefaultTopK
+	}
+	if topK <= 0 {
+		topK = 10
+	}
+	thr := st.DefaultThreshold
+	if threshold != nil {
+		thr = *threshold
+	}
+	return e.SearchMulti(query, collectionIDs, topK, st.RerankEnabled, thr, filter)
 }
 
 // resolveTargets maps a requested collection list to searchable names.
@@ -1000,6 +1080,7 @@ type SearchDebugResult struct {
 // down (and vice versa).
 func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any) (*SearchDebugResult, error) {
 	t0 := time.Now()
+	deadline := e.searchDeadline()
 	// Truncation observability: boundQuery keeps the head; the console needs
 	// both lengths plus a preview to tell "long paste silently cut" apart
 	// from "genuinely no recall".
@@ -1011,6 +1092,9 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		preview = string([]rune(preview)[:300]) + "…"
 	}
 
+	if err := checkSearchBudget(deadline); err != nil {
+		return nil, err
+	}
 	tEmbed := time.Now()
 	queryVector, err := e.embedQuery(query)
 	embedMs := time.Since(tEmbed).Milliseconds()
@@ -1067,14 +1151,19 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	var rerankMs int64
 	scoreMode := "vector-only"
 	if useRerank && len(results) > 1 {
-		tRerank := time.Now()
-		if out, err := e.applyRerank(query, results, topK); err == nil {
-			results = out
-			reranked = true
-		} else {
-			log.Printf("Rerank failed, falling back to vector order: %v", err)
-			results = trimResults(results, topK)
+		// No fail-open here either: a rerank failure must be visible in the
+		// console, not papered over with vector order. Operators can rerun
+		// with the toggle off to see the raw vector results.
+		if err := checkSearchBudget(deadline); err != nil {
+			return nil, err
 		}
+		tRerank := time.Now()
+		out, err := e.applyRerank(query, results, topK)
+		if err != nil {
+			return nil, fmt.Errorf("rerank failed: %w", err)
+		}
+		results = out
+		reranked = true
 		rerankMs = time.Since(tRerank).Milliseconds()
 		scoreMode = e.rerank.ScoreModeName()
 	} else {
@@ -1107,10 +1196,10 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	return out, nil
 }
 
-// applyRerank reranks the merged candidates. It is fail-open at the call sites:
-// a rerank error means the caller keeps vector order. There is no context
-// deadline here — the rerank client owns its total budget and, like the embed
-// call, never cancels one-api mid-failover.
+// applyRerank reranks the merged candidates. Call sites propagate its error:
+// a rerank failure must be visible to the caller, never silently replaced by
+// vector order. There is no context deadline here — the rerank client owns its
+// total budget and, like the embed call, never cancels one-api mid-failover.
 func (e *Engine) applyRerank(query string, results []SearchResult, topK int) ([]SearchResult, error) {
 	if len(results) <= 1 {
 		return results, nil

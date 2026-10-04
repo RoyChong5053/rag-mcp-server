@@ -92,6 +92,11 @@ type OneAPIConfig struct {
 	// never penalizes the bad channel. 0 = default 180.
 	EmbedTimeoutSeconds  int `yaml:"embed_timeout_seconds"`
 	RerankTimeoutSeconds int `yaml:"rerank_timeout_seconds"`
+	// SearchBudgetSeconds bounds one whole search (embed + stores + rerank)
+	// so the server answers before the caller's outer fail-safe (TavernLab
+	// mcp_timeout 180s). Checked only at stage boundaries; an in-flight HTTP
+	// call is never cancelled. 0 = default 170.
+	SearchBudgetSeconds int `yaml:"search_budget_seconds"`
 }
 
 type ChunkingConfig struct {
@@ -145,6 +150,7 @@ func DefaultConfig() *Config {
 			VectorDistance:       "Cosine",
 			EmbedTimeoutSeconds:  180,
 			RerankTimeoutSeconds: 180,
+			SearchBudgetSeconds:  170,
 		},
 		Chunking: ChunkingConfig{
 			ChunkSize:      500,

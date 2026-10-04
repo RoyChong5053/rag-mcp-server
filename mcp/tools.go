@@ -17,7 +17,8 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
-			"Omit collection_id to use the configured default collection; if its backend is unreachable it fails over to the same-name replica on the other backend. " +
+			"Omit collection_id (and collection_ids) to use the configured default collection; if its backend is unreachable it fails over to the same-name replica on the other backend. " +
+			"Pass collection_ids to search several collections in one call: recall is merged and globally reranked to top_k; a collection that fails (down, dim mismatch) is skipped and reported in the server log. " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
@@ -34,6 +35,11 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				"collection_id": map[string]any{
 					"type":        "string",
 					"description": "Optional: a specific collection to search. Empty uses the server default.",
+				},
+				"collection_ids": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional: search several collections in one call (merged and globally reranked to top_k). A single element behaves like collection_id; wins over collection_id when both are given.",
 				},
 				"top_k": map[string]any{
 					"type":        "integer",
@@ -61,6 +67,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 			return nil, fmt.Errorf("query is required")
 		}
 		collectionID, _ := args["collection_id"].(string)
+		collectionIDs := getStringSliceArg(args, "collection_ids")
 		topK := getIntArg(args, "top_k", 0) // 0 = server default
 		var threshold *float64
 		if v, ok := args["threshold"]; ok {
@@ -70,7 +77,18 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		filter := getFilterArg(args)
 
-		results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
+		var results []engine.SearchResult
+		var err error
+		switch {
+		case len(collectionIDs) > 1:
+			results, err = eng.SearchMultiDefault(query, collectionIDs, topK, threshold, filter)
+		default:
+			id := collectionID
+			if len(collectionIDs) == 1 {
+				id = collectionIDs[0]
+			}
+			results, err = eng.SearchDefault(query, id, topK, threshold, filter)
+		}
 		if err != nil {
 			return nil, err
 		}

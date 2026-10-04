@@ -176,6 +176,7 @@ func main() {
 		APIKey:          cfg.OneAPI.APIKey,
 		EmbedTimeout:    time.Duration(cfg.OneAPI.EmbedTimeoutSeconds) * time.Second,
 		RerankTimeout:   time.Duration(cfg.OneAPI.RerankTimeoutSeconds) * time.Second,
+		SearchBudget:    time.Duration(cfg.OneAPI.SearchBudgetSeconds) * time.Second,
 		ChunkSize:       cfg.Chunking.ChunkSize,
 		OverlapPercent:  cfg.Chunking.OverlapPercent,
 		ChunkStrategy:   cfg.Chunking.Strategy,
