@@ -492,7 +492,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	}
 	// SearchDebug also reports candidates the threshold killed,
 	// so recall tuning is evidence-based instead of guesswork.
-	res, err := h.eng.SearchDebug(body.Query, r.PathValue("name"), body.TopK, useRerank, threshold, nil, time.Duration(h.eng.RerankRecallWait())*time.Second)
+	res, err := h.eng.SearchDebug(body.Query, r.PathValue("name"), body.TopK, useRerank, threshold, nil)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

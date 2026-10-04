@@ -146,13 +146,6 @@ func main() {
 		}},
 	})
 
-	// Seed the WebUI '死等' override from config.yaml when set; nil keeps the
-	// engine defaultSearchWaitSeconds fallback and lets operators override it
-	// live via the dashboard (settings.Update appends without clobbering edits).
-	if cfg.Rerank.WaitSeconds > 0 {
-		settingsStore.Update(settings.Patch{RerankRecallWaitSeconds: &cfg.Rerank.WaitSeconds})
-	}
-
 	// Resolve the file-backed store dir (and optional memory dir) against the
 	// config file's directory, so a relative "Vectra" lands in the project
 	// folder even when the process CWD differs (e.g. setsid from $HOME).
@@ -181,6 +174,8 @@ func main() {
 		VectorDistance:  cfg.OneAPI.VectorDistance,
 		RerankModel:     cfg.OneAPI.RerankModel,
 		APIKey:          cfg.OneAPI.APIKey,
+		EmbedTimeout:    time.Duration(cfg.OneAPI.EmbedTimeoutSeconds) * time.Second,
+		RerankTimeout:   time.Duration(cfg.OneAPI.RerankTimeoutSeconds) * time.Second,
 		ChunkSize:       cfg.Chunking.ChunkSize,
 		OverlapPercent:  cfg.Chunking.OverlapPercent,
 		ChunkStrategy:   cfg.Chunking.Strategy,
@@ -189,7 +184,7 @@ func main() {
 		QueryMaxChars:   cfg.Rerank.QueryMaxChars,
 		DocMaxChars:     cfg.Rerank.DocMaxChars,
 		RegistryPath:    cfg.RegistryPath,
-		HistoryPath:    filepath.Join(cfgDir, "logs", "index_history.jsonl"),
+		HistoryPath:     filepath.Join(cfgDir, "logs", "index_history.jsonl"),
 	}
 
 	eng, err := engine.NewEngine(engineConfig, settingsStore)
@@ -203,13 +198,12 @@ func main() {
 	// Create MCP server
 	mcpServer := mcp.NewServer()
 
-	// Shared background-task registry: the dashboard and the MCP tools submit
-	// long work here so a tool call can return a pollable job instead of
-	// blocking past the client's request timeout.
+	// Background-task registry for the dashboard's async file indexing. The MCP
+	// tools are synchronous and do not use it.
 	jobsMgr := jobs.NewManager(eng, 2)
 
 	// Register all RAG tools
-	mcp.RegisterTools(mcpServer, eng, jobsMgr)
+	mcp.RegisterTools(mcpServer, eng)
 
 	// HTTP handler
 	http.HandleFunc("/mcp", mcpServer.HandleMCP)

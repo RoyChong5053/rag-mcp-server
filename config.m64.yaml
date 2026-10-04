@@ -44,6 +44,11 @@ oneapi:
   provider_name: "one-api"
   vector_dim: 1024
   vector_distance: "Cosine"
+  # Total per-call budget for one-api embed/rerank. Must stay above one-api's
+  # own channel-failover window (RELAY_TIMEOUT x retries) so one-api decides
+  # first; rag-mcp never cancels mid-failover. 0 = default 180.
+  embed_timeout_seconds: 180
+  rerank_timeout_seconds: 180
 
 chunking:
   chunk_size: 500

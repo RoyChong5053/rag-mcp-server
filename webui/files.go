@@ -299,8 +299,8 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
-	// The dashboard table is index-oriented; generic MCP search/store jobs are
-	// polled via job_status and kept out of this list to avoid flooding it.
+	// The dashboard table is index-oriented; only background index jobs live
+	// here now that the MCP search/store calls are synchronous.
 	writeJSON(w, http.StatusOK, h.jobs.ListKind(jobs.KindIndex))
 }
 

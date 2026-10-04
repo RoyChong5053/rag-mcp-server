@@ -85,11 +85,18 @@ type OneAPIConfig struct {
 	// switch is caught by the consistency gate instead of silently mixing.
 	VectorDim      int    `yaml:"vector_dim"`
 	VectorDistance string `yaml:"vector_distance"`
+	// EmbedTimeoutSeconds / RerankTimeoutSeconds bound one call to one-api's
+	// embed/rerank endpoint. They must stay comfortably above one-api's own
+	// channel-failover window (RELAY_TIMEOUT x retries): if rag-mcp cancels
+	// mid-flight, one-api treats it as a client abort, stops failing over and
+	// never penalizes the bad channel. 0 = default 180.
+	EmbedTimeoutSeconds  int `yaml:"embed_timeout_seconds"`
+	RerankTimeoutSeconds int `yaml:"rerank_timeout_seconds"`
 }
 
 type ChunkingConfig struct {
-	ChunkSize      int    `yaml:"chunk_size"`
-	OverlapPercent int    `yaml:"overlap_percent"`
+	ChunkSize      int `yaml:"chunk_size"`
+	OverlapPercent int `yaml:"overlap_percent"`
 	// Strategy selects the chunking algorithm: window (default, deterministic
 	// sliding window), adaptive, paragraph, section, sentence, dialogue.
 	Strategy string `yaml:"strategy"`
@@ -102,10 +109,6 @@ type RerankConfig struct {
 	// the head is kept. 0 = unlimited. DocMaxChars bounds rerank documents.
 	QueryMaxChars int `yaml:"query_max_chars"`
 	DocMaxChars   int `yaml:"doc_max_chars"`
-	// WaitSeconds seeds the WebUI '死等' wait budget (embed+reranker deadline) in
-	// seconds; 0 = unset → engine defaultSearchWaitSeconds fallback. Overridden
-	// at runtime by settings.json and per-call args.wait_seconds.
-	WaitSeconds int `yaml:"wait_seconds"`
 }
 
 func DefaultConfig() *Config {
@@ -133,13 +136,15 @@ func DefaultConfig() *Config {
 			Port: 6333,
 		},
 		OneAPI: OneAPIConfig{
-			BaseURL:        "http://192.168.100.20:3000",
-			BackupURL:      "http://192.168.10.2:3000",
-			EmbedModel:     "embedding",
-			RerankModel:    "reranker",
-			ProviderName:   "one-api",
-			VectorDim:      1024,
-			VectorDistance: "Cosine",
+			BaseURL:              "http://192.168.100.20:3000",
+			BackupURL:            "http://192.168.10.2:3000",
+			EmbedModel:           "embedding",
+			RerankModel:          "reranker",
+			ProviderName:         "one-api",
+			VectorDim:            1024,
+			VectorDistance:       "Cosine",
+			EmbedTimeoutSeconds:  180,
+			RerankTimeoutSeconds: 180,
 		},
 		Chunking: ChunkingConfig{
 			ChunkSize:      500,
@@ -151,7 +156,6 @@ func DefaultConfig() *Config {
 			Recall:        30,
 			QueryMaxChars: 500,
 			DocMaxChars:   1000,
-			WaitSeconds:   0,
 		},
 	}
 }

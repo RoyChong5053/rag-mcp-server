@@ -4,32 +4,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
-	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
 
-// syncWait is how long a tool call blocks for a result before handing the
-// caller a pollable job. On the GPU path most calls finish well inside this;
-// on the CPU fallback the caller gets a job_id and an estimate instead of
-// hanging past the MCP client's request timeout.
-const syncWait = 10 * time.Second
-
-// RegisterTools registers all RAG MCP tools with the server. jobsMgr is the
-// shared background-task registry (same instance the dashboard uses), so a
-// long operation has one identity no matter which surface started it.
-func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
+// RegisterTools registers all RAG MCP tools with the server. Search and store
+// are synchronous: they block until the result is ready, bounded by the one-api
+// embed/rerank budget. There is no background job queue or wait knob in the MCP
+// surface — one-api owns channel failover, and a failure is reported so the
+// caller can fail open (skip RAG and answer without retrieval).
+func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
-			"Omit collection_id to use the configured default collection; if qdrant is unreachable it automatically falls back to the vectra default, then the same-name vectra collection. " +
+			"Omit collection_id to use the configured default collection; if its backend is unreachable it fails over to the same-name replica on the other backend. " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
 			"or a raw Qdrant filter for advanced clauses. " +
-			"If the search does not finish within wait_seconds (default 10s) it returns {status:pending, job_id}: poll it with job_status. Pass a larger wait_seconds to block instead (synchronous callers like TavernLab) or 0 to always get a job.",
+			"The call is synchronous and can take up to the server's one-api timeout; if retrieval is unavailable the tool returns an error and the caller should proceed without RAG.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -58,10 +52,6 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 					"type":        "object",
 					"description": "Optional: raw Qdrant filter (advanced). Takes precedence over metadata. Vectra supports match.value clauses only.",
 				},
-				"wait_seconds": map[string]any{
-					"type":        "number",
-					"description": "Optional: how long to block for a result before returning a pollable job. Omit for the server default (10s). 0 returns a job immediately; a large value keeps a synchronous caller (e.g. TavernLab) waiting instead of taking the job path; negative waits until done (bounded by the client timeout).",
-				},
 			},
 			"required": []string{"query"},
 		},
@@ -80,22 +70,20 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		}
 		filter := getFilterArg(args)
 
-		return boundedRun(jobsMgr, jobs.KindSearch, estimateSearchSeconds(eng), getWaitDuration(args), func() (any, error) {
-			results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter, resolveSearchWait(args, eng.RerankRecallWait()))
-			if err != nil {
-				return nil, err
-			}
-			return formatSearchResults(results), nil
-		})
+		results, err := eng.SearchDefault(query, collectionID, topK, threshold, filter)
+		if err != nil {
+			return nil, err
+		}
+		return formatSearchResults(results), nil
 	})
 
 	server.RegisterTool(Tool{
 		Name: "store_memory",
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
-			"Omit collection_id to write to the configured default collection, with automatic vectra failover (configured vectra default, then the same-name collection) when qdrant is unreachable. " +
+			"Omit collection_id to write to the configured default collection, with automatic same-name failover to the other backend when its backend is unreachable. " +
 			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
 			"so it can be browsed in the data bank and re-indexed. " +
-			"If the write does not finish within wait_seconds (default 10s) it returns {status:pending, job_id}: poll it with job_status. Pass a larger wait_seconds to block until done.",
+			"The call is synchronous and can take up to the server's one-api timeout.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -111,10 +99,6 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 					"type":        "object",
 					"description": "Optional metadata to attach to the chunks",
 				},
-				"wait_seconds": map[string]any{
-					"type":        "number",
-					"description": "Optional: how long to block for the write to finish before returning a pollable job. Omit for the server default (10s). 0 returns a job immediately; a large value keeps a synchronous caller waiting instead of taking the job path; negative waits until done (bounded by the client timeout).",
-				},
 			},
 			"required": []string{"text"},
 		},
@@ -123,13 +107,11 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		collectionID, _ := args["collection_id"].(string)
 		metadata := getStringMapArg(args, "metadata")
 
-		return boundedRun(jobsMgr, jobs.KindStore, estimateStoreSeconds(eng, len(text)), getWaitDuration(args), func() (any, error) {
-			result, err := eng.StoreMemory(text, collectionID, metadata)
-			if err != nil {
-				return nil, err
-			}
-			return fmt.Sprintf("Stored %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
-		})
+		result, err := eng.StoreMemory(text, collectionID, metadata)
+		if err != nil {
+			return nil, err
+		}
+		return fmt.Sprintf("Stored %d chunks into collection '%s'", result.ChunksIndexed, result.Collection), nil
 	})
 
 	server.RegisterTool(Tool{
@@ -179,7 +161,7 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 
 	server.RegisterTool(Tool{
 		Name:        "health_check",
-		Description: "Check component health (qdrant, vectra, embedding, rerank) and report the active default backend.",
+		Description: "Check component health (qdrant, vectra, embedding, rerank) and report the active default backend. This is an on-demand probe; nothing in the query path depends on it.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -303,193 +285,6 @@ func RegisterTools(server *Server, eng *engine.Engine, jobsMgr *jobs.Manager) {
 		}
 		return fmt.Sprintf("Deleted collection '%s'", collectionID), nil
 	})
-
-	server.RegisterTool(Tool{
-		Name: "job_status",
-		Description: "Check a background job returned by an earlier search_memory/store_memory call that exceeded the " +
-			"synchronous window. Returns running progress, the final result once done, or the error. Poll with the " +
-			"job_id after the estimate_seconds you were given; do not resubmit the original call.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"job_id": map[string]any{
-					"type":        "string",
-					"description": "Job id returned by search_memory/store_memory (e.g. job-7)",
-				},
-			},
-			"required": []string{"job_id"},
-		},
-	}, func(args map[string]any) (any, error) {
-		id, _ := args["job_id"].(string)
-		if strings.TrimSpace(id) == "" {
-			return nil, fmt.Errorf("job_id is required")
-		}
-		j := jobsMgr.Get(id)
-		if j == nil {
-			return nil, fmt.Errorf("unknown job %q (it may have been trimmed after completion)", id)
-		}
-		switch j.State {
-		case jobs.StateDone:
-			if j.Result != nil {
-				return j.Result, nil
-			}
-			return fmt.Sprintf("Job %s done: indexed %d chunks into collection '%s'", j.ID, j.Chunks, j.Collection), nil
-		case jobs.StateError:
-			return nil, fmt.Errorf("job %s failed: %s", j.ID, j.Error)
-		default:
-			return formatJobPending(j), nil
-		}
-	})
-
-	server.RegisterTool(Tool{
-		Name:        "job_list",
-		Description: "List recent background jobs (index jobs plus async search/store calls) with their state and progress.",
-		InputSchema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-		},
-	}, func(args map[string]any) (any, error) {
-		all := jobsMgr.List()
-		if len(all) == 0 {
-			return "No background jobs.", nil
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "%d job(s):\n", len(all))
-		for _, j := range all {
-			switch j.Kind {
-			case jobs.KindIndex:
-				fmt.Fprintf(&b, "- %s [%s] %s/%s %s (%d/%d chunks)%s\n", j.ID, j.Kind, j.Collection, j.Backend, j.State, j.DoneChunks, j.TotalChunks, errSuffix(j))
-			default:
-				fmt.Fprintf(&b, "- %s [%s] %s%s\n", j.ID, j.Kind, j.State, errSuffix(j))
-			}
-		}
-		return b.String(), nil
-	})
-}
-
-// boundedRun submits fn to the shared registry and waits up to wait. On
-// success it returns the result. If the work is still running it returns a
-// structured pending payload the caller can poll. A failure is returned as-is.
-func boundedRun(mgr *jobs.Manager, kind string, estimate int, wait time.Duration, fn func() (any, error)) (any, error) {
-	job := mgr.Submit(kind, fn)
-	done, finished := mgr.Await(job.ID, wait)
-	if !finished {
-		return formatJobPendingWithEstimate(done, estimate), nil
-	}
-	if done == nil {
-		return nil, fmt.Errorf("job %s disappeared", job.ID)
-	}
-	if done.State == jobs.StateError {
-		return nil, fmt.Errorf("%s", done.Error)
-	}
-	return done.Result, nil
-}
-
-// formatJobPending renders a pollable job handle. The estimate is a coarse
-// prediction of the remaining wall time, refined over time.
-func formatJobPendingWithEstimate(j *jobs.Job, estimate int) string {
-	payload := map[string]any{
-		"status":           "pending",
-		"job_id":           j.ID,
-		"kind":             j.Kind,
-		"state":            j.State,
-		"stage":            j.Stage,
-		"estimate_seconds": estimate,
-		"hint":             fmt.Sprintf("Still running in the background. Call job_status with job_id=%q after about %d seconds (or do other work first). Do not resubmit — the work is already in progress.", j.ID, estimate),
-	}
-	b, _ := json.MarshalIndent(payload, "", "  ")
-	return string(b)
-}
-
-func formatJobPending(j *jobs.Job) string {
-	payload := map[string]any{
-		"status": "pending",
-		"job_id": j.ID,
-		"kind":   j.Kind,
-		"state":  j.State,
-		"stage":  j.Stage,
-	}
-	if j.Kind == jobs.KindIndex {
-		payload["done_chunks"] = j.DoneChunks
-		payload["total_chunks"] = j.TotalChunks
-	}
-	b, _ := json.MarshalIndent(payload, "", "  ")
-	return string(b)
-}
-
-func errSuffix(j *jobs.Job) string {
-	if j.Error != "" {
-		return ": " + j.Error
-	}
-	return ""
-}
-
-// resolveSearchWait picks the embed+reranker deadline for a search. Unlike the
-// job-await budget (getWaitDuration, which defaults to the sync window), this
-// honours the persistent WebUI '死等' setting when a caller omits wait_seconds,
-// so both knobs are usable from MCP tool calls. A non-positive per-call value
-// means "wait indefinitely" for the await path but maps to 0 here so the inner
-// pipeline relies on its own client timeout instead of an inverted ctx deadline.
-func resolveSearchWait(args map[string]any, fallbackSeconds int) time.Duration {
-	v, ok := args["wait_seconds"]
-	if !ok {
-		return time.Duration(fallbackSeconds) * time.Second
-	}
-	f, ok := v.(float64)
-	if !ok || f <= 0 {
-		return time.Duration(fallbackSeconds) * time.Second
-	}
-	if f > 3600 {
-		f = 3600
-	}
-	return time.Duration(f * float64(time.Second))
-}
-
-// getWaitDuration reads the optional wait_seconds argument. Omitted uses the
-// default synchronous window; 0 returns a job immediately; a negative value
-// waits until the work finishes (bounded only by the client's own timeout).
-// Values are clamped to one hour so a typo cannot pin a worker forever.
-func getWaitDuration(args map[string]any) time.Duration {
-	v, ok := args["wait_seconds"]
-	if !ok {
-		return syncWait
-	}
-	f, ok := v.(float64)
-	if !ok {
-		return syncWait
-	}
-	if f < 0 {
-		return -1 // wait indefinitely
-	}
-	if f > 3600 {
-		f = 3600
-	}
-	return time.Duration(f * float64(time.Second))
-}
-
-// estimateSearchSeconds is a coarse prediction of how long a search will take
-// on the current compute path. Only used to tell the caller when to poll.
-func estimateSearchSeconds(eng *engine.Engine) int {
-	if eng.CPUComputeMode() {
-		return 30
-	}
-	return 3
-}
-
-// estimateStoreSeconds is a coarse prediction for a store_memory call based on
-// the text size and compute path.
-func estimateStoreSeconds(eng *engine.Engine, textLen int) int {
-	chunks := textLen/350 + 1 // effective chunk ~= size*(1-overlap) = 350
-	if eng.CPUComputeMode() {
-		if chunks <= 4 {
-			return 15
-		}
-		return 15 + chunks*3
-	}
-	if chunks <= 32 {
-		return 5
-	}
-	return 5 + chunks/4
 }
 
 // Helper functions

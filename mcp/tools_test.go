@@ -1,80 +1,44 @@
 package mcp
 
-import (
-	"strings"
-	"testing"
-	"time"
+import "testing"
 
-	"github.com/RoyChong5053/rag-mcp-server/jobs"
-)
+// The MCP surface is synchronous now: exactly these eight tools, no job queue
+// and no wait_seconds knob.
+func TestRegisterToolsSurface(t *testing.T) {
+	s := NewServer()
+	RegisterTools(s, nil)
 
-func TestBoundedRunReturnsFastResult(t *testing.T) {
-	m := jobs.NewManager(nil, 2)
-	res, err := boundedRun(m, jobs.KindSearch, 3, time.Second, func() (any, error) {
-		return "fast", nil
-	})
-	if err != nil || res != "fast" {
-		t.Fatalf("res=%v err=%v", res, err)
+	want := []string{
+		"search_memory",
+		"store_memory",
+		"delete_memory",
+		"list_collections",
+		"health_check",
+		"collection_info",
+		"set_collection_meta",
+		"delete_collection",
 	}
-}
-
-func TestBoundedRunReturnsPendingPayload(t *testing.T) {
-	m := jobs.NewManager(nil, 2)
-	release := make(chan struct{})
-	res, err := boundedRun(m, jobs.KindStore, 42, 40*time.Millisecond, func() (any, error) {
-		<-release
-		return "finished", nil
-	})
-	if err != nil {
-		t.Fatalf("err=%v", err)
+	if len(s.tools) != len(want) {
+		t.Fatalf("registered %d tools, want %d", len(s.tools), len(want))
 	}
-	text, ok := res.(string)
-	if !ok {
-		t.Fatalf("expected a string payload, got %T", res)
-	}
-	if !strings.Contains(text, `"status": "pending"`) || !strings.Contains(text, `"job_id"`) || !strings.Contains(text, `"estimate_seconds": 42`) {
-		t.Fatalf("pending payload missing fields:\n%s", text)
-	}
-
-	// Once the task finishes, job_status (Get) sees the stored result.
-	close(release)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		all := m.ListKind(jobs.KindStore)
-		if len(all) == 1 && all[0].State == jobs.StateDone {
-			if all[0].Result != "finished" {
-				t.Fatalf("result = %v", all[0].Result)
-			}
-			return
+	for _, name := range want {
+		if _, ok := s.tools[name]; !ok {
+			t.Fatalf("tool %q not registered", name)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("job never reached done")
-}
-
-func TestGetWaitDuration(t *testing.T) {
-	if got := getWaitDuration(map[string]any{}); got != syncWait {
-		t.Fatalf("default = %v, want %v", got, syncWait)
-	}
-	if got := getWaitDuration(map[string]any{"wait_seconds": float64(0)}); got != 0 {
-		t.Fatalf("zero = %v, want immediate", got)
-	}
-	if got := getWaitDuration(map[string]any{"wait_seconds": float64(30)}); got != 30*time.Second {
-		t.Fatalf("30 = %v", got)
-	}
-	if got := getWaitDuration(map[string]any{"wait_seconds": float64(-1)}); got != -1 {
-		t.Fatalf("negative = %v, want indefinite", got)
-	}
-	if got := getWaitDuration(map[string]any{"wait_seconds": float64(999999)}); got != time.Hour {
-		t.Fatalf("clamp = %v, want 1h", got)
+	for _, gone := range []string{"job_status", "job_list"} {
+		if _, ok := s.tools[gone]; ok {
+			t.Fatalf("tool %q must be removed", gone)
+		}
 	}
 }
 
-func TestEstimatesArePositiveAndModeAware(t *testing.T) {
-	// nil engine is not usable here; just assert the pure helpers' shape via a
-	// fake through estimateStoreSeconds is covered elsewhere. Search estimate
-	// needs a real engine, so only check the formatting path.
-	if got := formatJobPending(&jobs.Job{ID: "job-1", Kind: jobs.KindSearch, State: jobs.StateRunning, Stage: "running"}); !strings.Contains(got, "job-1") {
-		t.Fatalf("formatJobPending = %q", got)
+// search_memory must not expose wait_seconds anymore.
+func TestSearchMemoryHasNoWaitSeconds(t *testing.T) {
+	s := NewServer()
+	RegisterTools(s, nil)
+	props, _ := s.tools["search_memory"].InputSchema["properties"].(map[string]any)
+	if _, ok := props["wait_seconds"]; ok {
+		t.Fatal("search_memory still exposes wait_seconds")
 	}
 }

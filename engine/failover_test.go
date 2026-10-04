@@ -156,49 +156,35 @@ func TestDefaultSearchTargets(t *testing.T) {
 	}
 }
 
-func TestDefaultWriteTargetFailover(t *testing.T) {
+func TestDefaultWriteChainMatchesSearchTargets(t *testing.T) {
 	st := settings.Settings{
 		ActiveBackend:           BackendQdrant,
 		DefaultCollectionQdrant: "global_memory",
 		DefaultCollectionVectra: "gm_vectra",
 		FailoverEnabled:         true,
 	}
-	// qdrant down -> vectra fallback
+	// Writes no longer preflight health; they use the same ordered target chain
+	// as searches and fail over only on a real error.
 	e := newTestEngine(t, st, newFakeStore(false), newFakeStore(true))
-	target, err := e.defaultWriteTarget()
-	if err != nil {
-		t.Fatalf("write target: %v", err)
+	got := e.defaultSearchTargets()
+	want := []scopeTarget{
+		{backend: BackendQdrant, collection: "global_memory"},
+		{backend: BackendVectra, collection: "gm_vectra"},
+		{backend: BackendVectra, collection: "global_memory"},
 	}
-	if target.backend != BackendVectra || target.collection != "gm_vectra" {
-		t.Fatalf("down qdrant target = %+v, want vectra/gm_vectra", target)
+	if len(got) != len(want) {
+		t.Fatalf("targets = %+v, want %+v", got, want)
 	}
-
-	// qdrant up -> primary
-	e2 := newTestEngine(t, st, newFakeStore(true), newFakeStore(true))
-	target2, err := e2.defaultWriteTarget()
-	if err != nil {
-		t.Fatalf("write target: %v", err)
-	}
-	if target2.backend != BackendQdrant || target2.collection != "global_memory" {
-		t.Fatalf("up qdrant target = %+v, want qdrant/global_memory", target2)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("target[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 
-	// No configured vectra default and qdrant down -> automatic same-name
-	// replica on vectra, no error (this is the zero-config failover path).
-	st.DefaultCollectionVectra = ""
-	e3 := newTestEngine(t, st, newFakeStore(false), newFakeStore(true))
-	target3, err := e3.defaultWriteTarget()
-	if err != nil {
-		t.Fatalf("same-name failover should not error: %v", err)
-	}
-	if target3.backend != BackendVectra || target3.collection != "global_memory" {
-		t.Fatalf("same-name target = %+v, want vectra/global_memory", target3)
-	}
-
-	// No defaults at all -> loud error (nothing to route to).
-	e4 := newTestEngine(t, settings.Settings{FailoverEnabled: true}, newFakeStore(false), newFakeStore(true))
-	if _, err := e4.defaultWriteTarget(); err == nil {
-		t.Fatal("expected error when no default collection is configured")
+	// No defaults at all -> empty chain, so StoreMemory reports a loud error.
+	empty := newTestEngine(t, settings.Settings{FailoverEnabled: true}, newFakeStore(false), newFakeStore(true))
+	if n := len(empty.defaultSearchTargets()); n != 0 {
+		t.Fatalf("expected no targets, got %d", n)
 	}
 }
 

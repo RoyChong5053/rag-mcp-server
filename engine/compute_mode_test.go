@@ -7,24 +7,20 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
-// Active vectra, or an unreachable qdrant, means the CPU fallback is in charge.
+// Compute mode is static: only the active backend decides. A down qdrant does
+// NOT flip a qdrant-active engine to CPU — no health probe on the query path.
 func TestUsesCPUCompute(t *testing.T) {
 	vectraActive := newTestEngine(t, settings.Settings{ActiveBackend: BackendVectra}, newFakeStore(true), newFakeStore(true))
 	if !vectraActive.usesCPUCompute() {
 		t.Fatal("active vectra should be CPU mode")
 	}
 
-	qdrantUp := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant}, newFakeStore(true), newFakeStore(true))
-	if qdrantUp.usesCPUCompute() {
-		t.Fatal("reachable qdrant should be GPU mode")
-	}
-
-	qdrantDown := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant}, newFakeStore(false), newFakeStore(true))
-	qdrantDown.healthMu.Lock()
-	qdrantDown.downUntil[BackendQdrant] = time.Now().Add(time.Minute)
-	qdrantDown.healthMu.Unlock()
-	if !qdrantDown.usesCPUCompute() {
-		t.Fatal("cached-down qdrant should be CPU mode")
+	qdrantActive := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant}, newFakeStore(false), newFakeStore(true))
+	qdrantActive.healthMu.Lock()
+	qdrantActive.downUntil[BackendQdrant] = time.Now().Add(time.Minute)
+	qdrantActive.healthMu.Unlock()
+	if qdrantActive.usesCPUCompute() {
+		t.Fatal("compute mode must stay static (GPU) for active qdrant even when marked down")
 	}
 }
 
@@ -32,13 +28,13 @@ func TestUsesCPUCompute(t *testing.T) {
 // the CPU fallback is capped to embedBatchSizeCPU.
 func TestEffectiveEmbedBatchSizeByMode(t *testing.T) {
 	cpu := newTestEngine(t, settings.Settings{ActiveBackend: BackendVectra, EmbedBatchSize: 32}, newFakeStore(true), newFakeStore(true))
-	if got := cpu.effectiveEmbedBatchSize(cpu.cpuComputeMode()); got != embedBatchSizeCPU {
+	if got := cpu.effectiveEmbedBatchSize(cpu.usesCPUCompute()); got != embedBatchSizeCPU {
 		t.Fatalf("cpu mode batch size = %d, want %d", got, embedBatchSizeCPU)
 	}
 
 	gpu := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant, EmbedBatchSize: 0}, newFakeStore(true), newFakeStore(true))
-	if gpu.cpuComputeMode() {
-		t.Fatal("reachable qdrant should be GPU mode")
+	if gpu.usesCPUCompute() {
+		t.Fatal("active qdrant should be GPU mode")
 	}
 	if got := gpu.effectiveEmbedBatchSize(false); got != embedBatchSizeGPU {
 		t.Fatalf("gpu default batch size = %d, want %d", got, embedBatchSizeGPU)

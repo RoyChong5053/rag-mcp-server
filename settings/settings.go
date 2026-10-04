@@ -33,11 +33,6 @@ type Settings struct {
 	RerankEnabled bool `json:"rerank_enabled"`
 	// RerankRecall is the vector over-fetch count fed to the reranker.
 	RerankRecall int `json:"rerank_recall"`
-	// RerankRecallWaitSeconds overrides the rerank-recall wait budget (embed+reranker
-	// deadline) in seconds. It backs the WebUI '死等' knob and is the persistent,
-	// operator-overridable fallback when a per-call wait_seconds is absent. nil =
-	// unset → engine defaultSearchWaitSeconds. Negative values are treated as unset.
-	RerankRecallWaitSeconds *int `json:"rerank_recall_wait_seconds"`
 	// QueryMaxChars caps the query text (runes) before it is embedded and
 	// reranked; the head is kept (the actual question usually precedes pasted
 	// source material). 0 = unlimited.
@@ -80,22 +75,21 @@ type EmbedProvider struct {
 // Patch carries optional settings updates; nil means "leave unchanged".
 // Pointers distinguish an explicit zero from an omitted field.
 type Patch struct {
-	ActiveBackend           *string  `json:"active_backend"`
-	DefaultCollectionQdrant *string  `json:"default_collection_qdrant"`
-	DefaultCollectionVectra *string  `json:"default_collection_vectra"`
-	FailoverEnabled         *bool    `json:"failover_enabled"`
-	DefaultTopK             *int     `json:"default_top_k"`
-	DefaultThreshold        *float64 `json:"default_threshold"`
-	RerankEnabled           *bool    `json:"rerank_enabled"`
-	RerankRecall            *int     `json:"rerank_recall"`
-	QueryMaxChars           *int     `json:"query_max_chars"`
-	DocMaxChars             *int     `json:"doc_max_chars"`
-	RerankRecallWaitSeconds *int     `json:"rerank_recall_wait_seconds"`
-	EmbedBatchSize          *int     `json:"embed_batch_size"`
+	ActiveBackend           *string          `json:"active_backend"`
+	DefaultCollectionQdrant *string          `json:"default_collection_qdrant"`
+	DefaultCollectionVectra *string          `json:"default_collection_vectra"`
+	FailoverEnabled         *bool            `json:"failover_enabled"`
+	DefaultTopK             *int             `json:"default_top_k"`
+	DefaultThreshold        *float64         `json:"default_threshold"`
+	RerankEnabled           *bool            `json:"rerank_enabled"`
+	RerankRecall            *int             `json:"rerank_recall"`
+	QueryMaxChars           *int             `json:"query_max_chars"`
+	DocMaxChars             *int             `json:"doc_max_chars"`
+	EmbedBatchSize          *int             `json:"embed_batch_size"`
 	EmbedProviders          *[]EmbedProvider `json:"embed_providers"`
-	ActiveEmbedProvider     *string  `json:"active_embed_provider"`
-	BM25Enabled             *bool    `json:"bm25_enabled"`
-	FusionMethod            *string  `json:"fusion_method"`
+	ActiveEmbedProvider     *string          `json:"active_embed_provider"`
+	BM25Enabled             *bool            `json:"bm25_enabled"`
+	FusionMethod            *string          `json:"fusion_method"`
 }
 
 // Store is a concurrency-safe runtime settings store backed by a JSON file.
@@ -180,9 +174,6 @@ func (s *Store) Update(p Patch) error {
 	}
 	if p.EmbedBatchSize != nil {
 		s.data.EmbedBatchSize = *p.EmbedBatchSize
-	}
-	if p.RerankRecallWaitSeconds != nil {
-		s.data.RerankRecallWaitSeconds = p.RerankRecallWaitSeconds
 	}
 	if p.EmbedProviders != nil {
 		s.data.EmbedProviders = *p.EmbedProviders

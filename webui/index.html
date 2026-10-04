@@ -151,7 +151,8 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 <h1>RAG Console</h1><span id="ver" class="prov"></span>
 <button onclick="backup()" title="download collections.json">backup registry</button>
 <button id="logout-btn" onclick="logout()" style="display:none" title="log out this browser">logout</button>
-<div id="health" class="health"><span class="hb wait">checking…</span></div>
+<div id="health" class="health"><span class="hb wait">not tested</span></div>
+<button onclick="withBusy(this, () => refreshHealth())" title="probe backends + one-api on demand (no automatic probing)">test</button>
 
 <div class="panel">
   <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend · saved to settings.json (wins over config.yaml, which only seeds first run)</span></div>
@@ -441,10 +442,10 @@ function modal(options) {
   });
 }
 
-/* ---- health + info (render first, probe in background) ---- */
+/* ---- health + info (manual Test button only; never probes on load) ---- */
 async function refreshHealth() {
   const el = document.getElementById('health');
-  el.innerHTML = '<span class="hb wait">checking backends…</span>';
+  el.innerHTML = '<span class="hb wait">testing…</span>';
   try {
     const h = await api('GET', '/api/health', undefined, false, 8000);
     const order = ['active_backend', 'qdrant', 'vectra', 'embedding', 'rerank'];
@@ -481,7 +482,7 @@ async function loadInfo() {
 /* ---- collections ---- */
 async function load() {
   renderCollectionsLoading();
-  await Promise.all([refreshHealth(), refreshCollections()]);
+  await refreshCollections();
 }
 function renderCollectionsLoading() {
   const tb = document.querySelector('#tbl tbody');
@@ -921,7 +922,6 @@ document.getElementById('login-user').addEventListener('keydown', e => { if (e.k
 
 boot();
 setInterval(() => { if (!document.hidden && document.getElementById('login-back').classList.contains('hidden')) loadJobs(); }, 5000);
-setInterval(() => { if (!document.hidden && document.getElementById('login-back').classList.contains('hidden')) refreshHealth(); }, 60000);
 </script>
 </body>
 </html>

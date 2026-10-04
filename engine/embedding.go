@@ -22,12 +22,26 @@ type EmbeddingClient struct {
 	apiKey     string
 	httpClient *http.Client
 
+	// timeout is the TOTAL budget for one logical embed across all retries.
+	// It must stay comfortably above one-api's own channel-failover window:
+	// cancelling mid-failover makes one-api see context.Canceled and treat the
+	// request as a user abort — it then neither tries another channel nor
+	// penalizes the bad one (see one-api controller/relay.go). rag-mcp never
+	// cancels early; one-api decides.
+	timeout time.Duration
+
 	// limiter caps concurrent embedding POSTs so parallel searches / index
 	// jobs cannot stampede a CPU-only fan-out. Its capacity follows the
 	// compute mode through concurrency (GPU vs CPU fallback).
 	limiter     *dynLimiter
 	concurrency func() int
 }
+
+// defaultOneAPITimeout is the total per-call budget for embed/rerank when the
+// config leaves it unset. It is deliberately larger than one-api's per-attempt
+// RELAY_TIMEOUT (120s) so one-api gets its fallback chances before rag-mcp
+// reports "unavailable" and lets the frontend fail open.
+const defaultOneAPITimeout = 180 * time.Second
 
 // defaultEmbedConcurrency bounds concurrent embedding POSTs when no compute
 // mode is wired (standalone callers/tests). The engine overrides it.
@@ -118,10 +132,31 @@ func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClie
 		model:     model,
 		apiKey:    apiKey,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout: defaultOneAPITimeout,
 		},
+		timeout: defaultOneAPITimeout,
 		limiter: newDynLimiter(defaultEmbedConcurrency),
 	}
+}
+
+// SetTimeout sets the total per-call budget. 0 keeps the default. The value is
+// capped so a misconfigured config cannot pin a request forever.
+func (c *EmbeddingClient) SetTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if d > 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	c.timeout = d
+	c.httpClient.Timeout = d
+}
+
+func (c *EmbeddingClient) budget() time.Duration {
+	if c.timeout <= 0 {
+		return defaultOneAPITimeout
+	}
+	return c.timeout
 }
 
 // EmbeddingRequest represents the request to one-api's embedding endpoint
@@ -235,18 +270,27 @@ func retryable(err error) bool {
 	return true
 }
 
-// callWithRetry runs one embedding request with a short exponential backoff.
-// Honors Retry-After when the server sends one. 3 attempts with 500ms base
-// keep the typical offline case under ~10s: one-api already retried across
-// all its channels, so a second deep retry here only multiplies tail latency.
+// callWithRetry runs one logical embedding against one-api within a single
+// total budget, retrying only on a genuine one-api error (5xx/429/transport)
+// and only while time remains. It never cancels one-api mid-failover: one-api
+// owns upstream channel selection, and a client-side cancel makes it treat the
+// request as an user abort (context.Canceled) — no channel fallback, no health
+// penalty. So rag-mcp waits the full budget, then reports "unavailable" and
+// lets the frontend fail open.
 func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([][]float32, error) {
+	budget := c.budget()
+	deadline := time.Now().Add(budget)
 	backoff := 500 * time.Millisecond
 	const maxAttempts = 3
 	var err error
 	var embeddings [][]float32
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
 		var apiErr *apiError
-		embeddings, err = c.callEndpoint(baseURL, req)
+		embeddings, err = c.callEndpointWithBudget(baseURL, req, remaining)
 		if err == nil {
 			return embeddings, nil
 		}
@@ -260,19 +304,26 @@ func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([
 		if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
 			wait = apiErr.retryAfter
 		}
+		if time.Until(deadline) <= wait {
+			break
+		}
 		log.Printf("Embedding attempt %d/%d failed (%v), retrying in %s", attempt, maxAttempts, err, wait)
 		time.Sleep(wait)
 		backoff *= 2
 	}
-	return nil, fmt.Errorf("embedding failed after %d attempts: %w", maxAttempts, err)
+	if err == nil {
+		return nil, fmt.Errorf("embedding unavailable: budget of %.0fs exhausted", budget.Seconds())
+	}
+	return nil, fmt.Errorf("embedding unavailable after %.0fs (one-api did not complete; rag-mcp did not cancel early): %w", budget.Seconds(), err)
 }
 
-func (c *EmbeddingClient) callEndpoint(baseURL string, req EmbeddingRequest) ([][]float32, error) {
-	// One slot per HTTP attempt, so retries cannot stack on a saturated
-	// CPU-only fan-out either. Ping bypasses this (it uses callEndpointWithClient).
+// callEndpointWithBudget runs one HTTP attempt under the remaining slice of the
+// total budget and the concurrency limiter (so retries cannot stampede a
+// saturated CPU-only fan-out). Ping bypasses this via callEndpointWithClient.
+func (c *EmbeddingClient) callEndpointWithBudget(baseURL string, req EmbeddingRequest, remaining time.Duration) ([][]float32, error) {
 	c.acquire()
 	defer c.release()
-	return c.callEndpointWithClient(c.httpClient, baseURL, req)
+	return c.callEndpointWithClient(&http.Client{Timeout: remaining}, baseURL, req)
 }
 
 func (c *EmbeddingClient) callEndpointWithClient(client *http.Client, baseURL string, req EmbeddingRequest) ([][]float32, error) {

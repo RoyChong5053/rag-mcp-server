@@ -2,24 +2,15 @@ package engine
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
-
-// rerankDownTTL is how long the rerank circuit breaker stays open after a
-// failure. A dead/absent reranker (LOQ off) is skipped for this window so
-// searches degrade to vector order instantly instead of paying the timeout
-// again; the first successful call clears it.
-const rerankDownTTL = 2 * time.Minute
 
 // RerankClient calls one-api's rerank endpoint
 type RerankClient struct {
@@ -34,18 +25,16 @@ type RerankClient struct {
 	limits     func() (int, int)
 	httpClient *http.Client
 
-	// healthMu guards downUntil, the rerank circuit breaker. After a failure
-	// the reranker is skipped for rerankDownTTL so a search degrades to vector
-	// order instantly instead of paying the timeout again.
-	healthMu  sync.Mutex
-	downUntil time.Time
+	// timeout is the TOTAL budget for one logical rerank across retries. Like
+	// the embedding client it stays above one-api's failover window so rag-mcp
+	// never cancels mid-failover.
+	timeout time.Duration
 }
 
-// NewRerankClient creates a new rerank client.
-// Timeout is 45s: a 30-doc fan-out through one-api takes ~36s when healthy.
-// Rerank is fail-open (failure degrades to vector order), so a tight budget
-// here only costs ranking quality, never availability. Channel fallback is
-// one-api's job; this client retries at most once.
+// NewRerankClient creates a new rerank client. The default budget is
+// defaultOneAPITimeout (180s): rerank is fail-open, so a slow/dead reranker
+// costs ranking quality (or a bounded wait), never correctness. Channel
+// fallback is one-api's job.
 func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, docMaxChars int) *RerankClient {
 	return &RerankClient{
 		baseURL:       baseURL,
@@ -55,9 +44,29 @@ func NewRerankClient(baseURL, backupURL, model, apiKey string, queryMaxChars, do
 		queryMaxChars: queryMaxChars,
 		docMaxChars:   docMaxChars,
 		httpClient: &http.Client{
-			Timeout: 45 * time.Second,
+			Timeout: defaultOneAPITimeout,
 		},
+		timeout: defaultOneAPITimeout,
 	}
+}
+
+// SetTimeout sets the total per-call budget. 0 keeps the default.
+func (c *RerankClient) SetTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if d > 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	c.timeout = d
+	c.httpClient.Timeout = d
+}
+
+func (c *RerankClient) budget() time.Duration {
+	if c.timeout <= 0 {
+		return defaultOneAPITimeout
+	}
+	return c.timeout
 }
 
 // SetLimitsProvider wires a callback for runtime truncation limits.
@@ -101,29 +110,18 @@ const (
 	ScoreModeLogit                       // unbounded, needs sigmoid
 )
 
-// Rerank reranks documents against a query.
-//
-// wait is the caller's total deadline (embed+reranker budget). It is threaded
-// down as a context so a tight budget fails open at `wait` instead of eating
-// the full 45s HTTP timeout: on timeout we fall back to vector order and do
-// NOT latch the breaker, keeping a transient stall from becoming a persistent
-// outage. See RerankClient for the breaker policy (fatal only).
-func (c *RerankClient) Rerank(ctx context.Context, query string, documents []string, topN int, wait time.Duration) ([]RerankResult, error) {
+// Rerank reranks documents against a query. Failure is fail-open at the call
+// site (the search keeps vector order), so this only reports the error. The
+// client never cancels one-api mid-failover; one-api owns channel selection and
+// penalizes bad channels only when it — not rag-mcp — returns the error.
+func (c *RerankClient) Rerank(query string, documents []string, topN int) ([]RerankResult, error) {
 	if len(documents) == 0 {
 		return nil, nil
 	}
 
-	// Truncate query
 	queryMax, docMax := c.effectiveLimits()
 	query = truncateRunes(query, queryMax)
 
-	// Circuit breaker: a recent failure skips rerank entirely so a dead
-	// upstream never costs the full timeout on every search.
-	if c.isDown() {
-		return nil, fmt.Errorf("rerank temporarily disabled after a recent failure")
-	}
-
-	// Truncate documents
 	boundedDocs := make([]string, len(documents))
 	for i, doc := range documents {
 		boundedDocs[i] = truncateRunes(doc, docMax)
@@ -136,95 +134,55 @@ func (c *RerankClient) Rerank(ctx context.Context, query string, documents []str
 		TopN:      topN,
 	}
 
-	// Primary endpoint first (one retry per callWithRetry attempt is ctx-bounded);
-	// fall back to the backup once so a bad primary doesn't cost the whole budget.
-	var results []RerankResult
-	var err error
-	results, err = c.callWithRetry(ctx, c.baseURL, req)
-	if err != nil && ctx.Err() == nil && c.backupURL != "" {
-		results, err = c.callWithRetry(ctx, c.backupURL, req)
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		log.Printf("rerank timed out at %.0fs — fail-open: keeping vector order", wait.Seconds())
-		return results, fmt.Errorf("rerank deadline exceeded (%.0fs): %w", wait.Seconds(), ctxErr)
-	}
-	if err != nil {
-		switch {
-		case fatalRerankErr(err):
-			log.Printf("rerank FATAL error: %v — breaker OPEN (fatal misconfig, not retryable)", err)
-			c.markDown()
-			return nil, err
-		default:
-			if rerankRetryable(err) {
-				c.markDown()
-			} else {
-				c.markUp()
-			}
-			return nil, err
-		}
-	}
-	c.markUp()
-	return results, nil
-}
-
-// isDown reports whether the rerank circuit breaker is open.
-func (c *RerankClient) isDown() bool {
-	c.healthMu.Lock()
-	defer c.healthMu.Unlock()
-	return time.Now().Before(c.downUntil)
-}
-
-func (c *RerankClient) markDown() {
-	c.healthMu.Lock()
-	defer c.healthMu.Unlock()
-	c.downUntil = time.Now().Add(rerankDownTTL)
-}
-
-func (c *RerankClient) markUp() {
-	c.healthMu.Lock()
-	defer c.healthMu.Unlock()
-	c.downUntil = time.Time{}
-}
-
-// callWithRetry runs one rerank request with a single quick retry. ctx bounds
-// the whole fan-out: if it is already gone we stop early so a tight caller
-// budget fails open instead of burning another attempt. 2 attempts keep the
-// healthy 30-doc fan-out (~36s) inside budget while an offline upstream fails
-// fast instead of hanging the search path.
-func (c *RerankClient) callWithRetry(ctx context.Context, baseURL string, req RerankRequest) ([]RerankResult, error) {
-	const maxAttempts = 2
-	var err error
-	var results []RerankResult
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if ctx.Err() != nil {
-			break
-		}
-		results, err = c.callEndpointWithClient(c.httpClient, baseURL, req)
-		if err == nil {
-			return results, nil
-		}
-		if !rerankRetryable(err) && attempt == 1 {
-			// Non-retryable (auth/validation): one attempt is enough, but
-			// still give the backup endpoint a chance via the caller.
-			return nil, err
-		}
-		if attempt < maxAttempts {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
+	results, err := c.callWithRetry(c.baseURL, req)
+	if err != nil && c.backupURL != "" {
+		results, err = c.callWithRetry(c.backupURL, req)
 	}
 	return results, err
 }
 
-// rerankRetryable reports whether a rerank error deserves another attempt.
-// Transport failures and 429/5xx are retryable; auth/validation fail fast.
-// A client timeout is NOT retryable: the upstream is absent or overloaded,
-// and a second full timeout would only double the stall (fail-open instead).
+// callWithRetry runs one logical rerank within a single total budget, retrying
+// only on a genuine one-api error (5xx/429/transport) and only while time
+// remains. A client timeout is not retried (the budget is already spent).
+func (c *RerankClient) callWithRetry(baseURL string, req RerankRequest) ([]RerankResult, error) {
+	budget := c.budget()
+	deadline := time.Now().Add(budget)
+	backoff := time.Second
+	const maxAttempts = 2
+	var err error
+	var results []RerankResult
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		results, err = c.callEndpointWithClient(&http.Client{Timeout: remaining}, baseURL, req)
+		if err == nil {
+			return results, nil
+		}
+		if !rerankRetryable(err) || attempt == maxAttempts {
+			return results, err
+		}
+		if time.Until(deadline) <= backoff {
+			break
+		}
+		time.Sleep(backoff)
+	}
+	if err == nil {
+		err = fmt.Errorf("rerank unavailable: budget of %.0fs exhausted", budget.Seconds())
+	}
+	return results, err
+}
+
+// rerankRetryable reports whether a rerank error deserves another attempt:
+// one-api server errors and transport failures yes, an exhausted client
+// timeout no (there is no budget left to retry into).
 func rerankRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "Client.Timeout exceeded") {
+	if strings.Contains(msg, "Client.Timeout exceeded") || strings.Contains(msg, "context deadline exceeded") {
 		return false
 	}
 	for _, code := range []string{" 429", " 500", " 502", " 503", " 504", "request failed"} {
@@ -233,40 +191,6 @@ func rerankRetryable(err error) bool {
 		}
 	}
 	return false
-}
-
-// fatalRerankErr reports whether an error is FATAL: the request must never be
-// retried and must not trip the breaker. These are client-side misconfig — a
-// wrong API key (401) or an unparseable body — where hammering again would
-// only repeat the same failure until a human fixes it.
-func fatalRerankErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized") ||
-		strings.Contains(msg, "invalid api key") || strings.Contains(msg, "malformed") ||
-		strings.Contains(msg, "failed to parse rerank") || strings.Contains(msg, "failed to marshal rerank")
-}
-
-// rerankExceeded reports whether err is a timeout (client deadline or context
-// cancellation). A timed-out upstream must NOT latch the breaker: fail-open and
-// fall back to vector order so a transient stall never turns into a persistent
-// outage. This mirrors rerankRetryable's "timeout = absent/overloaded" stance,
-// but as an explicit branch so it is impossible to be retried-then-latched by
-// mistake (the old any-error -> markDown path).
-func rerankExceeded(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "Client.Timeout exceeded") ||
-		strings.Contains(strings.ToLower(err.Error()), "context canceled")
-}
-
-func (c *RerankClient) callEndpoint(baseURL string, req RerankRequest) ([]RerankResult, error) {
-	return c.callEndpointWithClient(c.httpClient, baseURL, req)
 }
 
 func (c *RerankClient) callEndpointWithClient(client *http.Client, baseURL string, req RerankRequest) ([]RerankResult, error) {
