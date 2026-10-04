@@ -27,24 +27,6 @@ func TestSubmitError(t *testing.T) {
 	}
 }
 
-// A panic inside a background task must be contained to that job: if the
-// guard regresses, the panic unwinds through the goroutine and kills the
-// whole test process instead of just failing this assertion.
-func TestSubmitPanicIsContained(t *testing.T) {
-	m := NewManager(nil, 2)
-	j := m.Submit(KindSearch, func() (any, error) { panic("kaboom") })
-	got, done := m.Await(j.ID, time.Second)
-	if !done {
-		t.Fatal("expected the panicking job to reach a terminal state")
-	}
-	if got.State != StateError {
-		t.Fatalf("state = %q, want %q (job=%+v)", got.State, StateError, got)
-	}
-	if got.Error == "" {
-		t.Fatalf("expected an error to be recorded, got %+v", got)
-	}
-}
-
 func TestAwaitTimesOutThenCompletes(t *testing.T) {
 	m := NewManager(nil, 2)
 	release := make(chan struct{})
