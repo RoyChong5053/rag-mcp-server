@@ -29,21 +29,8 @@ func IsUnavailable(err error) bool {
 	return errors.As(err, &u)
 }
 
-// otherBackend returns the counterpart backend used for same-name failover.
-func otherBackend(b string) string {
-	switch b {
-	case BackendQdrant:
-		return BackendVectra
-	case BackendVectra:
-		return BackendQdrant
-	}
-	return ""
-}
-
-// VectorStore is the storage surface shared by every backend (Qdrant REST,
-// local file-based Vectra-compatible store). The RAG pipeline is written
-// against this interface so a deployment can pick a backend without touching
-// search/index logic. Methods keep the historical Qdrant client signatures.
+// VectorStore is the storage surface for the local file-based
+// Vectra-compatible store. The RAG pipeline is written against this interface.
 type VectorStore interface {
 	CreateCollection(name string) error
 	CollectionExists(name string) (bool, error)
@@ -58,16 +45,22 @@ type VectorStore interface {
 }
 
 // Backend names accepted by storage.backend and registry entries.
+// The server is vectra-only; BackendQdrant is kept as a deprecated alias so
+// old settings.json / collections.json entries still parse (they are treated
+// as vectra and normalized on write).
 const (
-	BackendQdrant = "qdrant"
 	BackendVectra = "vectra"
+	BackendQdrant = "qdrant" // deprecated: accepted on read, never used for storage
 )
 
-var _ VectorStore = (*QdrantClient)(nil)
+// NormalizeBackend maps legacy backend names to the single supported backend.
+func NormalizeBackend(b string) string {
+	return BackendVectra
+}
 
 // Point is one stored vector plus its payload.
-// ID must be an unsigned integer or UUID (Qdrant rejects arbitrary strings);
-// the file backend stringifies it.
+// ID is a deterministic uint64 (collection hash + chunk hash); the file
+// backend stringifies it into index.json.
 type Point struct {
 	ID      uint64         `json:"id"`
 	Payload map[string]any `json:"payload"`

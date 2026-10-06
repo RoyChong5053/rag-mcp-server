@@ -123,6 +123,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/audit", h.requireAuth(h.audit))
 	mux.HandleFunc("GET /api/settings", h.requireAuth(h.getSettings))
 	mux.HandleFunc("POST /api/settings", h.requireAuth(h.setSettings))
+	mux.HandleFunc("GET /api/vault/verify", h.requireAuth(h.handleVaultVerify))
+	mux.HandleFunc("POST /api/vault/prune", h.requireAuth(h.handleVaultPrune))
+	mux.HandleFunc("POST /api/vault/import", h.requireAuth(h.handleVaultImport))
 	return mux
 }
 
@@ -203,11 +206,10 @@ type settingsResponse struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// setSettings applies a partial settings patch. It never blocks on backend
-// reachability: a default collection is only a routing hint, and refusing to
-// save while qdrant is down would defeat the very failover the setting exists
-// to configure. Names that cannot be verified are returned as warnings; a typo
-// still fails loudly at the first search (it never silently widens).
+// setSettings applies a partial settings patch. It never blocks on store
+// reachability: a default collection is only a routing hint. Names that cannot
+// be verified are returned as warnings; a typo still fails loudly at the
+// first search (it never silently widens).
 func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 	var patch settings.Patch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
@@ -216,11 +218,15 @@ func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.ActiveBackend != nil {
 		b := strings.TrimSpace(*patch.ActiveBackend)
-		if b != "" && b != engine.BackendQdrant && b != engine.BackendVectra {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("active_backend must be %q or %q (empty = follow config)", engine.BackendQdrant, engine.BackendVectra))
+		if b != "" && b != engine.BackendVectra && b != engine.BackendQdrant {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("active_backend must be %q", engine.BackendVectra))
 			return
 		}
-		patch.ActiveBackend = &b
+		norm := engine.BackendVectra
+		if b == "" {
+			norm = ""
+		}
+		patch.ActiveBackend = &norm
 	}
 
 	var warnings []string
@@ -243,7 +249,7 @@ func (h *Handler) setSettings(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, fmt.Sprintf("'%s' not found in %s; search/store will fail until it exists", name, backend))
 		}
 	}
-	check(&patch.DefaultCollectionQdrant, engine.BackendQdrant)
+	check(&patch.DefaultCollectionQdrant, engine.BackendVectra)
 	check(&patch.DefaultCollectionVectra, engine.BackendVectra)
 
 	if err := h.eng.Settings().Update(patch); err != nil {
@@ -262,10 +268,8 @@ func (h *Handler) listCollections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, details)
 }
 
-// createCollection makes an empty collection in Qdrant. Lets the dashboard
-// set up a fresh write target (e.g. a global memory bucket) before anything is
-// indexed into it — otherwise the settings default would reject the name as
-// "not found".
+// createCollection makes an empty collection in the file store. Lets the
+// dashboard set up a fresh write target before anything is indexed into it.
 func (h *Handler) createCollection(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
@@ -562,6 +566,56 @@ func (h *Handler) audit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"log": text[cut:]})
+}
+
+// handleVaultVerify runs the read-only vault self-check (?collection=, empty = all).
+func (h *Handler) handleVaultVerify(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("collection"))
+	if name != "" {
+		writeJSON(w, http.StatusOK, h.eng.VerifyCollection(name))
+		return
+	}
+	res := h.eng.VerifyAll()
+	if res == nil {
+		res = []engine.VaultVerifyResult{}
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleVaultPrune removes empty sources from one collection.
+func (h *Handler) handleVaultPrune(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Collection string `json:"collection"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	name := strings.TrimSpace(body.Collection)
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("collection is required"))
+		return
+	}
+	n, err := h.eng.PruneCollection(name)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "pruned": n})
+}
+
+// handleVaultImport activates a vault folder after an rclone copy.
+func (h *Handler) handleVaultImport(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // empty = configured store
+	res, err := h.eng.ImportVault(strings.TrimSpace(body.Path))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

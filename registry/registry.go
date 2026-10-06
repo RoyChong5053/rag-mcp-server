@@ -16,8 +16,9 @@ type ChunkConfig struct {
 	Strategy string `json:"strategy,omitempty"`
 }
 
-// Entry is the management metadata for one Qdrant collection.
-// It lives in collections.json on the server; Qdrant holds the vectors.
+// Entry is the management metadata for one vectra collection.
+// It lives in collections.json on the server; the Vectra/ folder holds the
+// vectors (self-described by .vectra/manifest.json + catalog.json).
 // Provenance fields (Chunk, EmbedModel, SourceSHA256) record HOW the
 // vectors were computed. Query policy (top_k/threshold) is deliberately
 // NOT here: that's the caller's decision at query time.

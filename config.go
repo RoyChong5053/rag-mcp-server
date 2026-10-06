@@ -10,7 +10,6 @@ type Config struct {
 	Server       ServerConfig   `yaml:"server"`
 	Admin        AdminConfig    `yaml:"admin"`
 	Storage      StorageConfig  `yaml:"storage"`
-	Qdrant       QdrantConfig   `yaml:"qdrant"`
 	OneAPI       OneAPIConfig   `yaml:"oneapi"`
 	Chunking     ChunkingConfig `yaml:"chunking"`
 	Rerank       RerankConfig   `yaml:"rerank"`
@@ -33,13 +32,14 @@ type Config struct {
 	DocsDir string `yaml:"docs_dir"`
 }
 
-// StorageConfig selects the vector backend. backend is the global default
-// ("qdrant" or "vectra"); a collection can override it via its registry entry.
+// StorageConfig selects the vector backend. The server is vectra-only:
+// backend is accepted for compatibility ("qdrant" maps to "vectra") but the
+// file store under VectraDir is always used.
 type StorageConfig struct {
 	Backend   string `yaml:"backend"`
 	VectraDir string `yaml:"vectra_dir"`
 	// MemoryDir is where store_memory raw text is persisted. Empty defaults to
-	// <docs_dir>/memory.
+	// <docs_dir>/memory (agent journal: <memory>/agent/YYYY-MM-DD.md).
 	MemoryDir string `yaml:"memory_dir"`
 }
 
@@ -64,11 +64,6 @@ type AdminConfig struct {
 	Username       string `yaml:"username"`
 	PasswordSHA256 string `yaml:"password_sha256"`
 	SessionDays    int    `yaml:"session_days"`
-}
-
-type QdrantConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
 }
 
 type OneAPIConfig struct {
@@ -133,12 +128,8 @@ func DefaultConfig() *Config {
 		AuditKeep:    3,
 		DocsDir:      "docs",
 		Storage: StorageConfig{
-			Backend:   "qdrant",
+			Backend:   "vectra",
 			VectraDir: "Vectra",
-		},
-		Qdrant: QdrantConfig{
-			Host: "localhost",
-			Port: 6333,
 		},
 		OneAPI: OneAPIConfig{
 			BaseURL:              "http://192.168.100.20:3000",

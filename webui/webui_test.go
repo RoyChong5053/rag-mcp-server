@@ -2,7 +2,6 @@ package webui
 
 import (
 	"encoding/json"
-	"net"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -12,36 +11,19 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
-func closedPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	return port
-}
-
-// Saving settings must succeed even when qdrant is unreachable: the dashboard
-// is how failover gets configured, so it cannot be locked out by the outage it
-// is meant to survive. Unverified names come back as warnings, not a 400.
-func TestSetSettingsSavesWhileQdrantDown(t *testing.T) {
+// Saving settings succeeds with warnings for unknown collections: a typo
+// fails loudly at search time, never silently widens.
+func TestSetSettingsSavesWithWarnings(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &engine.EngineConfig{
-		QdrantHost:   "127.0.0.1",
-		QdrantPort:   closedPort(t),
 		VectraDir:    filepath.Join(dir, "Vectra"),
-		Backend:      engine.BackendQdrant,
+		Backend:      engine.BackendVectra,
 		DocsDir:      dir,
 		RegistryPath: filepath.Join(dir, "collections.json"),
 	}
 	st := settings.New(filepath.Join(dir, "settings.json"), settings.Settings{
-		ActiveBackend:           engine.BackendQdrant,
-		DefaultCollectionQdrant: "global_memory",
-		FailoverEnabled:         true,
+		ActiveBackend:           engine.BackendVectra,
+		DefaultCollectionVectra: "global_memory",
 	})
 	eng, err := engine.NewEngine(cfg, st)
 	if err != nil {
@@ -49,7 +31,7 @@ func TestSetSettingsSavesWhileQdrantDown(t *testing.T) {
 	}
 	h := New(eng, filepath.Join(dir, "audit.log"), dir, BuildInfo{})
 
-	body := `{"active_backend":"vectra","default_collection_qdrant":"global_memory","default_collection_vectra":"gm_vectra","failover_enabled":true}`
+	body := `{"active_backend":"vectra","default_collection_vectra":"gm_vectra"}`
 	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.setSettings(rec, req)
@@ -71,7 +53,7 @@ func TestSetSettingsSavesWhileQdrantDown(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if len(resp.Warnings) == 0 {
-		t.Fatal("expected a warning that the qdrant default could not be verified")
+		t.Fatal("expected a warning that the default could not be verified")
 	}
 }
 
@@ -80,10 +62,8 @@ func TestSetSettingsSavesWhileQdrantDown(t *testing.T) {
 func TestSetSettingsRejectsBadActiveBackend(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &engine.EngineConfig{
-		QdrantHost:   "127.0.0.1",
-		QdrantPort:   closedPort(t),
 		VectraDir:    filepath.Join(dir, "Vectra"),
-		Backend:      engine.BackendQdrant,
+		Backend:      engine.BackendVectra,
 		DocsDir:      dir,
 		RegistryPath: filepath.Join(dir, "collections.json"),
 	}

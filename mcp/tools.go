@@ -17,13 +17,13 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "search_memory",
 		Description: "Search your persistent memory using semantic similarity. Returns relevant chunks from your knowledge base. " +
-			"Omit collection_id (and collection_ids) to use the configured default collection; if its backend is unreachable it fails over to the same-name replica on the other backend. " +
-			"Pass collection_ids to search several collections in one call: recall is merged and globally reranked to top_k; a collection that fails (down, dim mismatch) is skipped and reported in the server log. " +
+			"Omit collection_id (and collection_ids) to use the configured default collection. " +
+			"Pass collection_ids to search several collections in one call: recall is merged and globally reranked to top_k; a collection that fails (dim mismatch) is skipped and reported in the server log. " +
 			"With no default configured it searches all enabled collections. " +
 			"top_k, threshold and reranking default to server (WebUI) settings when omitted. " +
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
-			"or a raw Qdrant filter for advanced clauses. " +
+			"or a filter object with match.value clauses for advanced matching. " +
 			"The call is synchronous and can take up to the server's one-api timeout; if retrieval is unavailable the tool returns an error and the caller should proceed without RAG.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -56,7 +56,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"filter": map[string]any{
 					"type":        "object",
-					"description": "Optional: raw Qdrant filter (advanced). Takes precedence over metadata. Vectra supports match.value clauses only.",
+					"description": "Optional: filter object with match.value clauses (advanced). Takes precedence over metadata.",
 				},
 			},
 			"required": []string{"query"},
@@ -98,9 +98,9 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	server.RegisterTool(Tool{
 		Name: "store_memory",
 		Description: "Vectorize and store text into a collection so it can be recalled later with search_memory. " +
-			"Omit collection_id to write to the configured default collection, with automatic same-name failover to the other backend when its backend is unreachable. " +
-			"The raw text is persisted on the server (under docs memory, by date) and indexed as a document, " +
-			"so it can be browsed in the data bank and re-indexed. " +
+			"Omit collection_id to write to the configured default collection. " +
+			"The raw text is appended to the daily agent journal (docs/memory/agent/YYYY-MM-DD.md) and only the new text is embedded, " +
+			"so it can be browsed in the data bank. " +
 			"The call is synchronous and can take up to the server's one-api timeout.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -144,7 +144,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"filter": map[string]any{
 					"type":        "object",
-					"description": "Qdrant filter to match points for deletion",
+					"description": "Filter to match points for deletion (match.value clauses)",
 				},
 			},
 			"required": []string{"collection_id"},
@@ -179,7 +179,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 	server.RegisterTool(Tool{
 		Name:        "health_check",
-		Description: "Check component health (qdrant, vectra, embedding, rerank) and report the active default backend. This is an on-demand probe; nothing in the query path depends on it.",
+		Description: "Check component health (vectra, embedding, rerank) and report the active default backend. This is an on-demand probe; nothing in the query path depends on it.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -212,7 +212,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 	server.RegisterTool(Tool{
 		Name:        "set_collection_meta",
-		Description: "Set management metadata for a collection: display name, description, tags, enabled flag, consumers, backend (qdrant|vectra).",
+		Description: "Set management metadata for a collection: display name, description, tags, enabled flag, consumers. Backend is always vectra.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -244,7 +244,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"backend": map[string]any{
 					"type":        "string",
-					"description": "Storage backend: qdrant or vectra. Empty follows the server default.",
+					"description": "Storage backend, always vectra. Accepted for compatibility.",
 				},
 			},
 			"required": []string{"collection_id"},
@@ -303,6 +303,69 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		return fmt.Sprintf("Deleted collection '%s'", collectionID), nil
 	})
+
+	server.RegisterTool(Tool{
+		Name:        "vault_verify",
+		Description: "Read-only self-check of the file vault: catalog<->index.json consistency, counts, dims, orphans. Omit collection_id to check all.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to verify. Empty checks all.",
+				},
+			},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		if strings.TrimSpace(collectionID) != "" {
+			return ConvertToJSON(eng.VerifyCollection(strings.TrimSpace(collectionID))), nil
+		}
+		return ConvertToJSON(eng.VerifyAll()), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "vault_prune",
+		Description: "Remove empty sources (0 items) from a collection and refresh its manifest. Safe cleanup for verify empty_source findings.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to prune",
+				},
+			},
+			"required": []string{"collection_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		n, err := eng.PruneCollection(collectionID)
+		if err != nil {
+			return nil, err
+		}
+		return fmt.Sprintf("Pruned %d empty sources from '%s'", n, collectionID), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "vault_import",
+		Description: "Make a vault folder live after rclone copy: scan collections, verify, register missing entries, refresh cache. Pass the vault root path (server-local).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Vault root path on the server. Empty uses the configured store.",
+				},
+			},
+		},
+	}, func(args map[string]any) (any, error) {
+		path, _ := args["path"].(string)
+		res, err := eng.ImportVault(strings.TrimSpace(path))
+		if err != nil {
+			return nil, err
+		}
+		return ConvertToJSON(res), nil
+	})
 }
 
 // Helper functions
@@ -358,7 +421,7 @@ func getStringSliceArg(args map[string]any, key string) []string {
 
 // getFilterArg builds a store filter from search_memory args. An explicit
 // "filter" wins; otherwise a flat "metadata" map becomes an AND of exact
-// metadata.<key> matches (supported by both Qdrant and vectra).
+// metadata.<key> matches.
 func getFilterArg(args map[string]any) map[string]any {
 	if f, ok := args["filter"].(map[string]any); ok && len(f) > 0 {
 		return f

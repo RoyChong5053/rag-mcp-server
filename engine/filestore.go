@@ -600,6 +600,186 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 	return f.saveCatalog(collection, cat)
 }
 
+// VectorDim returns the vector dimension of the first stored item, or 0 when
+// the collection is empty/unknown. Used as a loud dim-mismatch gate.
+func (f *FileStore) VectorDim(name string) int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	cat, err := f.loadCatalog(name)
+	if err != nil || cat == nil {
+		return 0
+	}
+	for _, meta := range cat.Sources {
+		idx, err := f.loadIndex(name, meta.Key)
+		if err != nil || idx == nil || len(idx.Items) == 0 {
+			continue
+		}
+		for _, it := range idx.Items {
+			if len(it.Vector) > 0 {
+				return len(it.Vector)
+			}
+		}
+	}
+	return 0
+}
+
+// UpdateCatalogMeta fills self-describing provenance into one catalog entry
+// (sha256 of the raw source + chunking + embedding model). Best-effort: a
+// missing collection/source is created.
+func (f *FileStore) UpdateCatalogMeta(collection, source, sha256 string, chunkSize, overlap int, strategy, embedModel string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return
+	}
+	meta := cat.Sources[source]
+	if meta.Key == "" {
+		meta.Key = f.sourceKey(source)
+	}
+	if sha256 != "" {
+		meta.SHA256 = sha256
+	}
+	if chunkSize > 0 {
+		meta.ChunkSize = chunkSize
+	}
+	if overlap > 0 {
+		meta.Overlap = overlap
+	}
+	if strategy != "" {
+		meta.Strategy = strategy
+	}
+	if embedModel != "" {
+		meta.EmbedModel = embedModel
+	}
+	cat.Sources[source] = meta
+	_ = f.saveCatalog(collection, cat)
+}
+
+// InvalidateCollection drops cached indexes for one collection so externally
+// copied (rclone) files are re-read from disk.
+func (f *FileStore) InvalidateCollection(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropCachedCollection(name)
+}
+
+// InvalidateAll drops the whole index cache (used after a vault import).
+func (f *FileStore) InvalidateAll() {
+	f.cacheMu.Lock()
+	f.indexCache = map[string]*vectraIndex{}
+	f.cacheMu.Unlock()
+}
+
+// Root returns the file-store root directory (the vault root).
+func (f *FileStore) Root() string { return f.root }
+
+// VerifyIssue is one self-check finding for a collection.
+type VerifyIssue struct {
+	Kind   string `json:"kind"` // missing_index | bad_index | count_mismatch | dim_mismatch | orphan_dir | empty_source
+	Source string `json:"source,omitempty"`
+	Detail string `json:"detail"`
+}
+
+// VerifyCollection scans catalog <-> index.json consistency without mutating.
+// wantDim > 0 additionally checks every item dimension.
+func (f *FileStore) VerifyCollection(name string, wantDim int) []VerifyIssue {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []VerifyIssue
+	cat, err := f.loadCatalog(name)
+	if err != nil {
+		return []VerifyIssue{{Kind: "bad_index", Detail: "catalog unreadable: " + err.Error()}}
+	}
+	if cat == nil {
+		return []VerifyIssue{{Kind: "missing_index", Detail: "catalog.json missing"}}
+	}
+	for source, meta := range cat.Sources {
+		idx, err := f.loadIndex(name, meta.Key)
+		if err != nil {
+			out = append(out, VerifyIssue{Kind: "bad_index", Source: source, Detail: err.Error()})
+			continue
+		}
+		if idx == nil {
+			out = append(out, VerifyIssue{Kind: "missing_index", Source: source, Detail: "index.json missing for key " + meta.Key})
+			continue
+		}
+		if meta.Chunks != len(idx.Items) {
+			out = append(out, VerifyIssue{Kind: "count_mismatch", Source: source, Detail: fmt.Sprintf("catalog chunks=%d but index has %d items", meta.Chunks, len(idx.Items))})
+		}
+		if len(idx.Items) == 0 {
+			out = append(out, VerifyIssue{Kind: "empty_source", Source: source, Detail: "source has no items (prune candidate)"})
+		}
+		for _, it := range idx.Items {
+			if wantDim > 0 && len(it.Vector) > 0 && len(it.Vector) != wantDim {
+				out = append(out, VerifyIssue{Kind: "dim_mismatch", Source: source, Detail: fmt.Sprintf("item %s is %d-d, want %d-d", it.ID, len(it.Vector), wantDim)})
+				break
+			}
+		}
+	}
+	// Orphan dirs: on-disk source folders with no catalog entry.
+	entries, err := os.ReadDir(f.collectionDir(name))
+	if err == nil {
+		known := map[string]bool{}
+		for _, m := range cat.Sources {
+			known[m.Key] = true
+		}
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == ".vectra" {
+				continue
+			}
+			rel := filepath.ToSlash(e.Name())
+			// Multi-level keys: check first segment presence via full walk is
+			// expensive; report only top-level orphans not referenced by any key.
+			referenced := false
+			for k := range known {
+				if k == rel || strings.HasPrefix(k, rel+"/") || strings.HasPrefix(rel, k+"/") {
+					referenced = true
+					break
+				}
+			}
+			if !referenced {
+				out = append(out, VerifyIssue{Kind: "orphan_dir", Source: rel, Detail: "directory has no catalog entry"})
+			}
+		}
+	}
+	return out
+}
+
+// PruneCollection removes empty sources (0 items) and their folders plus
+// catalog entries. Returns pruned source count.
+func (f *FileStore) PruneCollection(name string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cat, err := f.loadCatalog(name)
+	if err != nil {
+		return 0, err
+	}
+	if cat == nil {
+		return 0, fmt.Errorf("collection '%s' not found", name)
+	}
+	pruned := 0
+	for source, meta := range cat.Sources {
+		idx, err := f.loadIndex(name, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		if len(idx.Items) != 0 {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(f.collectionDir(name), filepath.FromSlash(meta.Key)))
+		f.dropCachedCollection(name)
+		delete(cat.Sources, source)
+		pruned++
+	}
+	if pruned > 0 {
+		if err := f.saveCatalog(name, cat); err != nil {
+			return pruned, err
+		}
+	}
+	return pruned, nil
+}
+
 // DeleteCollection removes the collection directory.
 func (f *FileStore) DeleteCollection(name string) error {
 	f.mu.Lock()

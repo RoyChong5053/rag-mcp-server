@@ -160,8 +160,6 @@ func main() {
 
 	// Create engine
 	engineConfig := &engine.EngineConfig{
-		QdrantHost:      cfg.Qdrant.Host,
-		QdrantPort:      cfg.Qdrant.Port,
 		VectraDir:       vectraDir,
 		Backend:         cfg.Storage.Backend,
 		DocsDir:         cfg.DocsDir,
@@ -212,7 +210,6 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("RAG MCP Server %s (%s) starting on %s", ver, com, addr)
 	log.Printf("MCP endpoint: http://%s/mcp", addr)
-	log.Printf("Qdrant: %s:%d", cfg.Qdrant.Host, cfg.Qdrant.Port)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
 	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, vectraDir)
 	log.Printf("Registry: %s", cfg.RegistryPath)

@@ -7,20 +7,11 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
-// Compute mode is static: only the active backend decides. A down qdrant does
-// NOT flip a qdrant-active engine to CPU — no health probe on the query path.
+// Compute mode: vectra-only servers always use the CPU batch cap.
 func TestUsesCPUCompute(t *testing.T) {
 	vectraActive := newTestEngine(t, settings.Settings{ActiveBackend: BackendVectra}, newFakeStore(true), newFakeStore(true))
 	if !vectraActive.usesCPUCompute() {
 		t.Fatal("active vectra should be CPU mode")
-	}
-
-	qdrantActive := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant}, newFakeStore(false), newFakeStore(true))
-	qdrantActive.healthMu.Lock()
-	qdrantActive.downUntil[BackendQdrant] = time.Now().Add(time.Minute)
-	qdrantActive.healthMu.Unlock()
-	if qdrantActive.usesCPUCompute() {
-		t.Fatal("compute mode must stay static (GPU) for active qdrant even when marked down")
 	}
 }
 
@@ -32,12 +23,8 @@ func TestEffectiveEmbedBatchSizeByMode(t *testing.T) {
 		t.Fatalf("cpu mode batch size = %d, want %d", got, embedBatchSizeCPU)
 	}
 
-	gpu := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant, EmbedBatchSize: 0}, newFakeStore(true), newFakeStore(true))
-	if gpu.usesCPUCompute() {
-		t.Fatal("active qdrant should be GPU mode")
-	}
-	if got := gpu.effectiveEmbedBatchSize(false); got != embedBatchSizeGPU {
-		t.Fatalf("gpu default batch size = %d, want %d", got, embedBatchSizeGPU)
+	if got := newTestEngine(t, settings.Settings{EmbedBatchSize: 0}, newFakeStore(true)).effectiveEmbedBatchSize(false); got != embedBatchSizeGPU {
+		t.Fatalf("default batch size = %d, want %d", got, embedBatchSizeGPU)
 	}
 
 	// A CPU cap does not raise a smaller explicit setting.

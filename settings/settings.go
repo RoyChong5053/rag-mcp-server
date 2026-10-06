@@ -10,20 +10,16 @@ import (
 // settings.json and edited through the WebUI; every frontend (ST plugin,
 // opencode, raw HTTP callers) reads these instead of hardcoding values.
 type Settings struct {
-	// ActiveBackend selects which backend's default collection search_memory
-	// and store_memory use when the caller omits collection_id. Empty follows
-	// the engine's configured storage.backend. It only affects the default
-	// search/write scope, never where new named collections are created.
+	// ActiveBackend is kept for compatibility and always normalizes to
+	// "vectra" (single-backend server).
 	ActiveBackend string `json:"active_backend"`
-	// DefaultCollectionQdrant is the scope used when the active backend is
-	// qdrant, and the primary target for an omitted collection_id. Empty means
-	// "search all enabled collections".
+	// DefaultCollectionQdrant is a legacy alias: honored when
+	// DefaultCollectionVectra is empty.
 	DefaultCollectionQdrant string `json:"default_collection_qdrant"`
-	// DefaultCollectionVectra is the scope used when the active backend is
-	// vectra, and the failover target when qdrant is unreachable. Empty means
-	// no vectra default (failover disabled for that path).
+	// DefaultCollectionVectra is the default scope for omitted collection_id.
+	// Empty means "search all enabled collections".
 	DefaultCollectionVectra string `json:"default_collection_vectra"`
-	// FailoverEnabled lets a qdrant outage fall back to DefaultCollectionVectra.
+	// FailoverEnabled is deprecated (no second backend) and ignored.
 	FailoverEnabled bool `json:"failover_enabled"`
 	// DefaultTopK is how many results search_memory returns when top_k is omitted.
 	DefaultTopK int `json:"default_top_k"`
@@ -143,7 +139,7 @@ func (s *Store) Update(p Patch) error {
 	defer s.mu.Unlock()
 
 	if p.ActiveBackend != nil {
-		s.data.ActiveBackend = *p.ActiveBackend
+		s.data.ActiveBackend = "vectra"
 	}
 	if p.DefaultCollectionQdrant != nil {
 		s.data.DefaultCollectionQdrant = *p.DefaultCollectionQdrant

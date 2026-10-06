@@ -30,7 +30,7 @@ func newMultiTestEngine(t *testing.T, fail map[string]error) *Engine {
 	t.Helper()
 	fs := newFakeStore(true, "good", "bad", "worse")
 	fs.results = []StoreSearchResult{{ID: 1, Score: 0.9, Payload: map[string]any{"text": "hit"}}}
-	e := newTestEngine(t, settings.Settings{ActiveBackend: BackendQdrant}, &colStore{fakeStore: fs, fail: fail}, newFakeStore(true))
+	e := newTestEngine(t, settings.Settings{ActiveBackend: BackendVectra}, &colStore{fakeStore: fs, fail: fail}, newFakeStore(true))
 	srv := fakeEmbeddingServer(t)
 	e.embedding = NewEmbeddingClient(srv.URL, "", "embedding", "")
 	return e
@@ -73,7 +73,7 @@ func TestSearchMultiAllFailedIsLoudError(t *testing.T) {
 func TestSearchMultiSkipsDimMismatch(t *testing.T) {
 	e := newMultiTestEngine(t, nil)
 	if err := e.registry.Update("dimcol", func(en *registry.Entry) {
-		en.Backend = BackendQdrant
+		en.Backend = BackendVectra
 		en.VectorDim = 768 // fake embedding server returns 3-d
 	}); err != nil {
 		t.Fatalf("registry update: %v", err)
@@ -97,7 +97,7 @@ func TestSearchMultiSkipsDimMismatch(t *testing.T) {
 func TestSearchMultiSkipsDisabledCollection(t *testing.T) {
 	e := newMultiTestEngine(t, nil)
 	if err := e.registry.Update("offcol", func(en *registry.Entry) {
-		en.Backend = BackendQdrant
+		en.Backend = BackendVectra
 		en.Enabled = false
 	}); err != nil {
 		t.Fatalf("registry update: %v", err)
@@ -127,7 +127,7 @@ func TestSearchRerankFailureIsError(t *testing.T) {
 
 	e := newMultiTestEngine(t, nil)
 	// Two candidates: the rerank leg only runs for merged lists > 1.
-	e.stores[BackendQdrant].(*colStore).results = []StoreSearchResult{
+	e.stores[BackendVectra].(*colStore).results = []StoreSearchResult{
 		{ID: 1, Score: 0.9, Payload: map[string]any{"text": "one"}},
 		{ID: 2, Score: 0.8, Payload: map[string]any{"text": "two"}},
 	}

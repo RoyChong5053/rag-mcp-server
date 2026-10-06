@@ -30,16 +30,12 @@ audit_path: "logs/rag-mcp.log"
 # Data-bank root browsed by the dashboard (server-local paths).
 docs_dir: "docs"
 
-# Vector backend. backend = global default (qdrant | vectra); a collection can
-# override it via its registry entry. vectra_dir holds the local file store.
+# Vector backend (vectra-only). backend is accepted for compatibility.
 storage:
-  backend: "qdrant"
+  backend: "vectra"
   vectra_dir: "Vectra"
   # memory_dir: "docs/memory"   # store_memory raw text (default: <docs_dir>/memory)
 
-qdrant:
-  host: "localhost"
-  port: 6333
 
 oneapi:
   base_url: "http://192.168.100.20:3000"

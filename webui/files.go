@@ -19,13 +19,7 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
 
-// otherName reports the opposite backend for log lines (qdrant<->vectra).
-func otherName(backend string) string {
-	if backend == engine.BackendQdrant {
-		return engine.BackendVectra
-	}
-	return engine.BackendQdrant
-}
+
 
 // Files larger than this skip hashing in listings (shown as status unknown-hash).
 const maxHashBytes = 50 << 20
@@ -43,6 +37,16 @@ type FileEntry struct {
 	SHA256     string `json:"sha256,omitempty"`
 	Status     string `json:"status"` // unindexed | indexed_fresh | indexed_stale | unknown
 	Collection string `json:"collection,omitempty"`
+	// Visibility groups the data bank: agent journals default hidden, manual
+	// uploads default shown. The dashboard toggles them client-side.
+	Visibility string `json:"visibility"`
+}
+
+func fileVisibility(rel string) string {
+	if rel == "memory/agent" || len(rel) > 13 && (rel[:13] == "memory/agent" && rel[13] == '/') {
+		return "agent"
+	}
+	return "manual"
 }
 
 // jail resolves rel under root and rejects escapes and absolute inputs.
@@ -97,10 +101,11 @@ func (h *Handler) listFiles() ([]FileEntry, error) {
 			return nil
 		}
 		fe := FileEntry{
-			Path:   filepath.ToSlash(rel),
-			Size:   info.Size(),
-			Mtime:  info.ModTime().UTC().Format(time.RFC3339),
-			Status: "unindexed",
+			Path:       filepath.ToSlash(rel),
+			Size:       info.Size(),
+			Mtime:      info.ModTime().UTC().Format(time.RFC3339),
+			Status:     "unindexed",
+			Visibility: fileVisibility(filepath.ToSlash(rel)),
 		}
 		if col, ok := bySource[abs]; ok {
 			fe.Collection = col
@@ -222,7 +227,7 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 type indexBody struct {
 	Path           string `json:"path"`
 	Collection     string `json:"collection"`
-	Backend        string `json:"backend"` // "" (default) | qdrant | vectra
+	Backend        string `json:"backend"` // accepted for compatibility, always vectra
 	ChunkSize      int    `json:"chunk_size"`
 	OverlapPercent int    `json:"overlap_percent"`
 	Strategy       string `json:"strategy"`
@@ -248,38 +253,8 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("bad collection name (A-Za-z0-9_-, max 64, must start alnum)"))
 		return
 	}
-	backend := strings.TrimSpace(body.Backend)
-	if backend != "" && backend != engine.BackendQdrant && backend != engine.BackendVectra {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("backend must be qdrant or vectra (empty = server default)"))
-		return
-	}
-	// A collection's backend is fixed once chosen. Refuse to index into a
-	// different backend than the one the registry says it lives in, and refuse
-	// to create a same-name collection in the other store: either would leave
-	// vectors split across backends and silently break recall.
-	// Best-effort opposite check: when the other backend is unreachable
-	// (LOQ/qdrant down while vectorizing into vectra, or vice versa) we
-	// log a warning and let the job in. A real conflict (exists on both
-	// reachable stores) still returns 409; only non-unavailable errors
-	// return 502.
-	if backend != "" {
-		if en := h.eng.Registry().Get(body.Collection); en != nil && en.Backend != "" && en.Backend != backend {
-			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' is fixed to %s; refusing to index into %s", body.Collection, en.Backend, backend))
-			return
-		}
-		exists, err := h.eng.CollectionExistsOnOther(backend, body.Collection)
-		if err != nil {
-			if engine.IsUnavailable(err) {
-				log.Printf("SubmitIndex: opposite-backend check skipped (%s unreachable), allowing vectorize into %s/'%s'", otherName(backend), backend, body.Collection)
-			} else {
-				writeErr(w, http.StatusBadGateway, err)
-				return
-			}
-		} else if exists {
-			writeErr(w, http.StatusConflict, fmt.Errorf("collection '%s' already exists in the other backend; delete or rename it before vectorizing into %s", body.Collection, backend))
-			return
-		}
-	}
+	backend := engine.BackendVectra
+	_ = strings.TrimSpace(body.Backend) // accepted for compatibility; always vectra
 	if body.ChunkSize < 0 || body.ChunkSize > 20000 || body.OverlapPercent < 0 || body.OverlapPercent >= 100 {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("chunk_size 0-20000 (0=global), overlap_percent 0-99"))
 		return

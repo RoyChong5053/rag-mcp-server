@@ -33,7 +33,7 @@ type Engine struct {
 	// actually returned on the last successful embed. It is the source of truth
 	// for collection creation and provenance so a provider/model switch whose
 	// dimension differs from the declared config self-heals instead of
-	// hard-failing inside Qdrant.
+	// hard-failing inside the store.
 	observedEmbedDim atomic.Int32
 
 	// embedMu/embedCache lazily build one EmbeddingClient per configured
@@ -51,8 +51,6 @@ type Engine struct {
 
 // EngineConfig holds configuration for the engine
 type EngineConfig struct {
-	QdrantHost      string
-	QdrantPort      int
 	VectraDir       string
 	Backend         string
 	DocsDir         string
@@ -129,26 +127,16 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	embedding.SetTimeout(config.EmbedTimeout)
 	rerank.SetTimeout(config.RerankTimeout)
 
-	qdrant := NewQdrantClient(config.QdrantHost, config.QdrantPort)
-	qdrant.vectorDim = config.VectorDim
-	qdrant.vectorDistance = config.VectorDistance
-
-	stores := map[string]VectorStore{
-		BackendQdrant: qdrant,
-	}
 	vectraDir := config.VectraDir
 	if vectraDir == "" {
 		vectraDir = "Vectra"
 	}
-	stores[BackendVectra] = NewFileStore(vectraDir, config.DocsDir)
+	stores := map[string]VectorStore{
+		BackendVectra: NewFileStore(vectraDir, config.DocsDir),
+	}
 
-	backend := config.Backend
-	if backend == "" {
-		backend = BackendQdrant
-	}
-	if _, ok := stores[backend]; !ok {
-		return nil, fmt.Errorf("unknown storage backend %q (want %s or %s)", backend, BackendQdrant, BackendVectra)
-	}
+	// Vectra-only: any configured backend (including legacy "qdrant") maps here.
+	backend := BackendVectra
 
 	regPath := config.RegistryPath
 	if regPath == "" {
@@ -222,37 +210,30 @@ func (e *Engine) DefaultBackend() string {
 	return e.defaultBackend
 }
 
-// storeFor resolves the backend for a collection: an explicit per-collection
-// registry `backend` wins, otherwise the global default. A name without a
-// registry entry (new collection) uses the default backend.
+// storeFor resolves the store for a collection. The server is vectra-only:
+// every name maps to the single file store regardless of legacy registry
+// backend values.
 func (e *Engine) storeFor(name string) VectorStore {
-	if name != "" {
-		if en := e.registry.Get(name); en != nil && en.Backend != "" {
-			if s, ok := e.stores[en.Backend]; ok {
-				return s
-			}
-		}
-	}
-	return e.stores[e.defaultBackend]
+	return e.stores[BackendVectra]
 }
 
-// storeForBackend returns the store for an explicit backend name, falling back
-// to the configured default when the name is unknown.
+// storeForBackend returns the single file store for any backend name
+// (legacy callers may still pass "qdrant"; it is normalized to vectra).
 func (e *Engine) storeForBackend(backend string) VectorStore {
-	if s, ok := e.stores[backend]; ok {
-		return s
-	}
-	return e.stores[e.defaultBackend]
+	return e.stores[BackendVectra]
 }
 
-// ActiveBackend reports the runtime-selected default backend (settings
-// active_backend), or the configured storage.backend when unset/invalid.
-func (e *Engine) ActiveBackend() string {
-	b := strings.TrimSpace(e.settings.Get().ActiveBackend)
-	if b == BackendQdrant || b == BackendVectra {
-		return b
+// FileStore exposes the underlying file backend for vault operations.
+func (e *Engine) FileStore() *FileStore {
+	if fs, ok := e.stores[BackendVectra].(*FileStore); ok {
+		return fs
 	}
-	return e.defaultBackend
+	return nil
+}
+
+// ActiveBackend always reports vectra (legacy settings values map here).
+func (e *Engine) ActiveBackend() string {
+	return BackendVectra
 }
 
 // backendDownTTL is how long a failed backend stays marked down. Long enough
@@ -261,10 +242,9 @@ func (e *Engine) ActiveBackend() string {
 // expiry re-probes with the fast dial budget).
 const backendDownTTL = 60 * time.Second
 
-// Embedding compute-mode constants. A vectra (local-file) default means the
-// GPU host is likely off, so the CPU fallback caps the batch. This is derived
-// statically from active_backend — no qdrant ping, so a query is never gated on
-// a health probe.
+// Embedding compute-mode constants. The local-file backend means the
+// GPU host is often off, so callers can opt into the CPU fallback batch cap.
+// No health probe gates this: the CPU path is derived from settings.
 const (
 	embeddingConcurrencyGPU = 4
 	embeddingConcurrencyCPU = 1
@@ -273,9 +253,10 @@ const (
 )
 
 // usesCPUCompute is the cheap (no probe) compute-mode check used by the
-// embedding limiter on every request.
+// embedding limiter on every request. Vectra-only servers default to the CPU
+// batch cap unless the operator raises embed_batch_size.
 func (e *Engine) usesCPUCompute() bool {
-	return e.ActiveBackend() == BackendVectra
+	return true
 }
 
 // CPUComputeMode reports the compute class (true = CPU fallback).
@@ -338,39 +319,24 @@ type storeCollection struct {
 	Backend    string
 }
 
-// listAllStoresDetailed lists collections across every backend, tagging each
-// with the backend that holds it. A name present in both stores appears twice
-// (qdrant before vectra), letting callers pick the authoritative one.
-//
-// It never does a separate health Ping: each store's ListCollections is run
-// under a short budget so a dead host cannot stall the dashboard. A backend is
-// only marked down as a badge side effect, never skipped ahead of time.
+// listAllStoresDetailed lists collections in the single file store, tagging
+// each with BackendVectra. It never does a separate health Ping: the listing
+// runs under a short budget so a wedged disk cannot stall the dashboard.
 func (e *Engine) listAllStoresDetailed() []storeCollection {
 	var out []storeCollection
-	for _, backend := range []string{BackendQdrant, BackendVectra} {
-		s, ok := e.stores[backend]
-		if !ok {
-			continue
-		}
-		cols, err := listCollectionsWithTimeout(s, 2*time.Second)
-		if err != nil {
-			if err != errProbeTimeout && IsUnavailable(err) {
-				e.markBackendDown(backend)
-			}
-			log.Printf("ListCollections on %s failed: %v", backend, err)
-			continue
-		}
-		e.markBackendUp(backend)
-		for _, c := range cols {
-			out = append(out, storeCollection{Name: c.Name, ChunkCount: c.ChunkCount, Backend: backend})
-		}
+	s, ok := e.stores[BackendVectra]
+	if !ok {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name == out[j].Name {
-			return out[i].Backend < out[j].Backend
-		}
-		return out[i].Name < out[j].Name
-	})
+	cols, err := listCollectionsWithTimeout(s, 2*time.Second)
+	if err != nil {
+		log.Printf("ListCollections on %s failed: %v", BackendVectra, err)
+		return nil
+	}
+	for _, c := range cols {
+		out = append(out, storeCollection{Name: c.Name, ChunkCount: c.ChunkCount, Backend: BackendVectra})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -408,7 +374,7 @@ func (e *Engine) listAllStores() ([]StoreCollectionInfo, error) {
 	return out, nil
 }
 
-// CollectionExists reports whether a collection is present in Qdrant.
+// CollectionExists reports whether a collection is present in the file store.
 func (e *Engine) CollectionExists(name string) (bool, error) {
 	return e.storeFor(name).CollectionExists(name)
 }
@@ -433,16 +399,10 @@ type scopeTarget struct {
 // Callers pass only what they care about; omitted values come from the runtime
 // settings store (WebUI).
 //
-// Scope resolution:
-//   - explicit collection_id: routed by registry backend; if that backend is
-//     unreachable and a same-name collection exists on the other backend, that
-//     one is used (same-name failover), otherwise a loud error.
-//   - omitted: the active backend's default collection, with an automatic
-//     fallback to the vectra default when failover is enabled. With no defaults
-//     configured it searches all enabled collections.
-//
-// The query path never consults a health/down cache to refuse work: it attempts
-// the target and only reacts to the real outcome. Down state is badge-only.
+// Scope resolution (vectra-only):
+//   - explicit collection_id: searched directly, otherwise a loud error.
+//   - omitted: the configured default collection; with no default configured
+//     it searches all enabled collections.
 func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *float64, filter map[string]any) ([]SearchResult, error) {
 	st := e.settings.Get()
 
@@ -468,98 +428,36 @@ func (e *Engine) SearchDefault(query, collectionID string, topK int, threshold *
 	}
 
 	deadline := e.searchDeadline()
-	var lastErr error
-	for i, t := range targets {
-		if err := checkSearchBudget(deadline); err != nil {
-			return nil, err
-		}
-		res, err := e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter, deadline)
-		if err == nil {
-			e.markBackendUp(t.backend)
-			return res, nil
-		}
-		if IsUnavailable(err) {
-			e.markBackendDown(t.backend)
-			lastErr = err
-			log.Printf("Default search: %s/'%s' unavailable, trying next target: %v", t.backend, t.collection, err)
-			continue
-		}
-		// A logical error on the primary target is a real misconfiguration
-		// (e.g. a typo'd default) and must fail loudly. On a fallback it only
-		// means that replica isn't present, so keep walking the chain.
-		if i == 0 {
-			return nil, err
-		}
-		lastErr = err
-		log.Printf("Default search: fallback %s/'%s' failed, trying next target: %v", t.backend, t.collection, err)
+	t := targets[0]
+	if err := checkSearchBudget(deadline); err != nil {
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no searchable default collection configured")
-	}
-	return nil, lastErr
+	return e.searchCollection(t.backend, t.collection, query, topK, st.RerankEnabled, thr, filter, deadline)
 }
 
-// defaultCollection returns the configured default collection for one backend.
+// defaultCollection returns the configured default collection.
+// Legacy default_collection_qdrant is honored when the vectra default is empty.
 func (e *Engine) defaultCollection(backend string, st settings.Settings) string {
-	if backend == BackendVectra {
-		return strings.TrimSpace(st.DefaultCollectionVectra)
+	if v := strings.TrimSpace(st.DefaultCollectionVectra); v != "" {
+		return v
 	}
 	return strings.TrimSpace(st.DefaultCollectionQdrant)
 }
 
-// defaultSearchTargets returns the default collection targets for a caller that
-// omitted collection_id, in priority order.
-//
-// Routing is name-centric so qdrant and vectra act as interchangeable replicas
-// and a qdrant outage never requires flipping active_backend:
-//   - the active backend's default is primary;
-//   - if it is empty but failover is on, the other backend's configured default
-//     becomes primary (a write/search still lands somewhere sensible);
-//   - for a qdrant primary with failover on, the vectra fallbacks are the
-//     explicitly configured vectra default first, then the same-name replica.
-//
-// An empty result means "no default configured at all"; callers then widen to
-// all enabled collections.
+// defaultSearchTargets returns the default collection target for a caller that
+// omitted collection_id. Empty means "no default configured"; callers widen
+// to all enabled collections.
 func (e *Engine) defaultSearchTargets() []scopeTarget {
 	st := e.settings.Get()
-	active := e.ActiveBackend()
-	other := otherBackend(active)
-
-	var primary scopeTarget
-	if n := e.defaultCollection(active, st); n != "" {
-		primary = scopeTarget{backend: active, collection: n}
-	} else if other != "" && st.FailoverEnabled {
-		if n := e.defaultCollection(other, st); n != "" {
-			primary = scopeTarget{backend: other, collection: n}
-		}
+	if n := e.defaultCollection(BackendVectra, st); n != "" {
+		return []scopeTarget{{backend: BackendVectra, collection: n}}
 	}
-	if primary.collection == "" {
-		return nil
-	}
-
-	out := []scopeTarget{primary}
-	if !st.FailoverEnabled || primary.backend == BackendVectra {
-		return out
-	}
-
-	// qdrant primary: append vectra fallbacks without duplicates.
-	seen := map[string]bool{primary.backend + "/" + primary.collection: true}
-	add := func(collection string) {
-		collection = strings.TrimSpace(collection)
-		if collection == "" || seen[BackendVectra+"/"+collection] {
-			return
-		}
-		seen[BackendVectra+"/"+collection] = true
-		out = append(out, scopeTarget{backend: BackendVectra, collection: collection})
-	}
-	add(e.defaultCollection(BackendVectra, st)) // explicitly configured vectra default
-	add(primary.collection)                     // zero-config same-name replica
-	return out
+	return nil
 }
 
 // searchDeadline returns the wall-clock bound for one whole search (embed +
 // stores + rerank). The per-stage budgets alone can exceed the caller's outer
-// fail-safe on the backend-failover path (each attempt re-embeds), so this
+// fail-safe across retry attempts (each attempt re-embeds), so this
 // makes the server answer first. Checked only at stage boundaries: an
 // in-flight HTTP call is never cancelled, so one-api still finishes its own
 // channel failover work.
@@ -579,45 +477,20 @@ func checkSearchBudget(deadline time.Time) error {
 	return nil
 }
 
-// searchResolved searches one explicitly named collection, applying same-name
-// failover when its backend is unreachable. It never skips the named backend
-// because of a cached down mark: it attempts the query and reacts to the result.
+// searchResolved searches one explicitly named collection.
 // A not-found is reported with a case-insensitive "did you mean" hint.
 func (e *Engine) searchResolved(query, scope string, topK int, useRerank bool, thr float64, filter map[string]any, deadline time.Time) ([]SearchResult, error) {
 	if en := e.registry.Get(scope); en != nil && !en.Enabled {
 		return nil, fmt.Errorf("collection '%s' is disabled", scope)
 	}
-	backend := e.backendOf(scope)
-	res, err := e.searchCollection(backend, scope, query, topK, useRerank, thr, filter, deadline)
+	res, err := e.searchCollection(BackendVectra, scope, query, topK, useRerank, thr, filter, deadline)
 	if err == nil {
-		e.markBackendUp(backend)
 		return res, nil
 	}
-	if !IsUnavailable(err) {
-		if !e.collectionExistsOn(backend, scope) {
-			return nil, fmt.Errorf("collection '%s' not found on %s%s", scope, backend, e.collectionSuggestions(scope))
-		}
-		return nil, err
+	if !e.collectionExistsOn(BackendVectra, scope) {
+		return nil, fmt.Errorf("collection '%s' not found on %s%s", scope, BackendVectra, e.collectionSuggestions(scope))
 	}
-	e.markBackendDown(backend)
-	return e.searchSameNameFailover(backend, scope, query, topK, useRerank, thr, filter, err, deadline)
-}
-
-// searchSameNameFailover searches the same-name collection on the paired
-// backend after the primary was found unavailable. A missing replica is a loud
-// error so the caller knows its data is not reachable instead of getting an
-// empty result.
-func (e *Engine) searchSameNameFailover(backend, name, query string, topK int, useRerank bool, thr float64, filter map[string]any, cause error, deadline time.Time) ([]SearchResult, error) {
-	other := otherBackend(backend)
-	if other == "" || !e.collectionExistsOn(other, name) {
-		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name replica on %s: %w", name, backend, other, cause)
-	}
-	log.Printf("Collection '%s': %s unavailable, using same-name collection on %s", name, backend, other)
-	res, err := e.searchCollection(other, name, query, topK, useRerank, thr, filter, deadline)
-	if err == nil {
-		e.markBackendUp(other)
-	}
-	return res, err
+	return nil, err
 }
 
 // collectionSuggestions returns a "did you mean" hint for a missing collection
@@ -797,7 +670,7 @@ func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchRe
 	}
 	bm25List := make([]SearchResult, 0, len(kw))
 	for _, r := range kw {
-		sr := qdrantToSearchResult(r, name)
+		sr := storeToSearchResult(r, name)
 		sr.Backend = backend
 		bm25List = append(bm25List, sr)
 	}
@@ -817,12 +690,14 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 	if err != nil {
 		return nil, err
 	}
-	store, ok := e.stores[backend]
+	store, ok := e.stores[BackendVectra]
 	if !ok {
-		return nil, fmt.Errorf("unknown backend %q", backend)
+		return nil, fmt.Errorf("vectra store not configured")
 	}
-	if qc, ok := store.(*QdrantClient); ok && len(queryVector) > 0 {
-		if have, derr := qc.GetVectorSize(name); derr == nil && have > 0 && have != len(queryVector) {
+	// Dimension gate: mixed vector spaces give garbage cosine scores, so a
+	// stored dim that disagrees with the query dim is a loud error.
+	if fs, ok := store.(*FileStore); ok && len(queryVector) > 0 {
+		if have := fs.VectorDim(name); have > 0 && have != len(queryVector) {
 			return nil, fmt.Errorf("collection '%s' stores %d-d vectors but the active embedding model returns %d-d: rebuild the collection or switch models", name, have, len(queryVector))
 		}
 	}
@@ -839,7 +714,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 	}
 	merged := make([]SearchResult, 0, len(raw))
 	for _, r := range raw {
-		sr := qdrantToSearchResult(r, name)
+		sr := storeToSearchResult(r, name)
 		sr.Backend = backend
 		merged = append(merged, sr)
 	}
@@ -861,11 +736,11 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 
 // SearchMulti searches across several collections and merges the results.
 // An empty collections list means "all enabled collections" (registry), or
-// every Qdrant collection when the registry is empty (backward compatible).
+// every stored collection when the registry is empty.
 // Disabled collections are always skipped. A collection that fails on an
 // explicit request (missing, down, dim mismatch) is skipped with a WARN log
 // rather than aborting the whole batch; if every requested collection fails,
-// that is a loud error. An optional payload filter (Qdrant filter syntax) is
+// that is a loud error. An optional payload filter is
 // applied to every store.
 func (e *Engine) SearchMulti(query string, collections []string, topK int, useRerank bool, threshold float64, filter map[string]any) ([]SearchResult, error) {
 	targets, _ := e.resolveTargets(collections)
@@ -909,43 +784,23 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			skipped = append(skipped, name+" (disabled)")
 			continue
 		}
-		// Dim pre-check: a vector in the wrong space gives garbage scores on
-		// vectra and a hard error on qdrant; skip with a clear reason instead.
+		// Dim pre-check: a vector in the wrong space gives garbage cosine
+		// scores, so skip with a clear reason instead of mixing spaces.
 		if en := e.registry.Get(name); en != nil && en.VectorDim > 0 && len(queryVector) > 0 && en.VectorDim != len(queryVector) {
 			log.Printf("SearchMulti skip '%s': dim mismatch (collection %d-d, query %d-d)", name, en.VectorDim, len(queryVector))
 			skipped = append(skipped, name+" (dim mismatch)")
 			continue
 		}
-		backend := e.backendOf(name)
+		backend := BackendVectra
 		results, err := e.storeFor(name).Search(name, queryVector, recallCount, threshold, filter)
-		if err != nil && IsUnavailable(err) {
-			// Explicit scope gets the same same-name failover as
-			// searchResolved so a qdrant outage never hard-fails a
-			// named vectra replica (and vice versa).
-			e.markBackendDown(backend)
-			if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, name) {
-				log.Printf("SearchMulti: '%s' %s unavailable, using same-name collection on %s", name, backend, other)
-				results, err = e.stores[other].Search(name, queryVector, recallCount, threshold, filter)
-				if err == nil {
-					e.markBackendUp(other)
-					for _, r := range results {
-						sr := qdrantToSearchResult(r, name)
-						sr.Backend = other
-						merged = append(merged, sr)
-					}
-					continue
-				}
-			}
-		}
 		if err != nil {
 			log.Printf("SearchMulti skip '%s' (%s): %v", name, backend, err)
 			skipped = append(skipped, name)
 			continue
 		}
-		e.markBackendUp(backend)
 		var vecList []SearchResult
 		for _, r := range results {
-			sr := qdrantToSearchResult(r, name)
+			sr := storeToSearchResult(r, name)
 			sr.Backend = backend
 			vecList = append(vecList, sr)
 		}
@@ -1026,7 +881,7 @@ func (e *Engine) resolveTargets(collections []string) ([]string, bool) {
 	return targets, false
 }
 
-func qdrantToSearchResult(r StoreSearchResult, collection string) SearchResult {
+func storeToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	text, _ := r.Payload["text"].(string)
 	source, _ := r.Payload["source"].(string)
 	chunkIndex, _ := r.Payload["chunk_index"].(float64)
@@ -1074,10 +929,7 @@ type SearchDebugResult struct {
 
 // SearchDebug runs a single-collection search and reports threshold kills.
 // It embeds once and searches twice (threshold, then 0): no rerank on the
-// killed set, they are shown in raw vector order. On backend-unreachable it
-// fails over to the same-name collection on the other backend like
-// searchResolved, so the WebUI recall tester keeps working while qdrant is
-// down (and vice versa).
+// killed set, they are shown in raw vector order.
 func (e *Engine) SearchDebug(query string, collection string, topK int, useRerank bool, threshold float64, filter map[string]any) (*SearchDebugResult, error) {
 	t0 := time.Now()
 	deadline := e.searchDeadline()
@@ -1111,25 +963,16 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		recallCount = st.RerankRecall
 	}
 
-	backend := e.backendOf(collection)
+	backend := BackendVectra
 	kept, err := e.storeFor(collection).Search(collection, queryVector, recallCount, threshold, filter)
-	if err != nil && IsUnavailable(err) {
-		e.markBackendDown(backend)
-		if other := otherBackend(backend); other != "" && e.collectionExistsOn(other, collection) {
-			log.Printf("SearchDebug: '%s' %s unavailable, using same-name collection on %s", collection, backend, other)
-			backend = other
-			kept, err = e.stores[other].Search(collection, queryVector, recallCount, threshold, filter)
-		}
-	}
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
-	e.markBackendUp(backend)
 	results := make([]SearchResult, 0, len(kept))
 	keptIDs := make(map[any]bool, len(kept))
 	for _, r := range kept {
 		keptIDs[r.ID] = true
-		results = append(results, qdrantToSearchResult(r, collection))
+		results = append(results, storeToSearchResult(r, collection))
 	}
 
 	var killed []SearchResult
@@ -1138,7 +981,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 			if all, err := s.Search(collection, queryVector, recallCount, 0, filter); err == nil {
 				for _, r := range all {
 					if !keptIDs[r.ID] {
-						killed = append(killed, qdrantToSearchResult(r, collection))
+						killed = append(killed, storeToSearchResult(r, collection))
 					}
 				}
 			}
@@ -1286,30 +1129,23 @@ type Provenance struct {
 	Chunks         int
 }
 
-// IndexDocument indexes a file into a Qdrant collection
+// IndexDocument indexes a file into the vectra file store.
 func (e *Engine) IndexDocument(path string, collectionID string, metadata map[string]string) (*IndexResult, error) {
 	return e.IndexDocumentWithOptions(path, collectionID, metadata, nil, nil)
 }
 
 // IndexDocumentWithOptions indexes a file with per-job chunking and progress.
 func (e *Engine) IndexDocumentWithOptions(path string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
-	return e.indexDocumentInternal(e.backendOf(collectionID), path, collectionID, metadata, opts, prog)
+	return e.indexDocumentInternal(BackendVectra, path, collectionID, metadata, opts, prog)
 }
 
-// IndexDocumentOn indexes a file into an explicit backend, ignoring registry
-// routing. An empty backend falls back to the normal routing. Used by the
-// dashboard's per-job backend choice so a brand-new collection can be created
-// directly in vectra instead of the global default.
+// IndexDocumentOn keeps the old (backend, path, ...) signature for the
+// dashboard/jobs callers; the backend argument is normalized to vectra.
 func (e *Engine) IndexDocumentOn(backend, path, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
-	if backend == "" {
-		return e.IndexDocumentWithOptions(path, collectionID, metadata, opts, prog)
-	}
-	return e.indexDocumentInternal(backend, path, collectionID, metadata, opts, prog)
+	return e.indexDocumentInternal(BackendVectra, path, collectionID, metadata, opts, prog)
 }
 
-// indexDocumentInternal indexes a file into one explicit backend, bypassing
-// registry routing. Used by the default-path failover so a write can target the
-// vectra fallback even when the collection name has no registry entry.
+// indexDocumentInternal indexes a file into the vectra file store.
 func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
 	// Read file
 	data, err := os.ReadFile(path)
@@ -1363,14 +1199,11 @@ func (e *Engine) ReindexDocument(path string, collectionID string, metadata map[
 	return e.IndexDocumentWithOptions(path, collectionID, metadata, opts, prog)
 }
 
-// ReindexDocumentOn purges and rebuilds a collection on an explicit backend.
-// An empty backend falls back to registry routing. The registry entry (display
-// name, tags, consumers) is preserved; only the vectors are rebuilt.
+// ReindexDocumentOn purges and rebuilds a collection (backend arg kept for
+// caller compatibility, always vectra). Registry display metadata is
+// preserved; only the vectors are rebuilt.
 func (e *Engine) ReindexDocumentOn(backend, path, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
-	if backend == "" {
-		return e.ReindexDocument(path, collectionID, metadata, opts, prog)
-	}
-	store := e.storeForBackend(backend)
+	store := e.storeForBackend(BackendVectra)
 	exists, err := store.CollectionExists(collectionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check collection: %w", err)
@@ -1379,23 +1212,18 @@ func (e *Engine) ReindexDocumentOn(backend, path, collectionID string, metadata 
 		if err := store.DeleteCollection(collectionID); err != nil {
 			return nil, fmt.Errorf("failed to purge collection: %w", err)
 		}
-		log.Printf("Purged collection '%s' from %s for re-index", collectionID, backend)
+		log.Printf("Purged collection '%s' for re-index", collectionID)
 	}
-	return e.indexDocumentInternal(backend, path, collectionID, metadata, opts, prog)
+	return e.indexDocumentInternal(BackendVectra, path, collectionID, metadata, opts, prog)
 }
 
-// CollectionExistsOnOther reports whether name exists on the backend paired
-// with backend (qdrant<->vectra). Used to reject cross-backend name collisions
-// so a collection never silently lives in two stores at once.
+// CollectionExistsOnOther is kept for API compatibility and always reports
+// false: there is no second backend to collide with.
 func (e *Engine) CollectionExistsOnOther(backend, name string) (bool, error) {
-	other := otherBackend(backend)
-	if other == "" {
-		return false, nil
-	}
-	return e.CollectionExistsOn(other, name)
+	return false, nil
 }
 
-// IndexText indexes raw text into a Qdrant collection
+// IndexText indexes raw text into the vectra file store
 func (e *Engine) IndexText(text string, collectionID string, metadata map[string]string) (*IndexResult, error) {
 	return e.IndexTextWithOptions(text, collectionID, metadata, nil, nil)
 }
@@ -1422,14 +1250,13 @@ func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata
 }
 
 // StoreMemory indexes ad-hoc text for later semantic recall (the MCP
-// store_memory tool). It is the write-side counterpart of SearchDefault: an
-// omitted collection_id resolves to the active backend's default collection,
-// with qdrant→vectra failover when qdrant is unreachable. Having no default at
-// all is a loud error rather than a silent write to a random bucket.
+// store_memory tool). An omitted collection_id resolves to the configured
+// default collection; having no default at all is a loud error.
 //
-// The raw text is first persisted under <memoryDir>/<YYYY-MM-DD>/ so the file
-// backend has a source document and Qdrant deployments keep an on-disk copy;
-// indexing then runs through the normal document path.
+// Raw text is appended to a daily journal file
+// (<memoryDir>/agent/YYYY-MM-DD.md) so the data bank stays browsable without
+// one file per write. Only the new text is embedded (the journal file is the
+// provenance pointer, not re-embedded whole).
 func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]string) (*IndexResult, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("text is required")
@@ -1443,66 +1270,46 @@ func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]stri
 		metadata = make(map[string]string)
 	}
 	metadata["kind"] = "store_memory"
+	metadata["visibility"] = "agent"
 
 	scope := strings.TrimSpace(collectionID)
 	if scope == "" {
-		// Omitted scope: walk the same default chain as a default search and
-		// write to the first target that actually accepts the write. No health
-		// preflight — the write is attempted and we fail over on a real
-		// unavailable error, so a stale down mark never diverts a write.
 		targets := e.defaultSearchTargets()
 		if len(targets) == 0 {
 			return nil, fmt.Errorf("no collection_id given and no default collection configured; pass collection_id or set a default in the management dashboard")
 		}
-		var lastErr error
-		for i, t := range targets {
-			if metadata["collection"] == "" {
-				metadata["collection"] = t.collection
-			}
-			res, err := e.indexDocumentInternal(t.backend, path, t.collection, metadata, nil, nil)
-			if err == nil {
-				e.markBackendUp(t.backend)
-				return res, nil
-			}
-			if IsUnavailable(err) {
-				e.markBackendDown(t.backend)
-				lastErr = err
-				log.Printf("Default write: %s/'%s' unavailable, trying next target: %v", t.backend, t.collection, err)
-				continue
-			}
-			if i == 0 {
-				return nil, err
-			}
-			lastErr = err
-		}
-		if lastErr == nil {
-			lastErr = fmt.Errorf("no writable default collection configured")
-		}
-		return nil, lastErr
+		scope = targets[0].collection
 	}
-
 	metadata["collection"] = scope
-	backend := e.backendOf(scope)
-	res, err := e.indexDocumentInternal(backend, path, scope, metadata, nil, nil)
-	if err == nil {
-		e.markBackendUp(backend)
-		return res, nil
-	}
-	if !IsUnavailable(err) {
+
+	// Index only the new text; source_file points at the daily journal so
+	// recall can open the human-readable log.
+	sub := metadata
+	res, used, err := e.indexTextInternal(text, scope, sub, filepath.Base(path), path, nil, nil)
+	if err != nil {
 		return nil, err
 	}
-	e.markBackendDown(backend)
-	other := otherBackend(backend)
-	if other == "" || !e.collectionExistsOn(other, scope) {
-		return nil, fmt.Errorf("collection '%s' is on %s which is unavailable; no same-name collection on %s to fall back to: %w", scope, backend, other, err)
-	}
-	log.Printf("store_memory: %s unavailable, using same-name collection '%s' on %s", backend, scope, other)
-	return e.indexDocumentInternal(other, path, scope, metadata, nil, nil)
+	embedProvider, embedModel, embedDim, embedDistance := e.activeEmbedProvenance()
+	sum := sha256.Sum256([]byte(text))
+	e.recordIndex(scope, Provenance{
+		SourceFile:     path,
+		SourceSHA256:   hex.EncodeToString(sum[:]),
+		ChunkSize:      used.Size,
+		ChunkOverlap:   used.Overlap,
+		ChunkStrategy:  used.Strategy,
+		EmbedModel:     embedModel,
+		EmbedProvider:  embedProvider,
+		VectorDim:      embedDim,
+		VectorDistance: embedDistance,
+		Chunks:         res.ChunksIndexed,
+	}, BackendVectra)
+	e.writeVaultManifest(scope)
+	return res, nil
 }
 
-// writeMemoryRaw persists ad-hoc memory text under <memoryDir>/<date>/.
-// The content hash is part of the filename so two writes in the same second
-// never clobber each other.
+// writeMemoryRaw appends ad-hoc memory text to the daily agent journal
+// (<memoryDir>/agent/YYYY-MM-DD.md) with a timestamp header. It returns the
+// journal path for provenance.
 func (e *Engine) writeMemoryRaw(text string) (string, error) {
 	base := e.memoryDir
 	if base == "" {
@@ -1513,14 +1320,21 @@ func (e *Engine) writeMemoryRaw(text string) (string, error) {
 		}
 	}
 	now := time.Now()
-	sum := sha256.Sum256([]byte(text))
-	dir := filepath.Join(base, now.Format("2006-01-02"))
+	dir := filepath.Join(base, "agent")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%s-%s.md", now.Format("150405"), hex.EncodeToString(sum[:])[:8])
-	path := filepath.Join(dir, name)
-	return path, os.WriteFile(path, []byte(text), 0o644)
+	path := filepath.Join(dir, now.Format("2006-01-02")+".md")
+	entry := fmt.Sprintf("\n\n---\n## %s\n\n%s\n", now.Format("15:04:05"), strings.TrimSpace(text))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // EnsureCollection creates a collection in Qdrant if it does not exist yet, so
@@ -1558,10 +1372,15 @@ func PreviewChunks(text string, size, overlap int, strategy string, maxSamples i
 	return len(chunks), samples
 }
 
-// recordIndex snapshots provenance in the registry, including the backend the
-// vectors actually landed in, so the dashboard can show it as fixed metadata.
+// recordIndex snapshots provenance in the registry plus the vault catalog, so
+// the folder stays self-describing for rclone backup + Verify/Import.
 // Best-effort: a registry write failure is logged, indexing already succeeded.
 func (e *Engine) recordIndex(collectionID string, prov Provenance, backend string) {
+	backend = BackendVectra
+	if fs := e.FileStore(); fs != nil && prov.SourceFile != "" && prov.SourceFile != "direct_text" {
+		fs.UpdateCatalogMeta(collectionID, prov.SourceFile, prov.SourceSHA256, prov.ChunkSize, prov.ChunkOverlap, prov.ChunkStrategy, prov.EmbedModel)
+	}
+	e.writeVaultManifest(collectionID)
 	err := e.registry.Update(collectionID, func(en *registry.Entry) {
 		if en.SourceFile == "" {
 			en.SourceFile = prov.SourceFile
@@ -1629,9 +1448,9 @@ func (e *Engine) checkProvenanceConflict(collectionID string) error {
 	return fmt.Errorf("collection '%s' provenance conflict (%s): refusing to mix vectors — rebuild the collection or use a new collection name", collectionID, strings.Join(mismatch, "; "))
 }
 
-// indexTextInternal routes to the collection's registry/default backend.
+// indexTextInternal routes to the vectra file store.
 func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
-	return e.indexTextInternalOn(e.backendOf(collectionID), text, collectionID, metadata, sourceName, sourceFile, opts, prog)
+	return e.indexTextInternalOn(BackendVectra, text, collectionID, metadata, sourceName, sourceFile, opts, prog)
 }
 
 func (e *Engine) indexTextInternalOn(backend string, text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
@@ -1665,17 +1484,25 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		e.noteEmbedDim(actualDim)
 	}
 
-	// Create Qdrant points with deterministic uint IDs:
-	// high 32 bits = collection hash, low 32 bits = chunk hash.
-	// Re-indexing the same file upserts the same IDs (idempotent).
+	// Create deterministic uint IDs: high 32 bits = collection hash, low 32
+	// bits = chunk hash. Re-indexing the same file upserts the same IDs.
 	colHash := uint64(StringHash(collectionID)) << 32
 	indexedAt := time.Now().UTC().Format(time.RFC3339)
+	sourceRel := sourceFile
+	if e.docsDir != "" {
+		if abs, err := filepath.Abs(sourceFile); err == nil {
+			if rel, err := filepath.Rel(e.docsDir, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				sourceRel = filepath.ToSlash(rel)
+			}
+		}
+	}
 	points := make([]Point, len(chunks))
 	for i, chunk := range chunks {
 		payload := map[string]any{
 			"text":        chunk,
 			"source":      sourceName,
 			"source_file": sourceFile,
+			"source_rel":  sourceRel,
 			"indexed_at":  indexedAt,
 			"chunk_index": i,
 			"hash":        StringHash(chunk),
@@ -1695,11 +1522,7 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	// refuse to mix provenance: if the recorded model/provider/vector space
 	// differs from the current engine config, vectors would be incomparable.
 	// Rebuilding drops the collection first, so it bypasses this gate.
-	store := e.storeForBackend(backend)
-	if qc, ok := store.(*QdrantClient); ok {
-		_, _, embedDim, embedDistance := e.activeEmbedProvenance()
-		qc.setVectorSpace(embedDim, embedDistance)
-	}
+	store := e.storeForBackend(BackendVectra)
 	exists, err := store.CollectionExists(collectionID)
 	if err != nil {
 		return nil, used, fmt.Errorf("failed to check collection: %w", err)
@@ -1708,8 +1531,8 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		if err := e.checkProvenanceConflict(collectionID); err != nil {
 			return nil, used, err
 		}
-		if qc, ok := store.(*QdrantClient); ok && actualDim > 0 {
-			if have, derr := qc.GetVectorSize(collectionID); derr == nil && have > 0 && have != actualDim {
+		if fs, ok := store.(*FileStore); ok && actualDim > 0 {
+			if have := fs.VectorDim(collectionID); have > 0 && have != actualDim {
 				return nil, used, fmt.Errorf("collection '%s' stores %d-d vectors but the active embedding model returns %d-d: rebuild the collection (purge + reindex) or switch to a %d-d model", collectionID, have, actualDim, have)
 			}
 		}
@@ -1720,8 +1543,7 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		}
 	}
 
-	// Upsert points in batches so large documents don't produce
-	// a single oversized HTTP request to Qdrant
+	// Upsert points in batches so large documents stay in small files.
 	const upsertBatchSize = 100
 	for start := 0; start < len(points); start += upsertBatchSize {
 		end := start + upsertBatchSize
@@ -1803,17 +1625,7 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 
 	byName := make(map[string]*CollectionDetail)
 	for _, c := range detailed {
-		d, ok := byName[c.Name]
-		if !ok {
-			byName[c.Name] = &CollectionDetail{Name: c.Name, Backend: c.Backend, ChunkCount: c.ChunkCount, Exists: true, Enabled: true}
-			continue
-		}
-		// Also present in another backend: an explicit registry backend wins,
-		// otherwise the first (qdrant) listing stays authoritative.
-		if en := reg[c.Name]; en != nil && en.Backend != "" && c.Backend == en.Backend {
-			d.Backend = c.Backend
-			d.ChunkCount = c.ChunkCount
-		}
+		byName[c.Name] = &CollectionDetail{Name: c.Name, Backend: BackendVectra, ChunkCount: c.ChunkCount, Exists: true, Enabled: true}
 	}
 	for n, en := range reg {
 		d, ok := byName[n]
@@ -1837,15 +1649,12 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 		d.ChunkSize = en.Chunk.Size
 		d.ChunkOverlap = en.Chunk.Overlap
 		d.ChunkStrategy = en.Chunk.Strategy
-		if en.Backend != "" {
-			d.Backend = en.Backend
-		}
+		// Legacy registry backend values are normalized to vectra.
+		d.Backend = BackendVectra
 	}
-	// Fill any unset backend with the effective default so the UI never shows
-	// a blank cell.
 	for _, d := range byName {
 		if d.Backend == "" {
-			d.Backend = e.defaultBackend
+			d.Backend = BackendVectra
 		}
 	}
 
@@ -1869,13 +1678,10 @@ func (e *Engine) DescribeCollections(name string) ([]CollectionDetail, error) {
 	return out, nil
 }
 
-// backendOf reports the effective backend for a collection (registry override
-// or global default), used for display.
+// backendOf always reports vectra (legacy per-collection overrides are
+// normalized). Kept so callers don't need to change.
 func (e *Engine) backendOf(name string) string {
-	if en := e.registry.Get(name); en != nil && en.Backend != "" {
-		return en.Backend
-	}
-	return e.defaultBackend
+	return BackendVectra
 }
 
 // CollectionNumID derives a stable, human-friendly numeric id from a
@@ -1896,11 +1702,8 @@ type CollectionMetaUpdate struct {
 }
 
 // SetCollectionMeta updates registry metadata. Allowed for collections that
-// don't exist yet (aspirational entry); callers are told.
-//
-// The backend is fixed once a collection holds vectors: switching it would
-// strand the existing data in the old store, so such a change is refused.
-// Setting the backend on an empty/aspirational entry is allowed.
+// don't exist yet (aspirational entry). The backend field is accepted for
+// compatibility but always normalized to vectra (single-backend server).
 func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("collection_id is required")
@@ -1908,15 +1711,10 @@ func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error
 	if meta.Backend != nil {
 		b := strings.TrimSpace(*meta.Backend)
 		if b != "" && b != BackendQdrant && b != BackendVectra {
-			return fmt.Errorf("unknown backend %q (want %s or %s)", b, BackendQdrant, BackendVectra)
+			return fmt.Errorf("unknown backend %q (want %q)", b, BackendVectra)
 		}
-		meta.Backend = &b
-		if b != "" && b != e.backendOf(name) {
-			store := e.storeFor(name)
-			if info, err := store.GetCollectionInfo(name); err == nil && info != nil && info.ChunkCount > 0 {
-				return fmt.Errorf("collection '%s' already has %d chunks in %s; backend is fixed — re-Vectorize to move it", name, info.ChunkCount, e.backendOf(name))
-			}
-		}
+		norm := BackendVectra
+		meta.Backend = &norm
 	}
 	return e.registry.Update(name, func(en *registry.Entry) {
 		if meta.DisplayName != nil {
@@ -1940,8 +1738,8 @@ func (e *Engine) SetCollectionMeta(name string, meta CollectionMetaUpdate) error
 	})
 }
 
-// DeleteCollection drops the collection from whichever backend holds it and
-// removes its registry entry. Refuses without confirm=true: irreversible.
+// DeleteCollection drops the collection from the file store and removes its
+// registry entry. Refuses without confirm=true: irreversible.
 func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("collection_id is required")
@@ -1955,7 +1753,10 @@ func (e *Engine) DeleteCollection(name string, confirm bool) error {
 		return fmt.Errorf("failed to check collection: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("collection '%s' does not exist in backend '%s'", name, e.backendOf(name))
+		// Registry-only ghost: still clean the registry so undeletable
+		// entries can never linger.
+		_ = e.registry.Delete(name)
+		return fmt.Errorf("collection '%s' does not exist in vectra store (registry entry cleaned if present)", name)
 	}
 	if err := store.DeleteCollection(name); err != nil {
 		return fmt.Errorf("failed to delete collection: %w", err)
@@ -1963,7 +1764,7 @@ func (e *Engine) DeleteCollection(name string, confirm bool) error {
 	if err := e.registry.Delete(name); err != nil {
 		log.Printf("Registry cleanup failed for deleted '%s': %v", name, err)
 	}
-	if err := e.AppendHistory(HistoryEntry{Op: "delete_collection", Collection: name, Backend: e.backendOf(name), OK: true}); err != nil {
+	if err := e.AppendHistory(HistoryEntry{Op: "delete_collection", Collection: name, Backend: BackendVectra, OK: true}); err != nil {
 		log.Printf("history append failed: %v", err)
 	}
 	log.Printf("Deleted collection '%s'", name)
@@ -1990,38 +1791,28 @@ func (e *Engine) ListCollections() ([]CollectionInfo, error) {
 
 // HealthCheck probes every component concurrently. This is an ON-DEMAND probe
 // (the dashboard Test button / health_check tool); the query path never calls
-// it and never waits on it. Backends are always probed so a recovered qdrant is
-// noticed immediately, and the result also refreshes the badge state.
-// Embedding/rerank are never cached as down — channel failover is one-api's
-// job. Probes use short Ping budgets so the check never hangs.
+// it and never waits on it. Embedding/rerank are never cached as down —
+// channel failover is one-api's job. Probes use short Ping budgets so the
+// check never hangs.
 func (e *Engine) HealthCheck() map[string]string {
 	status := make(map[string]string)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	set := func(k, v string) { mu.Lock(); status[k] = v; mu.Unlock() }
 
-	for _, backend := range []string{BackendQdrant, BackendVectra} {
-		s, ok := e.stores[backend]
-		if !ok {
-			continue
-		}
+	if s, ok := e.stores[BackendVectra]; ok {
 		wg.Add(1)
-		go func(b string, store VectorStore) {
+		go func(store VectorStore) {
 			defer wg.Done()
-			err := probeWithTimeout(store.Ping, 4*time.Second)
-			switch {
+			switch err := probeWithTimeout(store.Ping, 4*time.Second); {
 			case err == errProbeTimeout:
-				set(b, "timeout")
+				set(BackendVectra, "timeout")
 			case err != nil:
-				if IsUnavailable(err) {
-					e.markBackendDown(b)
-				}
-				set(b, "error: "+err.Error())
+				set(BackendVectra, "error: "+err.Error())
 			default:
-				e.markBackendUp(b)
-				set(b, "ok")
+				set(BackendVectra, "ok")
 			}
-		}(backend, s)
+		}(s)
 	}
 	set("active_backend", e.ActiveBackend())
 

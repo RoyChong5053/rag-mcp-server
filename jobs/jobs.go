@@ -170,7 +170,7 @@ func (m *Manager) Submit(kind string, run func() (any, error)) *Job {
 }
 
 // SubmitIndex queues a file index job. absPath must already be jailed.
-// backend may be empty (follow registry/default routing) or "qdrant"/"vectra"
+// backend is accepted for compatibility and always resolves to vectra
 // to force where the vectors land.
 func (m *Manager) SubmitIndex(absPath, collection, backend string, opts *engine.ChunkOptions, rebuild bool) *Job {
 	size, overlap := 0, 0

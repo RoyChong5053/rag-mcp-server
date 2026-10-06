@@ -2,8 +2,8 @@ package mcp
 
 import "testing"
 
-// The MCP surface is synchronous now: exactly these eight tools, no job queue
-// and no wait_seconds knob.
+// The MCP surface is synchronous now: RAG tools plus vault maintenance, no
+// job queue and no wait_seconds knob.
 func TestRegisterToolsSurface(t *testing.T) {
 	s := NewServer()
 	RegisterTools(s, nil)
@@ -17,6 +17,9 @@ func TestRegisterToolsSurface(t *testing.T) {
 		"collection_info",
 		"set_collection_meta",
 		"delete_collection",
+		"vault_verify",
+		"vault_prune",
+		"vault_import",
 	}
 	if len(s.tools) != len(want) {
 		t.Fatalf("registered %d tools, want %d", len(s.tools), len(want))

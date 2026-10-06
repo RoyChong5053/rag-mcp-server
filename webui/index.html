@@ -158,10 +158,9 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend · saved to settings.json (wins over config.yaml, which only seeds first run)</span></div>
   <div id="settings-panel">
   <div class="row">
-    <span>active backend <select id="s-active" title="which database the default scope uses"><option value="">(config default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></span>
-    <span>qdrant default <select id="s-col-qdrant"></select></span>
-    <span>vectra default <select id="s-col-vectra"></select></span>
-    <label style="display:inline" title="when qdrant is unreachable, fall back to the vectra default"><input type="checkbox" id="s-failover"> failover to vectra</label>
+    <span>backend <span class="badge b-vec">vectra</span> <small class="dim">single-backend server</small></span>
+    <span>default collection <select id="s-col-qdrant"></select></span>
+
   </div>
   <div class="row">
     <span>top_k <input type="number" id="s-topk" min="1" max="100"></span>
@@ -170,7 +169,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>recall <input type="number" id="s-recall" min="1" max="1000" title="vector over-fetch fed to the reranker"></span>
     <span>query max <input type="number" id="s-qmax" min="0" title="truncate the query to N chars before embedding &amp; reranking (runes, keeps the head, 0 = unlimited)"></span>
     <span>doc max <input type="number" id="s-dmax" min="0" title="rerank document truncation (runes, 0 = unlimited)"></span>
-    <span>embed batch <input type="number" id="s-ebatch" min="0" max="128" title="GPU-mode texts per embedding POST for index jobs. 0 = auto: 32 when qdrant/GPU is reachable, automatically capped to 4 (and serialized) when the vectra/CPU fallback is in charge. A positive value overrides the GPU size; the CPU fallback still caps it."></span>
+    <span>embed batch <input type="number" id="s-ebatch" min="0" max="128" title="texts per embedding POST for index jobs. 0 = auto (32 default, capped to 4 in CPU mode). A positive value overrides the GPU size; the CPU fallback still caps it."></span>
     <label style="display:inline"><input type="checkbox" id="s-bm25"> BM25 hybrid</label>
     <span>provider <select id="s-provider"><option value="">one-api (config)</option></select></span>
     <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
@@ -232,6 +231,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>per page <select id="fp-size" onchange="fbState.size=+this.value;fbState.page=0;fbApply()"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></span>
     <span>status <select id="fp-status" onchange="fbState.status=this.value;fbState.page=0;fbApply()"><option value="">all</option><option value="indexed_fresh">indexed · fresh</option><option value="indexed_stale">indexed · changed</option><option value="unindexed">not indexed</option><option value="unknown">unknown</option></select></span>
     <label style="display:inline"><input type="checkbox" id="fp-recent" checked onchange="fbState.recentFirst=this.checked;fbApply()"> recent uploads first</label>
+    <label style="display:inline" title="agent journals (docs/memory/agent/) are hidden by default"><input type="checkbox" id="fp-agent" onchange="fbState.showAgent=this.checked;fbApply()"> show agent journals</label>
     <span class="spacer"></span>
     <button onclick="fbState.page=Math.max(0,fbState.page-1);fbApply()">‹</button>
     <span id="fp-page" class="prov"></span>
@@ -245,7 +245,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <div class="row">
     <span>collection <input type="text" id="ip-col" list="col-list" placeholder="new_or_existing"></span>
     <datalist id="col-list"></datalist>
-    <span>database <select id="ip-backend" title="where these vectors are stored; fixed per collection once written"><option value="">(server default)</option><option value="qdrant">qdrant</option><option value="vectra">vectra</option></select></span>
+    <span>database <span class="badge b-vec">vectra</span></span>
     <span>chunk size <input type="number" id="ip-size" value="500" min="0" max="20000" title="0 = global default"></span>
     <span>overlap % <input type="number" id="ip-overlap" value="30" min="0" max="99" title="0 = global default; only the window strategy uses it"></span>
     <span>strategy <select id="ip-strategy" title="chunking algorithm; empty = server default (window)">
@@ -638,11 +638,11 @@ function backup() {
 /* ---- search defaults ---- */
 function fillColSelect(id, backend, allLabel) {
   const sel = document.getElementById(id);
-  const cols = colsCache.filter(c => (c.backend || 'qdrant') === backend);
+  const cols = colsCache.filter(c => (c.backend || 'vectra') === backend || backend === 'vectra');
   sel.innerHTML = '<option value="">' + allLabel + '</option>' + cols.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
 }
 // Keep a saved value selectable even when its collection isn't currently
-// listed (e.g. qdrant is down, so its collections are skipped). Without this
+// listed. Without this
 // the select silently blanks and the next Save would wipe the default.
 function ensureOption(id, value) {
   if (!value) return;
@@ -657,14 +657,9 @@ async function loadSettings() {
   const st = document.getElementById('s-status');
   let s;
   try { s = await api('GET', '/api/settings'); } catch (e) { st.textContent = 'settings failed: ' + e.message; return; }
-  fillColSelect('s-col-qdrant', 'qdrant', '(search all enabled)');
-  fillColSelect('s-col-vectra', 'vectra', '(no vectra default)');
-  ensureOption('s-col-qdrant', s.default_collection_qdrant);
-  ensureOption('s-col-vectra', s.default_collection_vectra);
-  document.getElementById('s-active').value = s.active_backend || '';
-  document.getElementById('s-col-qdrant').value = s.default_collection_qdrant || '';
-  document.getElementById('s-col-vectra').value = s.default_collection_vectra || '';
-  document.getElementById('s-failover').checked = s.failover_enabled !== false;
+  fillColSelect('s-col-qdrant', 'vectra', '(search all enabled)');
+  ensureOption('s-col-qdrant', s.default_collection_vectra || s.default_collection_qdrant);
+  document.getElementById('s-col-qdrant').value = s.default_collection_vectra || s.default_collection_qdrant || '';
   document.getElementById('s-topk').value = s.default_top_k || 10;
   document.getElementById('s-thr').value = (s.default_threshold == null ? 0.25 : s.default_threshold);
   document.getElementById('s-rerank').checked = !!s.rerank_enabled;
@@ -684,10 +679,8 @@ async function saveSettings() {
   st.style.color = '';
   try {
     const res = await api('POST', '/api/settings', {
-      active_backend: document.getElementById('s-active').value,
-      default_collection_qdrant: document.getElementById('s-col-qdrant').value,
-      default_collection_vectra: document.getElementById('s-col-vectra').value,
-      failover_enabled: document.getElementById('s-failover').checked,
+      active_backend: 'vectra',
+      default_collection_vectra: document.getElementById('s-col-qdrant').value,
       default_top_k: +document.getElementById('s-topk').value || 10,
       default_threshold: +document.getElementById('s-thr').value,
       rerank_enabled: document.getElementById('s-rerank').checked,
@@ -712,11 +705,11 @@ async function saveSettings() {
 
 /* ---- data bank ---- */
 const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
-const fbState = { sort: 'mtime', dir: -1, page: 0, size: 10, status: '', recentFirst: true, recent: [] };
+const fbState = { showAgent: false, sort: 'mtime', dir: -1, page: 0, size: 10, status: '', recentFirst: true, recent: [] };
 function fbRender(files) {
   const tb = document.querySelector('#ftbl tbody');
   tb.innerHTML = '';
-  let list = files.filter(f => !fbState.status || f.status === fbState.status);
+  let list = files.filter(f => (!fbState.status || f.status === fbState.status) && (fbState.showAgent || (f.visibility || 'manual') !== 'agent'));
   const key = fbState.sort;
   const val = f => key === 'name' ? f.path : key === 'size' ? f.size : key === 'mtime' ? (f.mtime || '') : key === 'status' ? f.status : (f.collection || '');
   list.sort((a, b) => {
@@ -813,22 +806,17 @@ function openIndex(path, autoPreview) {
 function updateWarn() {
   const col = document.getElementById('ip-col').value.trim();
   const mode = document.getElementById('ip-mode').value;
-  const backend = document.getElementById('ip-backend').value;
   const known = colsCache.find(c => c.name === col);
   const w = document.getElementById('ip-warn');
-  if (backend && known && known.backend && backend !== known.backend) {
-    w.textContent = '⛔ ' + col + ' is already stored in ' + known.backend + '. Vectorizing into ' + backend + ' will be rejected — pick ' + known.backend + ', or delete/rename the collection.';
-  } else if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
+  if (known && known.exists && mode === 'append' && (+document.getElementById('ip-size').value > 0)) {
     w.textContent = '⚠ ' + col + ' already has ' + known.chunk_count + ' chunks (' + known.chunk_size + '/' + known.chunk_overlap + (known.chunk_strategy ? '/' + known.chunk_strategy : '') + '). Appending with different settings creates mixed chunking — use rebuild instead.';
   } else if (known && known.exists && mode === 'rebuild') {
     w.textContent = '⚠ rebuild purges all ' + known.chunk_count + ' existing chunks first, then re-indexes.';
-  } else if (!known && backend) {
-    w.textContent = 'new collection "' + (col || '?') + '" will be created in ' + backend + '.';
   } else if (!known) {
     w.textContent = 'new collection "' + (col || '?') + '" will be created.';
   } else w.textContent = '';
 }
-['ip-col', 'ip-mode', 'ip-size', 'ip-backend', 'ip-strategy'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
+['ip-col', 'ip-mode', 'ip-size', 'ip-strategy'].forEach(id => document.getElementById(id).addEventListener('input', updateWarn));
 async function preview() {
   const box = document.getElementById('preview-out');
   box.innerHTML = 'chunking…';
@@ -857,7 +845,6 @@ async function submitIndex() {
   try {
     const job = await api('POST', '/api/index', {
       path: ipFile, collection: col,
-      backend: document.getElementById('ip-backend').value,
       chunk_size: +document.getElementById('ip-size').value || 0,
       overlap_percent: +document.getElementById('ip-overlap').value || 0,
       strategy: document.getElementById('ip-strategy').value,
