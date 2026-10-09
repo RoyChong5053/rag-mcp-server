@@ -464,10 +464,18 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 	if cat == nil {
 		return nil, nil
 	}
-	matcher, err := newPayloadMatcher(filter)
+	matcherFilter := map[string]any{}
+	for k, v := range filter {
+		if k == "ids" {
+			continue
+		}
+		matcherFilter[k] = v
+	}
+	matcher, err := newPayloadMatcher(matcherFilter)
 	if err != nil {
 		return nil, err
 	}
+	idSet := idSetFromFilter(filter)
 	qNorm := vectorNorm(vector)
 	if qNorm == 0 {
 		return nil, nil
@@ -489,6 +497,9 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 			}
 			if _, ok := payload["source_file"]; !ok {
 				payload["source_file"] = source
+			}
+			if idSet != nil && !matchChunkID(it.ID, it.Metadata, idSet) {
+				continue
 			}
 			if !matcher(payload) {
 				continue
@@ -513,8 +524,8 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 }
 
 // KeywordSearch implements BM25 over a collection's stored chunk text by
-// walking the same source indexes Search uses. No extra index structure is
-// kept: vectra collections are file-backed and already fully in memory.
+// walking the same source indexes Search uses. Tags are appended to the
+// indexed text so hierarchical tags (生活/健康/作息) contribute every level.
 func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -534,6 +545,15 @@ func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([
 			var text string
 			if it.Metadata != nil {
 				text, _ = it.Metadata["text"].(string)
+				// Append tags so BM25 catches exact tokens (DSPD, GT20…).
+				if md, ok := it.Metadata["metadata"].(map[string]any); ok {
+					if tg, _ := md["tags"].(string); tg != "" {
+						text += " " + strings.ReplaceAll(strings.ReplaceAll(tg, "/", " "), ",", " ")
+					}
+					if ex, _ := md["tags_expanded"].(string); ex != "" {
+						text += " " + strings.ReplaceAll(strings.ReplaceAll(ex, "/", " "), ",", " ")
+					}
+				}
 			}
 			key := source + "#" + it.ID
 			docs = append(docs, &bm25Doc{id: key, text: text})
@@ -560,7 +580,8 @@ func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([
 }
 
 // DeletePoints removes items matching the filter. An empty filter clears the
-// whole collection. Only match.value clauses on payload keys are supported.
+// whole collection. Supports match.value / match.prefix clauses plus a
+// top-level {"ids":[...]} list (decimal IDs or content SHAs).
 func (f *FileStore) DeletePoints(collection string, filter map[string]any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -572,10 +593,19 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 	if cat == nil {
 		return nil
 	}
-	matcher, err := newPayloadMatcher(filter)
+	// Strip ids from the payload matcher (it only knows dotted payload keys).
+	matcherFilter := map[string]any{}
+	for k, v := range filter {
+		if k == "ids" {
+			continue
+		}
+		matcherFilter[k] = v
+	}
+	matcher, err := newPayloadMatcher(matcherFilter)
 	if err != nil {
 		return err
 	}
+	idSet := idSetFromFilter(filter)
 	for source, meta := range cat.Sources {
 		idx, err := f.loadIndex(collection, meta.Key)
 		if err != nil || idx == nil {
@@ -583,6 +613,9 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 		}
 		kept := make([]vectraItem, 0, len(idx.Items))
 		for _, it := range idx.Items {
+			if idSet != nil && matchChunkID(it.ID, it.Metadata, idSet) {
+				continue
+			}
 			if matcher(it.Metadata) {
 				continue
 			}
@@ -598,6 +631,185 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 		cat.Sources[source] = meta
 	}
 	return f.saveCatalog(collection, cat)
+}
+
+// GetChunk fetches one item by decimal ID or content SHA without embedding.
+// Returns the item metadata (payload), source key and true when found.
+func (f *FileStore) GetChunk(collection, chunkID string) (map[string]any, string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return nil, "", false
+	}
+	set := map[string]bool{chunkID: true}
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return nil, "", false
+	}
+	for source, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			if !matchChunkID(it.ID, it.Metadata, set) {
+				continue
+			}
+			payload := cloneAnyMap(it.Metadata)
+			if payload == nil {
+				payload = map[string]any{}
+			}
+			if _, ok := payload["source_file"]; !ok {
+				payload["source_file"] = source
+			}
+			payload["_item_id"] = it.ID
+			payload["_source_key"] = meta.Key
+			return payload, source, true
+		}
+	}
+	return nil, "", false
+}
+
+// ListTags aggregates tag usage across a collection for the tag-tree view.
+func (f *FileStore) ListTags(collection string) map[string]int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	counts := map[string]int{}
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return counts
+	}
+	for _, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			md, ok := it.Metadata["metadata"].(map[string]any)
+			if !ok {
+				continue
+			}
+			var tags []string
+			if ex, _ := md["tags_expanded"].(string); ex != "" {
+				tags = strings.Split(ex, ",")
+			} else if tg, _ := md["tags"].(string); tg != "" {
+				tags = ExpandTags(strings.Split(tg, ","))
+			}
+			for _, t := range tags {
+				if t = strings.TrimSpace(t); t != "" {
+					counts[t]++
+				}
+			}
+		}
+	}
+	return counts
+}
+
+// SampleText is one stored chunk for vector spot-checks.
+type SampleText struct {
+	Text   string
+	Vector []float32
+}
+
+// SampleTexts returns up to n stored chunk texts with vectors (RLock).
+func (f *FileStore) SampleTexts(collection string, n int) []SampleText {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []SampleText
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return out
+	}
+	for _, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			if it.Metadata == nil || len(it.Vector) == 0 {
+				continue
+			}
+			t, _ := it.Metadata["text"].(string)
+			if t == "" {
+				continue
+			}
+			out = append(out, SampleText{Text: t, Vector: it.Vector})
+			if n > 0 && len(out) >= n {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// CountMatches counts items matching a filter without deleting (dry-run).
+func (f *FileStore) CountMatches(collection string, filter map[string]any) int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	matcherFilter := map[string]any{}
+	for k, v := range filter {
+		if k == "ids" {
+			continue
+		}
+		matcherFilter[k] = v
+	}
+	matcher, err := newPayloadMatcher(matcherFilter)
+	if err != nil {
+		return 0
+	}
+	idSet := idSetFromFilter(filter)
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return 0
+	}
+	n := 0
+	for _, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			if idSet != nil && matchChunkID(it.ID, it.Metadata, idSet) {
+				n++
+				continue
+			}
+			if matcher(it.Metadata) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// StoredSHAs returns the set of content SHAs in a collection (RLock).
+func (f *FileStore) StoredSHAs(collection string) map[string]bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	set := map[string]bool{}
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return set
+	}
+	for _, meta := range cat.Sources {
+		idx, err := f.loadIndex(collection, meta.Key)
+		if err != nil || idx == nil {
+			continue
+		}
+		for _, it := range idx.Items {
+			if it.Metadata == nil {
+				continue
+			}
+			if sha, _ := it.Metadata["content_sha"].(string); sha != "" {
+				set[sha] = true
+				continue
+			}
+			if t, _ := it.Metadata["text"].(string); t != "" {
+				set[ContentSHA(t)] = true
+			}
+		}
+	}
+	return set
 }
 
 // VectorDim returns the vector dimension of the first stored item, or 0 when
@@ -898,9 +1110,67 @@ func cloneAnyMap(m map[string]any) map[string]any {
 	return out
 }
 
+// matchChunkID reports whether a stored item ID (stringified uint64) matches
+// any entry in ids. Entries may be decimal uint64 IDs or 16-hex content SHAs
+// (matched against payload content_sha / hash for forward compatibility).
+func matchChunkID(itemID string, itemMeta map[string]any, idSet map[string]bool) bool {
+	if idSet[itemID] {
+		return true
+	}
+	if itemMeta != nil {
+		if sha, _ := itemMeta["content_sha"].(string); sha != "" && idSet[sha] {
+			return true
+		}
+		if h, ok := itemMeta["hash"]; ok && idSet[fmt.Sprintf("%v", h)] {
+			return true
+		}
+		if md, ok := itemMeta["metadata"].(map[string]any); ok {
+			if sha, _ := md["content_sha"].(string); sha != "" && idSet[sha] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// idSetFromFilter extracts an {"ids":[...]} list from a delete/get filter.
+func idSetFromFilter(filter map[string]any) map[string]bool {
+	if filter == nil {
+		return nil
+	}
+	raw, ok := filter["ids"]
+	if !ok {
+		return nil
+	}
+	var list []any
+	switch v := raw.(type) {
+	case []string:
+		for _, s := range v {
+			list = append(list, s)
+		}
+	case []any:
+		list = v
+	case string:
+		list = []any{v}
+	default:
+		return nil
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, e := range list {
+		s := strings.TrimSpace(fmt.Sprintf("%v", e))
+		if s != "" {
+			set[s] = true
+		}
+	}
+	return set
+}
+
 // newPayloadMatcher builds a predicate from a Qdrant-style filter. An empty
 // filter matches everything. Supported: flat {key: value} and
-// {"must":[{"key":..,"match":{"value":..}}]}. Dotted keys (e.g. "metadata.role")
+// {"must":[{"key":..,"match":{"value":..|prefix:..}}]}. Dotted keys (e.g. "metadata.role")
 // traverse nested payload objects.
 func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error) {
 	if len(filter) == 0 {
@@ -920,11 +1190,48 @@ func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error)
 			key, _ := mm["key"].(string)
 			match, _ := mm["match"].(map[string]any)
 			if key == "" || match == nil {
-				return nil, fmt.Errorf("vectra backend: only {key, match:{value}} filters are supported")
+				return nil, fmt.Errorf("vectra backend: only {key, match:{value|prefix}} filters are supported")
+			}
+			if prefix, ok := match["prefix"].(string); ok {
+				prefix := prefix
+				conds = append(conds, func(meta map[string]any) bool {
+					got, ok := lookupPath(meta, key)
+					if !ok {
+						return false
+					}
+					// tags_expanded may be a slice or comma string.
+					switch v := got.(type) {
+					case []string:
+						for _, e := range v {
+							if e == prefix || strings.HasPrefix(e, prefix+"/") {
+								return true
+							}
+						}
+						return false
+					case []any:
+						for _, e := range v {
+							s := fmt.Sprintf("%v", e)
+							if s == prefix || strings.HasPrefix(s, prefix+"/") {
+								return true
+							}
+						}
+						return false
+					default:
+						s := fmt.Sprintf("%v", got)
+						for _, part := range strings.Split(s, ",") {
+							part = strings.TrimSpace(part)
+							if part == prefix || strings.HasPrefix(part, prefix+"/") {
+								return true
+							}
+						}
+						return false
+					}
+				})
+				continue
 			}
 			val, present := match["value"]
 			if !present {
-				return nil, fmt.Errorf("vectra backend: only match.value filters are supported")
+				return nil, fmt.Errorf("vectra backend: only match.value / match.prefix filters are supported")
 			}
 			conds = append(conds, func(meta map[string]any) bool {
 				got, ok := lookupPath(meta, key)

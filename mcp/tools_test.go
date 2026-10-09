@@ -20,6 +20,10 @@ func TestRegisterToolsSurface(t *testing.T) {
 		"vault_verify",
 		"vault_prune",
 		"vault_import",
+		"get_chunk",
+		"update_memory",
+		"verify_deep",
+		"tag_tree",
 	}
 	if len(s.tools) != len(want) {
 		t.Fatalf("registered %d tools, want %d", len(s.tools), len(want))

@@ -134,7 +134,7 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 	server.RegisterTool(Tool{
 		Name:        "delete_memory",
-		Description: "Delete points from a collection based on a filter.",
+		Description: "Delete points from a collection based on a filter. Pass {ids:[...]} for precise memory-card deletion by chunk ID or content SHA (preferred), or match.value / match.prefix clauses for metadata filtering. Empty filter clears the collection — use with care.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -144,7 +144,12 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 				},
 				"filter": map[string]any{
 					"type":        "object",
-					"description": "Filter to match points for deletion (match.value clauses)",
+					"description": "Filter to match points for deletion: {ids:[...]} or match.value / match.prefix clauses",
+				},
+				"ids": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional shorthand for filter.ids: chunk IDs or content SHAs to delete",
 				},
 			},
 			"required": []string{"collection_id"},
@@ -152,6 +157,12 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	}, func(args map[string]any) (any, error) {
 		collectionID, _ := args["collection_id"].(string)
 		filter, _ := args["filter"].(map[string]any)
+		if filter == nil {
+			filter = map[string]any{}
+		}
+		if ids := getStringSliceArg(args, "ids"); len(ids) > 0 {
+			filter["ids"] = ids
+		}
 
 		deleted, err := eng.DeleteMemory(collectionID, filter)
 		if err != nil {
@@ -366,6 +377,137 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		}
 		return ConvertToJSON(res), nil
 	})
+
+	server.RegisterTool(Tool{
+		Name:        "get_chunk",
+		Description: "Fetch one memory card by chunk ID or content SHA without embedding (zero token cost). Use after search_memory to precisely re-read a card before updating or deleting it.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection holding the chunk",
+				},
+				"chunk_id": map[string]any{
+					"type":        "string",
+					"description": "Chunk ID or content SHA from search_memory",
+				},
+			},
+			"required": []string{"collection_id", "chunk_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		chunkID, _ := args["chunk_id"].(string)
+		detail, err := eng.GetChunk(collectionID, chunkID)
+		if err != nil {
+			return nil, err
+		}
+		return ConvertToJSON(detail), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "update_memory",
+		Description: "Atomically revise memory cards: delete by ids/filter, then store new text with hierarchical tags. Pass dry_run=true to only report. Supersedes links are recorded in metadata for audit.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to update",
+				},
+				"ids": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Chunk IDs or content SHAs to replace",
+				},
+				"filter": map[string]any{
+					"type":        "object",
+					"description": "Alternative/combined filter (ids, match.value, match.prefix)",
+				},
+				"new_text": map[string]any{
+					"type":        "string",
+					"description": "Replacement text (chunked, embedded, stored)",
+				},
+				"metadata": map[string]any{
+					"type":        "object",
+					"description": "Optional metadata; tags as comma string e.g. '生活/健康/作息,DSPD'",
+				},
+				"dry_run": map[string]any{
+					"type":        "boolean",
+					"description": "True = report only, no writes",
+				},
+			},
+			"required": []string{"collection_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		ids := getStringSliceArg(args, "ids")
+		filter, _ := args["filter"].(map[string]any)
+		newText, _ := args["new_text"].(string)
+		metadata := getStringMapArg(args, "metadata")
+		dryRun := getBoolArg(args, "dry_run", false)
+		res, err := eng.UpdateMemory(collectionID, ids, filter, newText, metadata, dryRun)
+		if err != nil {
+			return nil, err
+		}
+		return ConvertToJSON(res), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "verify_deep",
+		Description: "Three-layer collection health check: structure (catalog/index) + text coverage (re-chunk raw source, content-SHA sets) + vector spot-check (re-embed N samples, median cosine). Catches corruption, chunk drift and pooling/model swaps that dim gates miss.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to check",
+				},
+				"source_path": map[string]any{
+					"type":        "string",
+					"description": "Optional raw source file for text-coverage layer (server-local path)",
+				},
+				"sample_n": map[string]any{
+					"type":        "integer",
+					"description": "Vector spot-check samples (default 20, max 50)",
+				},
+			},
+			"required": []string{"collection_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		sourcePath, _ := args["source_path"].(string)
+		sampleN := getIntArg(args, "sample_n", 20)
+		res, err := eng.VerifyDeep(collectionID, sourcePath, sampleN)
+		if err != nil {
+			return nil, err
+		}
+		return ConvertToJSON(res), nil
+	})
+
+	server.RegisterTool(Tool{
+		Name:        "tag_tree",
+		Description: "Aggregate hierarchical tag usage for a collection (tag -> chunk count). Use to browse the tag tree and pick prefix filters.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection_id": map[string]any{
+					"type":        "string",
+					"description": "Collection to aggregate",
+				},
+			},
+			"required": []string{"collection_id"},
+		},
+	}, func(args map[string]any) (any, error) {
+		collectionID, _ := args["collection_id"].(string)
+		if strings.TrimSpace(collectionID) == "" {
+			return nil, fmt.Errorf("collection_id is required")
+		}
+		if fs := eng.FileStore(); fs != nil {
+			return ConvertToJSON(fs.ListTags(collectionID)), nil
+		}
+		return nil, fmt.Errorf("no file store")
+	})
 }
 
 // Helper functions
@@ -448,6 +590,12 @@ func formatSearchResults(results []engine.SearchResult) string {
 	result := fmt.Sprintf("Found %d results:\n\n", len(results))
 	for i, r := range results {
 		result += fmt.Sprintf("--- Result %d (score: %.3f) ---\n", i+1, r.Score)
+		if r.ID != "" {
+			result += fmt.Sprintf("ID: %s\n", r.ID)
+		}
+		if r.Hash != "" {
+			result += fmt.Sprintf("Hash: %s\n", r.Hash)
+		}
 		if r.Collection != "" {
 			tag := ""
 			if r.Backend != "" {
@@ -456,9 +604,20 @@ func formatSearchResults(results []engine.SearchResult) string {
 			result += fmt.Sprintf("Collection: %s%s\n", r.Collection, tag)
 		}
 		if r.Source != "" {
-			result += fmt.Sprintf("Source: %s\n", r.Source)
+			if r.ChunkIndex != 0 {
+				result += fmt.Sprintf("Source: %s#%d\n", r.Source, r.ChunkIndex)
+			} else {
+				result += fmt.Sprintf("Source: %s\n", r.Source)
+			}
 		}
-		result += fmt.Sprintf("%s\n\n", r.Text)
+		if len(r.Tags) > 0 {
+			result += fmt.Sprintf("Tags: %s\n", strings.Join(r.Tags, ", "))
+		}
+		text := r.Text
+		if len(text) > 500 {
+			text = text[:500] + "…"
+		}
+		result += fmt.Sprintf("%s\n\n", text)
 	}
 	return result
 }

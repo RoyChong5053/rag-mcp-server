@@ -126,6 +126,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/vault/verify", h.requireAuth(h.handleVaultVerify))
 	mux.HandleFunc("POST /api/vault/prune", h.requireAuth(h.handleVaultPrune))
 	mux.HandleFunc("POST /api/vault/import", h.requireAuth(h.handleVaultImport))
+	mux.HandleFunc("GET /api/collections/{name}/chunk", h.requireAuth(h.handleGetChunk))
+	mux.HandleFunc("POST /api/collections/{name}/update", h.requireAuth(h.handleUpdateMemory))
+	mux.HandleFunc("POST /api/collections/{name}/delete-cards", h.requireAuth(h.handleDeleteCards))
+	mux.HandleFunc("POST /api/collections/{name}/verify-deep", h.requireAuth(h.handleVerifyDeep))
+	mux.HandleFunc("GET /api/collections/{name}/tags", h.requireAuth(h.handleTagTree))
 	return mux
 }
 
@@ -616,6 +621,91 @@ func (h *Handler) handleVaultImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// handleGetChunk returns one memory card by ID/SHA without embedding.
+func (h *Handler) handleGetChunk(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("id is required"))
+		return
+	}
+	detail, err := h.eng.GetChunk(r.PathValue("name"), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// handleUpdateMemory runs the atomic revise (delete ids/filter + store).
+func (h *Handler) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs      []string          `json:"ids"`
+		Filter   map[string]any    `json:"filter"`
+		NewText  string            `json:"new_text"`
+		Metadata map[string]string `json:"metadata"`
+		DryRun   bool              `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	res, err := h.eng.UpdateMemory(r.PathValue("name"), body.IDs, body.Filter, body.NewText, body.Metadata, body.DryRun)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleDeleteCards deletes exact memory cards by ID/SHA.
+func (h *Handler) handleDeleteCards(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("ids is required"))
+		return
+	}
+	n, err := h.eng.DeleteMemory(r.PathValue("name"), map[string]any{"ids": body.IDs})
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "deleted": n})
+}
+
+// handleVerifyDeep runs the three-layer health check.
+func (h *Handler) handleVerifyDeep(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SourcePath string `json:"source_path"`
+		SampleN    int    `json:"sample_n"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // all optional
+	if body.SampleN <= 0 {
+		body.SampleN = 20
+	}
+	res, err := h.eng.VerifyDeep(r.PathValue("name"), strings.TrimSpace(body.SourcePath), body.SampleN)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleTagTree aggregates hierarchical tag usage for the tag-tree panel.
+func (h *Handler) handleTagTree(w http.ResponseWriter, r *http.Request) {
+	fs := h.eng.FileStore()
+	if fs == nil {
+		writeErr(w, http.StatusServiceUnavailable, fmt.Errorf("no file store"))
+		return
+	}
+	writeJSON(w, http.StatusOK, fs.ListTags(r.PathValue("name")))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

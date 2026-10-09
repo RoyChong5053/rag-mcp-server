@@ -214,6 +214,29 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   </div>
   <div id="results"></div>
   <div id="killed"></div>
+  <h2>Memory cards</h2>
+  <div class="prov">search above, then manage exact cards by ID (checksum cards survive reordering; chunk # is display only).</div>
+  <div class="row">
+    <input type="text" id="mc-id" placeholder="chunk ID or content SHA…" style="flex:1;min-width:200px">
+    <button onclick="withBusy(this, () => mcGet())">Get card</button>
+    <button class="danger" onclick="withBusy(this, () => mcDelete())">Delete card</button>
+  </div>
+  <div id="mc-out"></div>
+  <label>Replacement text</label><textarea id="mc-new" rows="3" placeholder="revised memory text…"></textarea>
+  <div class="row">
+    <input type="text" id="mc-tags" placeholder="tags, e.g. 生活/健康/作息,DSPD" style="flex:1;min-width:200px">
+    <label style="display:inline"><input type="checkbox" id="mc-dry"> dry-run</label>
+    <button onclick="withBusy(this, () => mcUpdate())">Update card (atomic)</button>
+  </div>
+  <h2>Health (deep)</h2>
+  <div class="row">
+    <input type="text" id="vd-src" placeholder="raw source path (optional, server-local)" style="flex:1;min-width:200px">
+    <span>samples <input type="number" id="vd-n" value="20" min="1" max="50"></span>
+    <button onclick="withBusy(this, () => vdRun())">Run deep check</button>
+    <button onclick="withBusy(this, () => tagTree())">Tag tree</button>
+  </div>
+  <div id="vd-out"></div>
+  <div id="tag-out"></div>
 </div>
 
 <div class="panel">
@@ -606,7 +629,13 @@ async function testRecall() {
     box.innerHTML = r.results.length ? '' : 'no results';
     for (const x of r.results) {
       const d = document.createElement('div');
-      d.textContent = '[' + Number(x.score).toFixed(3) + '] ' + x.text.slice(0, 400);
+      const head = '[' + Number(x.score).toFixed(3) + ']'
+        + (x.id ? ' <span class="col-id">' + esc(x.id) + '</span>' : '')
+        + (x.hash ? ' <span class="dim">' + esc(x.hash) + '</span>' : '')
+        + (x.source ? ' ' + esc(x.source) + (x.chunk_index ? '#' + x.chunk_index : '') : '')
+        + (x.tags && x.tags.length ? ' <span class="badge">' + esc(x.tags.join(', ')) + '</span>' : '');
+      d.innerHTML = head + '<br>' + esc((x.text || '').slice(0, 400))
+        + (x.id ? ' <button data-id="' + esc(x.id) + '" onclick="mcFill(this.dataset.id)">use</button>' : '');
       box.appendChild(d);
     }
     if (r.killed && r.killed.length) {
@@ -620,6 +649,76 @@ async function testRecall() {
       }
     }
   } catch (e) { box.textContent = 'search failed: ' + e.message; }
+}
+function mcFill(id) { document.getElementById('mc-id').value = id; mcGet(); }
+async function mcGet() {
+  const id = document.getElementById('mc-id').value.trim();
+  if (!id || !cur) return;
+  const box = document.getElementById('mc-out');
+  box.textContent = 'loading…';
+  try {
+    const r = await api('GET', '/api/collections/' + encodeURIComponent(cur) + '/chunk?id=' + encodeURIComponent(id));
+    box.innerHTML = '<div><span class="col-id">' + esc(r.id || '') + '</span> <span class="dim">' + esc(r.hash || '') + '</span>'
+      + (r.tags ? ' <span class="badge">' + esc((r.tags || []).join(', ')) + '</span>' : '') + '<br>' + esc(r.text || '') + '</div>';
+    document.getElementById('mc-new').value = r.text || '';
+    if (r.tags) document.getElementById('mc-tags').value = r.tags.join(',');
+  } catch (e) { box.textContent = 'get failed: ' + e.message; }
+}
+async function mcDelete() {
+  const id = document.getElementById('mc-id').value.trim();
+  if (!id || !cur) return;
+  const ok = await modal({title: 'Delete card', body: 'Delete card <b>' + esc(id) + '</b> from <b>' + esc(cur) + '</b>?', okLabel: 'Delete', danger: true});
+  if (!ok) return;
+  try {
+    const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/delete-cards', {ids: [id]});
+    toast('deleted: ' + r.deleted);
+    load();
+  } catch (e) { toast('delete failed: ' + e.message, 'err'); }
+}
+async function mcUpdate() {
+  const id = document.getElementById('mc-id').value.trim();
+  const txt = document.getElementById('mc-new').value;
+  if (!id || !txt.trim() || !cur) { toast('need ID + replacement text', 'err'); return; }
+  try {
+    const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/update', {
+      ids: [id], new_text: txt,
+      metadata: {tags: document.getElementById('mc-tags').value},
+      dry_run: document.getElementById('mc-dry').checked
+    });
+    toast('updated: deleted=' + r.deleted + ' indexed=' + r.chunks_indexed);
+    load();
+  } catch (e) { toast('update failed: ' + e.message, 'err'); }
+}
+async function vdRun() {
+  if (!cur) return;
+  const box = document.getElementById('vd-out');
+  box.textContent = 'checking…';
+  try {
+    const r = await api('POST', '/api/collections/' + encodeURIComponent(cur) + '/verify-deep', {
+      source_path: document.getElementById('vd-src').value,
+      sample_n: +document.getElementById('vd-n').value || 20
+    }, false, 120000);
+    const cov = r.text_total ? (100 * r.text_coverage).toFixed(1) + '% (' + r.text_matched + '/' + r.text_total + ')' : 'n/a (no source)';
+    box.innerHTML = '<div>overall <b class="' + (r.ok ? 'b-fresh' : 'b-stale') + '">' + (r.ok ? 'OK' : 'ATTENTION') + '</b>'
+      + ' · structure ' + (r.structure_ok ? 'ok' : 'BAD')
+      + ' · text coverage ' + esc(cov) + ' · orphans ' + (r.orphan_cards || 0)
+      + ' · vector median ' + (r.vector_median ? Number(r.vector_median).toFixed(4) : 'n/a') + ' (' + esc(r.vector_note || '') + ')</div>';
+  } catch (e) { box.textContent = 'deep check failed: ' + e.message; }
+}
+async function tagTree() {
+  if (!cur) return;
+  const box = document.getElementById('tag-out');
+  box.textContent = 'loading…';
+  try {
+    const r = await api('GET', '/api/collections/' + encodeURIComponent(cur) + '/tags');
+    const rows = Object.entries(r || {}).sort((a, b) => b[1] - a[1]).slice(0, 60);
+    box.innerHTML = rows.length ? '' : 'no tags yet';
+    for (const [t, n] of rows) {
+      const d = document.createElement('div');
+      d.innerHTML = '<span class="badge">' + esc(t) + '</span> ×' + n;
+      box.appendChild(d);
+    }
+  } catch (e) { box.textContent = 'tags failed: ' + e.message; }
 }
 function backup() {
   const t = tokGet();

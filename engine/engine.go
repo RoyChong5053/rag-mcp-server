@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,13 +89,17 @@ type EngineConfig struct {
 
 // SearchResult represents a search result
 type SearchResult struct {
-	Text       string            `json:"text"`
-	Score      float64           `json:"score"`
-	Source     string            `json:"source,omitempty"`
-	Collection string            `json:"collection,omitempty"`
-	Backend    string            `json:"backend,omitempty"`
-	ChunkIndex int               `json:"chunk_index,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Text         string            `json:"text"`
+	Score        float64           `json:"score"`
+	Source       string            `json:"source,omitempty"`
+	Collection   string            `json:"collection,omitempty"`
+	Backend      string            `json:"backend,omitempty"`
+	ChunkIndex   int               `json:"chunk_index,omitempty"`
+	ID           string            `json:"id,omitempty"`
+	Hash         string            `json:"hash,omitempty"`
+	Tags         []string          `json:"tags,omitempty"`
+	TagsExpanded []string          `json:"tags_expanded,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 // IndexResult represents the result of indexing
@@ -887,14 +892,92 @@ func storeToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	chunkIndex, _ := r.Payload["chunk_index"].(float64)
 	metadata, _ := r.Payload["metadata"].(map[string]any)
 
-	return SearchResult{
-		Text:       text,
-		Score:      r.Score,
-		Source:     source,
-		Collection: collection,
-		ChunkIndex: int(chunkIndex),
-		Metadata:   convertMetadata(metadata),
+	id := ""
+	switch v := r.ID.(type) {
+	case uint64:
+		id = strconv.FormatUint(v, 10)
+	case uint32:
+		id = strconv.FormatUint(uint64(v), 10)
+	case int:
+		id = strconv.Itoa(v)
+	case float64:
+		id = strconv.FormatUint(uint64(v), 10)
+	case string:
+		id = v
+	default:
+		if r.ID != nil {
+			id = fmt.Sprintf("%v", r.ID)
+		}
 	}
+	hash, _ := r.Payload["content_sha"].(string)
+	if hash == "" {
+		if h, ok := r.Payload["hash"]; ok {
+			hash = fmt.Sprintf("%v", h)
+		}
+	}
+	tags, expanded := extractTags(metadata)
+
+	return SearchResult{
+		Text:         text,
+		Score:        r.Score,
+		Source:       source,
+		Collection:   collection,
+		ChunkIndex:   int(chunkIndex),
+		ID:           id,
+		Hash:         hash,
+		Tags:         tags,
+		TagsExpanded: expanded,
+		Metadata:     convertMetadata(metadata),
+	}
+}
+
+// extractTags reads metadata.tags (string | []string | []any) plus a stored
+// tags_expanded, returning both (expanded is recomputed when absent).
+func extractTags(metadata map[string]any) (tags, expanded []string) {
+	if metadata == nil {
+		return nil, nil
+	}
+	raw, ok := metadata["tags"]
+	if ok {
+		switch v := raw.(type) {
+		case string:
+			for _, p := range strings.Split(v, ",") {
+				if t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(p), "#")); t != "" {
+					tags = append(tags, t)
+				}
+			}
+		case []string:
+			tags = append(tags, v...)
+		case []any:
+			for _, e := range v {
+				if t := strings.TrimSpace(fmt.Sprintf("%v", e)); t != "" {
+					tags = append(tags, strings.TrimPrefix(t, "#"))
+				}
+			}
+		}
+	}
+	if ex, ok := metadata["tags_expanded"]; ok {
+		switch v := ex.(type) {
+		case []string:
+			expanded = append(expanded, v...)
+		case []any:
+			for _, e := range v {
+				if t := strings.TrimSpace(fmt.Sprintf("%v", e)); t != "" {
+					expanded = append(expanded, t)
+				}
+			}
+		case string:
+			for _, p := range strings.Split(v, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					expanded = append(expanded, t)
+				}
+			}
+		}
+	}
+	if len(expanded) == 0 && len(tags) > 0 {
+		expanded = ExpandTags(tags)
+	}
+	return tags, expanded
 }
 
 func trimResults(results []SearchResult, topK int) []SearchResult {
@@ -1497,6 +1580,18 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		}
 	}
 	points := make([]Point, len(chunks))
+	// Pre-expand hierarchical tags once per call so every chunk payload
+	// carries both tags and tags_expanded for BM25 + prefix filtering.
+	var callTags, callExpanded []string
+	if metadata != nil {
+		if raw, ok := metadata["tags"]; ok && strings.TrimSpace(raw) != "" {
+			callTags = strings.Split(raw, ",")
+			for i, t := range callTags {
+				callTags[i] = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "#"))
+			}
+			callExpanded = ExpandTags(callTags)
+		}
+	}
 	for i, chunk := range chunks {
 		payload := map[string]any{
 			"text":        chunk,
@@ -1506,9 +1601,19 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 			"indexed_at":  indexedAt,
 			"chunk_index": i,
 			"hash":        StringHash(chunk),
+			"content_sha": ContentSHA(chunk),
 		}
 		if metadata != nil {
-			payload["metadata"] = metadata
+			// Clone so per-call map is not aliased across points.
+			md := make(map[string]string, len(metadata)+2)
+			for k, v := range metadata {
+				md[k] = v
+			}
+			if len(callTags) > 0 {
+				md["tags"] = strings.Join(callTags, ",")
+				md["tags_expanded"] = strings.Join(callExpanded, ",")
+			}
+			payload["metadata"] = md
 		}
 
 		points[i] = Point{
