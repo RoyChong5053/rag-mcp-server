@@ -911,9 +911,7 @@ func storeToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	}
 	hash, _ := r.Payload["content_sha"].(string)
 	if hash == "" {
-		if h, ok := r.Payload["hash"]; ok {
-			hash = fmt.Sprintf("%v", h)
-		}
+		hash = formatHashValue(r.Payload["hash"])
 	}
 	tags, expanded := extractTags(metadata)
 
@@ -931,6 +929,28 @@ func storeToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	}
 }
 
+// formatHashValue renders a legacy numeric FNV hash without scientific
+// notation (JSON round-trips decode numbers as float64).
+func formatHashValue(h any) string {
+	switch v := h.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case float64:
+		return strconv.FormatUint(uint64(v), 10)
+	case float32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case int:
+		return strconv.Itoa(v)
+	default:
+		return fmt.Sprintf("%v", h)
+	}
+}
 // extractTags reads metadata.tags (string | []string | []any) plus a stored
 // tags_expanded, returning both (expanded is recomputed when absent).
 func extractTags(metadata map[string]any) (tags, expanded []string) {

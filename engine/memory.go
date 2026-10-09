@@ -52,9 +52,7 @@ func (e *Engine) GetChunk(collectionID, chunkID string) (*ChunkDetail, error) {
 	}
 	hash, _ := payload["content_sha"].(string)
 	if hash == "" {
-		if h, ok := payload["hash"]; ok {
-			hash = fmt.Sprintf("%v", h)
-		}
+		hash = formatHashValue(payload["hash"])
 	}
 	var md map[string]any
 	if m, ok := payload["metadata"].(map[string]any); ok {
