@@ -60,3 +60,29 @@ func TestIDSetAndMatcherPrefix(t *testing.T) {
 	}
 	_ = strings.TrimSpace
 }
+
+func TestSplitFilterANDSemantics(t *testing.T) {
+	// ids-only must NOT match everything (regression: empty payload matcher
+	// is match-all, so ids must gate first).
+	idSet, mf, hasOther := splitFilter(map[string]any{"ids": []any{"abc"}})
+	if hasOther {
+		t.Fatal("ids-only must have no other clauses")
+	}
+	m, err := newPayloadMatcher(mf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matchItem("abc", nil, map[string]any{}, idSet, hasOther, m) {
+		t.Fatal("listed id must match")
+	}
+	if matchItem("zzz", map[string]any{"text": "hi"}, map[string]any{"text": "hi"}, idSet, hasOther, m) {
+		t.Fatal("unlisted id must NOT match (would wipe collection)")
+	}
+	// Empty filter = match all (whole-collection op preserved).
+	idSet, mf, hasOther = splitFilter(map[string]any{})
+	m, _ = newPayloadMatcher(mf)
+	_ = idSet
+	if !matchItem("anything", nil, map[string]any{}, nil, hasOther, m) {
+		t.Fatal("empty filter must match all")
+	}
+}

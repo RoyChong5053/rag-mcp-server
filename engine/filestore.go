@@ -464,18 +464,11 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 	if cat == nil {
 		return nil, nil
 	}
-	matcherFilter := map[string]any{}
-	for k, v := range filter {
-		if k == "ids" {
-			continue
-		}
-		matcherFilter[k] = v
-	}
+	idSet, matcherFilter, hasOther := splitFilter(filter)
 	matcher, err := newPayloadMatcher(matcherFilter)
 	if err != nil {
 		return nil, err
 	}
-	idSet := idSetFromFilter(filter)
 	qNorm := vectorNorm(vector)
 	if qNorm == 0 {
 		return nil, nil
@@ -498,10 +491,7 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 			if _, ok := payload["source_file"]; !ok {
 				payload["source_file"] = source
 			}
-			if idSet != nil && !matchChunkID(it.ID, it.Metadata, idSet) {
-				continue
-			}
-			if !matcher(payload) {
+			if !matchItem(it.ID, it.Metadata, payload, idSet, hasOther, matcher) {
 				continue
 			}
 			vNorm := it.Norm
@@ -594,18 +584,13 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 		return nil
 	}
 	// Strip ids from the payload matcher (it only knows dotted payload keys).
-	matcherFilter := map[string]any{}
-	for k, v := range filter {
-		if k == "ids" {
-			continue
-		}
-		matcherFilter[k] = v
-	}
+	// Semantics are AND: id must match (when ids given) AND payload clauses
+	// must match (when given). An empty filter still clears the collection.
+	idSet, matcherFilter, hasOther := splitFilter(filter)
 	matcher, err := newPayloadMatcher(matcherFilter)
 	if err != nil {
 		return err
 	}
-	idSet := idSetFromFilter(filter)
 	for source, meta := range cat.Sources {
 		idx, err := f.loadIndex(collection, meta.Key)
 		if err != nil || idx == nil {
@@ -613,10 +598,7 @@ func (f *FileStore) DeletePoints(collection string, filter map[string]any) error
 		}
 		kept := make([]vectraItem, 0, len(idx.Items))
 		for _, it := range idx.Items {
-			if idSet != nil && matchChunkID(it.ID, it.Metadata, idSet) {
-				continue
-			}
-			if matcher(it.Metadata) {
+			if matchItem(it.ID, it.Metadata, it.Metadata, idSet, hasOther, matcher) {
 				continue
 			}
 			kept = append(kept, it)
@@ -747,18 +729,11 @@ func (f *FileStore) SampleTexts(collection string, n int) []SampleText {
 func (f *FileStore) CountMatches(collection string, filter map[string]any) int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	matcherFilter := map[string]any{}
-	for k, v := range filter {
-		if k == "ids" {
-			continue
-		}
-		matcherFilter[k] = v
-	}
+	idSet, matcherFilter, hasOther := splitFilter(filter)
 	matcher, err := newPayloadMatcher(matcherFilter)
 	if err != nil {
 		return 0
 	}
-	idSet := idSetFromFilter(filter)
 	cat, err := f.loadCatalog(collection)
 	if err != nil || cat == nil {
 		return 0
@@ -770,11 +745,7 @@ func (f *FileStore) CountMatches(collection string, filter map[string]any) int {
 			continue
 		}
 		for _, it := range idx.Items {
-			if idSet != nil && matchChunkID(it.ID, it.Metadata, idSet) {
-				n++
-				continue
-			}
-			if matcher(it.Metadata) {
+			if matchItem(it.ID, it.Metadata, it.Metadata, idSet, hasOther, matcher) {
 				n++
 			}
 		}
@@ -1059,6 +1030,36 @@ func (f *FileStore) Ping() error {
 	}
 	_ = os.Remove(probe)
 	return nil
+}
+
+// splitFilter separates an {"ids":[...]} list from payload clauses.
+// hasOther reports whether payload clauses beyond ids exist.
+// Match semantics are AND: an item matches iff (no ids OR id matches) AND
+// (no other clauses OR payload matches). An entirely empty filter matches
+// everything (whole-collection operation).
+func splitFilter(filter map[string]any) (idSet map[string]bool, matcherFilter map[string]any, hasOther bool) {
+	idSet = idSetFromFilter(filter)
+	matcherFilter = map[string]any{}
+	for k, v := range filter {
+		if k == "ids" {
+			continue
+		}
+		matcherFilter[k] = v
+	}
+	hasOther = len(matcherFilter) > 0
+	return idSet, matcherFilter, hasOther
+}
+
+// matchItem applies the AND semantics from splitFilter to one stored item.
+// matcher must be built from the returned matcherFilter.
+func matchItem(itemID string, itemMeta, payload map[string]any, idSet map[string]bool, hasOther bool, matcher func(map[string]any) bool) bool {
+	if idSet != nil && !matchChunkID(itemID, itemMeta, idSet) {
+		return false
+	}
+	if hasOther && !matcher(payload) {
+		return false
+	}
+	return true
 }
 
 // --- helpers -------------------------------------------------------------
