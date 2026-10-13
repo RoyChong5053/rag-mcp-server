@@ -207,7 +207,7 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
   <h2>Recall test</h2>
   <div class="row">
     <input type="text" id="q" placeholder="query…" style="flex:1;min-width:200px">
-    <span>top_k <input type="number" id="q-topk" value="3" min="1" max="50"></span>
+    <span>top_k <input type="number" id="q-topk" value="10" min="1" max="50"></span>
     <span>threshold <input type="number" id="q-thr" value="0" min="0" max="1" step="0.05"></span>
     <label style="display:inline"><input type="checkbox" id="q-rerank" checked> rerank</label>
     <button onclick="withBusy(this, () => testRecall())">Search</button>
@@ -634,7 +634,7 @@ async function testRecall() {
         + (x.hash ? ' <span class="dim">' + esc(x.hash) + '</span>' : '')
         + (x.source ? ' ' + esc(x.source) + (x.chunk_index ? '#' + x.chunk_index : '') : '')
         + (x.tags && x.tags.length ? ' <span class="badge">' + esc(x.tags.join(', ')) + '</span>' : '');
-      d.innerHTML = head + '<br>' + esc((x.text || '').slice(0, 400))
+      d.innerHTML = head + '<br>' + esc(x.text || '')
         + (x.id ? ' <button data-id="' + esc(x.id) + '" onclick="mcFill(this.dataset.id)">use</button>' : '');
       box.appendChild(d);
     }
@@ -642,9 +642,9 @@ async function testRecall() {
       const h = document.createElement('div');
       h.innerHTML = '<b style="color:#e8a33d">' + r.killed.length + ' killed by threshold:</b>';
       kb.appendChild(h);
-      for (const x of r.killed.slice(0, 5)) {
+      for (const x of r.killed) {
         const d = document.createElement('div');
-        d.textContent = '[' + Number(x.score).toFixed(3) + '] ' + x.text.slice(0, 200);
+        d.textContent = '[' + Number(x.score).toFixed(3) + '] ' + x.text;
         kb.appendChild(d);
       }
     }
@@ -929,7 +929,7 @@ async function preview() {
     box.innerHTML = '<b>' + r.chunks + ' chunks</b> (strategy ' + (r.strategy || '?') + ', size ' + r.size + ' / overlap ' + r.overlap + ', zero token spent)';
     for (const s of r.samples) {
       const d = document.createElement('div');
-      d.textContent = s.slice(0, 300);
+      d.textContent = s;
       box.appendChild(d);
     }
   } catch (e) { box.textContent = 'preview failed: ' + e.message; }
