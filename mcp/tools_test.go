@@ -1,6 +1,12 @@
 package mcp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"github.com/RoyChong5053/rag-mcp-server/engine"
+)
 
 // The MCP surface is synchronous now: RAG tools plus vault maintenance, no
 // job queue and no wait_seconds knob.
@@ -62,5 +68,23 @@ func TestSearchMemoryHasCollectionIDs(t *testing.T) {
 	m, ok := v.(map[string]any)
 	if !ok || m["type"] != "array" {
 		t.Fatalf("collection_ids must be an array, got %#v", v)
+	}
+}
+
+// search_memory must return the stored chunk byte for byte. Truncating here
+// once cut at 500 *bytes*, which split CJK runes and made the MCP payload
+// shorter than the same hit in the dashboard.
+func TestFormatSearchResultsReturnsFullText(t *testing.T) {
+	text := strings.Repeat("记忆片段", 400) // 1600 runes / 4800 bytes
+	out := formatSearchResults([]engine.SearchResult{{ID: "1", Hash: "abc", Text: text}})
+
+	if !strings.Contains(out, text) {
+		t.Fatalf("chunk text altered: got %d runes", utf8.RuneCountInString(out))
+	}
+	if strings.Contains(out, "…") {
+		t.Fatal("chunk text must not be ellipsis-truncated")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("result payload must stay valid UTF-8")
 	}
 }

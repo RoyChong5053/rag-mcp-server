@@ -72,7 +72,7 @@ type EngineConfig struct {
 	// SearchBudget bounds one whole search (embed + stores + rerank) so the
 	// server answers before the caller's outer fail-safe. Checked only at
 	// stage boundaries. 0 = 170s.
-	SearchBudget       time.Duration
+	SearchBudget   time.Duration
 	ChunkSize      int
 	OverlapPercent int
 	ChunkStrategy  string
@@ -631,11 +631,18 @@ func (e *Engine) currentEmbedder() *EmbeddingClient {
 	return c
 }
 
-// embedQuery binds the current provider's client for one query embed. embeds a single query string once. The query is bounded first so
-// a long pasted message never reaches the embedding model untruncated (the
-// rerank-side bound only runs after embedding, too late to help).
+// embedQuery embeds a single query string, bounding it to query_max_chars
+// first so a long pasted message never reaches the embedding model
+// untruncated (the rerank-side bound only runs after embedding, too late to
+// help). Callers that already called boundQuery use embedBounded to avoid
+// logging the truncation twice.
 func (e *Engine) embedQuery(query string) ([]float32, error) {
-	embeddings, err := e.currentEmbedder().CreateEmbeddings([]string{e.boundQuery(query)})
+	return e.embedBounded(e.boundQuery(query))
+}
+
+// embedBounded embeds a query that is already within query_max_chars.
+func (e *Engine) embedBounded(bounded string) ([]float32, error) {
+	embeddings, err := e.currentEmbedder().CreateEmbeddings([]string{bounded})
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
@@ -951,6 +958,7 @@ func formatHashValue(h any) string {
 		return fmt.Sprintf("%v", h)
 	}
 }
+
 // extractTags reads metadata.tags (string | []string | []any) plus a stored
 // tags_expanded, returning both (expanded is recomputed when absent).
 func extractTags(metadata map[string]any) (tags, expanded []string) {
@@ -1042,16 +1050,12 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	origLen := utf8.RuneCountInString(query)
 	bounded := e.boundQuery(query)
 	truncLen := utf8.RuneCountInString(bounded)
-	preview := bounded
-	if utf8.RuneCountInString(preview) > 300 {
-		preview = string([]rune(preview)[:300]) + "…"
-	}
 
 	if err := checkSearchBudget(deadline); err != nil {
 		return nil, err
 	}
 	tEmbed := time.Now()
-	queryVector, err := e.embedQuery(query)
+	queryVector, err := e.embedBounded(bounded)
 	embedMs := time.Since(tEmbed).Milliseconds()
 	if err != nil {
 		return nil, err
@@ -1122,7 +1126,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 	out := &SearchDebugResult{
 		Results: results, Killed: killed,
 		QueryOriginalLen: origLen, QueryTruncatedLen: truncLen,
-		QueryPreview: preview, QueryTruncated: truncLen < origLen,
+		QueryPreview: bounded, QueryTruncated: truncLen < origLen,
 		Backend: backend, Reranked: reranked, ScoreMode: scoreMode,
 		TopScore: topScore, EmbedMs: embedMs, RerankMs: rerankMs,
 		TookMs: time.Since(t0).Milliseconds(),
@@ -1137,7 +1141,9 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		}
 	}
 	if out.QueryTruncated {
-		log.Printf("SearchDebug: query truncated %d -> %d runes preview=%.100q", origLen, truncLen, preview)
+		// Log the query that actually ran, not a shorter preview of it: a
+		// cropped line is indistinguishable from a bug in query_max_chars.
+		log.Printf("SearchDebug: query truncated %d -> %d runes preview=%q", origLen, truncLen, bounded)
 	}
 	return out, nil
 }

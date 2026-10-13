@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ToolHandler is a function that handles a tool call
@@ -181,9 +182,15 @@ func (s *Server) sendJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-// summarizeArgs renders tool arguments for audit logs.
-// Values are truncated to 120 runes so giant payloads (e.g. index_text
-// with a full document) don't flood the log.
+// argPreviewRunes caps one tool argument in the audit log. It matches the
+// default query_max_chars so a query reads the same in the log as it does
+// when it reaches embedding and reranking.
+const argPreviewRunes = 500
+
+// summarizeArgs renders tool arguments for audit logs. Values are capped at
+// argPreviewRunes so giant payloads (e.g. index_text with a full document)
+// don't flood the log, and a capped value always reports its real length so
+// the log can't be mistaken for a shorter query than the one that ran.
 func summarizeArgs(args map[string]any) string {
 	if len(args) == 0 {
 		return "{}"
@@ -191,8 +198,8 @@ func summarizeArgs(args map[string]any) string {
 	parts := make([]string, 0, len(args))
 	for k, v := range args {
 		s := fmt.Sprintf("%v", v)
-		if runes := []rune(s); len(runes) > 120 {
-			s = string(runes[:120]) + "…"
+		if n := utf8.RuneCountInString(s); n > argPreviewRunes {
+			s = string([]rune(s)[:argPreviewRunes]) + fmt.Sprintf("…[%d runes total]", n)
 		}
 		// Single-line it: newlines in logged text break log parsing
 		s = strings.ReplaceAll(s, "\n", " ")

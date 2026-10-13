@@ -613,11 +613,10 @@ func formatSearchResults(results []engine.SearchResult) string {
 		if len(r.Tags) > 0 {
 			result += fmt.Sprintf("Tags: %s\n", strings.Join(r.Tags, ", "))
 		}
-		text := r.Text
-		if len(text) > 500 {
-			text = text[:500] + "…"
-		}
-		result += fmt.Sprintf("%s\n\n", text)
+		// Chunking already bounds the length, so the full chunk goes out as
+		// stored. Truncating here (as a byte slice) split UTF-8 runes and made
+		// the MCP payload differ from what the dashboard shows for the same hit.
+		result += fmt.Sprintf("%s\n\n", r.Text)
 	}
 	return result
 }
