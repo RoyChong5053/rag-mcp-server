@@ -657,13 +657,16 @@ func (e *Engine) embedBounded(bounded string) ([]float32, error) {
 // qdrant via in-memory scan). Stores that do not implement it silently skip
 // the BM25 leg — keyword recall is an enhancement, not a requirement.
 type keywordSearcher interface {
-	KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error)
+	KeywordSearch(collection string, query string, limit int, filter map[string]any) ([]StoreSearchResult, error)
 }
 
 // fuseWithBM25 merges a vector result list with a BM25 leg from the same
 // (backend, collection) via RRF. Disabled or unsupported backends return the
 // vector list unchanged.
-func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchResult, recallCount int) []SearchResult {
+//
+// The filter is passed to the keyword leg as well: without it a filtered
+// search would have the BM25 half pull unfiltered hits straight back in.
+func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchResult, recallCount int, filter map[string]any) []SearchResult {
 	st := e.settings.Get()
 	if !st.BM25Enabled {
 		return vectorList
@@ -676,7 +679,7 @@ func (e *Engine) fuseWithBM25(backend, name, query string, vectorList []SearchRe
 	if !ok {
 		return vectorList
 	}
-	kw, err := ks.KeywordSearch(name, query, recallCount)
+	kw, err := ks.KeywordSearch(name, query, recallCount, filter)
 	if err != nil || len(kw) == 0 {
 		return vectorList
 	}
@@ -730,7 +733,7 @@ func (e *Engine) searchCollection(backend, name, query string, topK int, useRera
 		sr.Backend = backend
 		merged = append(merged, sr)
 	}
-	merged = e.fuseWithBM25(backend, name, query, merged, recallCount)
+	merged = e.fuseWithBM25(backend, name, query, merged, recallCount, filter)
 	if rerankOn && len(merged) > 1 {
 		// A rerank failure is an error: silently returning vector order would
 		// make recall mysteriously "work differently" between runs.
@@ -816,7 +819,7 @@ func (e *Engine) SearchMulti(query string, collections []string, topK int, useRe
 			sr.Backend = backend
 			vecList = append(vecList, sr)
 		}
-		merged = append(merged, e.fuseWithBM25(backend, name, query, vecList, recallCount)...)
+		merged = append(merged, e.fuseWithBM25(backend, name, query, vecList, recallCount, filter)...)
 	}
 	if len(skipped) == len(targets) {
 		return nil, fmt.Errorf("all %d requested collections failed: %s", len(targets), strings.Join(skipped, "; "))
@@ -897,7 +900,10 @@ func storeToSearchResult(r StoreSearchResult, collection string) SearchResult {
 	text, _ := r.Payload["text"].(string)
 	source, _ := r.Payload["source"].(string)
 	chunkIndex, _ := r.Payload["chunk_index"].(float64)
-	metadata, _ := r.Payload["metadata"].(map[string]any)
+	// The chunk metadata is written as map[string]string, so it must be read
+	// back as such. Reading it as map[string]any silently yields nil and
+	// drops every tag and metadata field from the result.
+	metadata := payloadMetadata(r.Payload)
 
 	id := ""
 	switch v := r.ID.(type) {
@@ -961,6 +967,26 @@ func formatHashValue(h any) string {
 
 // extractTags reads metadata.tags (string | []string | []any) plus a stored
 // tags_expanded, returning both (expanded is recomputed when absent).
+// payloadMetadata reads a stored chunk's metadata map out of a payload.
+// The map is written as map[string]string by the indexer; older payloads may
+// carry map[string]any, so both are accepted.
+func payloadMetadata(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	switch md := payload["metadata"].(type) {
+	case map[string]string:
+		out := make(map[string]any, len(md))
+		for k, v := range md {
+			out[k] = v
+		}
+		return out
+	case map[string]any:
+		return md
+	}
+	return nil
+}
+
 func extractTags(metadata map[string]any) (tags, expanded []string) {
 	if metadata == nil {
 		return nil, nil
@@ -1095,7 +1121,7 @@ func (e *Engine) SearchDebug(query string, collection string, topK int, useReran
 		}
 	}
 
-	results = e.fuseWithBM25(backend, collection, query, results, recallCount)
+	results = e.fuseWithBM25(backend, collection, query, results, recallCount, filter)
 
 	reranked := false
 	var rerankMs int64

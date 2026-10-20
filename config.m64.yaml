@@ -61,3 +61,45 @@ rerank:
   # reranking; 0 = unlimited. doc_max_chars caps each rerank document.
   query_max_chars: 500
   doc_max_chars: 1000
+
+# Web search: pull live pages in and file them into the shared library.
+#
+# The API keys are read from the environment variable named by api_key_env.
+# config.m64.yaml is tracked in git, so real keys never go in here: set them
+# in the service environment (or export them before starting the server).
+search:
+  enabled: true
+  collection: "web_kb"
+  providers:
+    - deepseek
+    - tavily
+    - firecrawl
+    - searxng
+  count: 10
+  ingest_top_n: 5
+  freshness_days: 7
+  cache_score_threshold: 0.5
+  cache_min_overlap: 0.34
+  dedup_threshold: 0.7
+  max_content_chars: 20000
+  timeout_seconds: 45
+  topic: "general"
+  lang: ""
+  tags:
+    - web
+  deepseek:
+    base_url: "https://api.deepseek.com"
+    api_key: ""
+    api_key_env: "DEEPSEEK_API_KEY"
+  tavily:
+    base_url: "https://api.tavily.com"
+    api_key: ""
+    api_key_env: "TAVILY_API_KEY"
+  firecrawl:
+    base_url: "https://api.firecrawl.dev/v2"
+    api_key: ""
+    api_key_env: "FIRECRAWL_API_KEY"
+    country: "MY"
+  searxng:
+    base_url: ""
+    categories: "general"

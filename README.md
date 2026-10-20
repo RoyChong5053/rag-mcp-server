@@ -186,6 +186,49 @@ scope can fall back to a local vectra collection:
 | `set_collection_meta` | Display name, tags, consumers, enabled flag, backend (backend refused once the collection holds vectors) |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy and report the active backend |
+| `web_search` | Search the live web and file what you find into the shared library. Checks its own library first: if the query is already covered by a stored page that is still fresh, it answers from the library and makes no external request. Otherwise it queries the provider chain, returns the ranked hits, and vectorizes the top results into the web collection so later turns can recall them instead of searching again |
+| `fetch_url` | Fetch one page as markdown, optionally vectorizing it into the web collection |
+
+### Web search
+
+The server can pull live web pages in and turn them into vectors, so a shared
+knowledge base stays current without every client owning a search key.
+
+```
+web_search(query)            →  check the library → search the web → store the hits
+search_memory(query)         →  recall them later, no network involved
+```
+
+- **Providers** are tried in order (`search.providers`); the first one that
+  answers wins, so a dead or rate-limited provider fails over to the next:
+  `deepseek` (search + fetch in one request, with publication date and a
+  source-authority tier), `tavily` (page-level chunks), `firecrawl` (anti-bot
+  scraping, news results), `searxng` (self-hosted, free, no key).
+- **The library comes first.** A stored page that still covers the query ends
+  the call without touching the network.
+- **Two signals decide "already covered"**: the rerank score and the term
+  overlap between the query and the stored text. Neither works alone — with
+  this embedding model every query scores 0.13–0.25 of raw cosine against any
+  document, and the reranker alone scores 0.81 for a train-fare query against
+  a paragraph about off-peak prices.
+- **Duplicates are dropped on write.** The same story from five outlets
+  becomes one stored page: a page-level fingerprint is compared against the
+  collection before the page is written.
+- **API keys** come from environment variables (`api_key_env`), never from
+  the tracked config file.
+
+```yaml
+search:
+  enabled: true
+  collection: "web_kb"      # keep web content apart from personal memory
+  providers: [deepseek, tavily, firecrawl, searxng]
+  ingest_top_n: 5           # how many of the top hits get stored
+  freshness_days: 7         # a stored page older than this is stale
+  dedup_threshold: 0.7      # rerank score for "same story, another outlet"
+  deepseek:
+    base_url: "https://api.deepseek.com"
+    api_key_env: "DEEPSEEK_API_KEY"
+```
 
 ## Management dashboard
 

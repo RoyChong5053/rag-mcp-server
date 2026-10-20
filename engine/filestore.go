@@ -516,11 +516,19 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 // KeywordSearch implements BM25 over a collection's stored chunk text by
 // walking the same source indexes Search uses. Tags are appended to the
 // indexed text so hierarchical tags (生活/健康/作息) contribute every level.
-func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error) {
+//
+// The payload filter is honoured here as well as in Search: a filtered
+// search must not have the keyword leg pull unfiltered hits back in.
+func (f *FileStore) KeywordSearch(collection string, query string, limit int, filter map[string]any) ([]StoreSearchResult, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	cat, err := f.loadCatalog(collection)
 	if err != nil || cat == nil {
+		return nil, err
+	}
+	idSet, matcherFilter, hasOther := splitFilter(filter)
+	matcher, err := newPayloadMatcher(matcherFilter)
+	if err != nil {
 		return nil, err
 	}
 	var docs []*bm25Doc
@@ -536,17 +544,18 @@ func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([
 			if it.Metadata != nil {
 				text, _ = it.Metadata["text"].(string)
 				// Append tags so BM25 catches exact tokens (DSPD, GT20…).
-				if md, ok := it.Metadata["metadata"].(map[string]any); ok {
-					if tg, _ := md["tags"].(string); tg != "" {
+				// The stored metadata map is map[string]string, so it has
+				// to be read as such.
+				if md, ok := it.Metadata["metadata"].(map[string]string); ok {
+					if tg := md["tags"]; tg != "" {
 						text += " " + strings.ReplaceAll(strings.ReplaceAll(tg, "/", " "), ",", " ")
 					}
-					if ex, _ := md["tags_expanded"].(string); ex != "" {
+					if ex := md["tags_expanded"]; ex != "" {
 						text += " " + strings.ReplaceAll(strings.ReplaceAll(ex, "/", " "), ",", " ")
 					}
 				}
 			}
 			key := source + "#" + it.ID
-			docs = append(docs, &bm25Doc{id: key, text: text})
 			payload := cloneAnyMap(it.Metadata)
 			if payload == nil {
 				payload = map[string]any{}
@@ -554,6 +563,10 @@ func (f *FileStore) KeywordSearch(collection string, query string, limit int) ([
 			if _, ok := payload["source_file"]; !ok {
 				payload["source_file"] = source
 			}
+			if !matchItem(it.ID, it.Metadata, payload, idSet, hasOther, matcher) {
+				continue
+			}
+			docs = append(docs, &bm25Doc{id: key, text: text})
 			payloads[key] = payload
 			ids[key] = parsePointID(it.ID)
 		}
@@ -1125,8 +1138,8 @@ func matchChunkID(itemID string, itemMeta map[string]any, idSet map[string]bool)
 		if h, ok := itemMeta["hash"]; ok && idSet[fmt.Sprintf("%v", h)] {
 			return true
 		}
-		if md, ok := itemMeta["metadata"].(map[string]any); ok {
-			if sha, _ := md["content_sha"].(string); sha != "" && idSet[sha] {
+		if md, ok := itemMeta["metadata"].(map[string]string); ok {
+			if sha := md["content_sha"]; sha != "" && idSet[sha] {
 				return true
 			}
 		}
@@ -1258,16 +1271,28 @@ func newPayloadMatcher(filter map[string]any) (func(map[string]any) bool, error)
 }
 
 // lookupPath resolves a dotted key against nested payload maps.
+// lookupPath resolves a dotted payload path ("metadata.source_type") to its
+// value. Both map[string]any and map[string]string are traversed: stored
+// chunk metadata is written as map[string]string, so a matcher that only
+// understood map[string]any would silently never match it.
 func lookupPath(m map[string]any, path string) (any, bool) {
 	parts := strings.Split(path, ".")
 	var cur any = m
 	for _, p := range parts {
-		mm, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		cur, ok = mm[p]
-		if !ok {
+		switch c := cur.(type) {
+		case map[string]any:
+			v, ok := c[p]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		case map[string]string:
+			v, ok := c[p]
+			if !ok {
+				return nil, false
+			}
+			cur = v
+		default:
 			return nil, false
 		}
 	}

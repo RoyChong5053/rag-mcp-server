@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,7 @@ type Config struct {
 	OneAPI       OneAPIConfig   `yaml:"oneapi"`
 	Chunking     ChunkingConfig `yaml:"chunking"`
 	Rerank       RerankConfig   `yaml:"rerank"`
+	Search       SearchConfig   `yaml:"search"`
 	RegistryPath string         `yaml:"registry_path"`
 	// AuditPath is the append-only log the dashboard tails (MCP method calls +
 	// tool invocations). Relative paths resolve against the config file's
@@ -111,6 +113,91 @@ type RerankConfig struct {
 	DocMaxChars   int `yaml:"doc_max_chars"`
 }
 
+// ProviderConfig configures one external search provider.
+//
+// The API key is read from api_key_env first and only falls back to the
+// inline api_key. The environment variable is the preferred form because
+// config.yaml is tracked in git while the key must not be.
+type ProviderConfig struct {
+	BaseURL string `yaml:"base_url"`
+	// APIKey is an inline key. Leave it empty and set api_key_env instead.
+	APIKey string `yaml:"api_key"`
+	// APIKeyEnv names an environment variable holding the key.
+	APIKeyEnv string `yaml:"api_key_env"`
+	// Country / Location bias geo-targeted results (ISO 3166-1 alpha-2).
+	Country  string `yaml:"country"`
+	Location string `yaml:"location"`
+}
+
+// Key resolves the provider's API key.
+func (p ProviderConfig) Key() string {
+	if env := p.APIKeyEnv; env != "" {
+		if v := os.Getenv(env); v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return strings.TrimSpace(p.APIKey)
+}
+
+// SearXNGConfig configures a self-hosted SearXNG instance. It needs no API
+// key, only a reachable base URL with the json format enabled.
+type SearXNGConfig struct {
+	BaseURL string `yaml:"base_url"`
+	// Language is the SearXNG language code ("zh-CN", "en", ...).
+	Language string `yaml:"language"`
+	// Categories restricts which engine groups run ("general").
+	Categories string `yaml:"categories"`
+}
+
+// SearchConfig configures the web-search side of the server: which providers
+// are tried in which order, where the fetched pages are stored, and how
+// aggressively duplicates are filtered out.
+type SearchConfig struct {
+	// Enabled turns the web tools on. When false, web_search reports that
+	// the feature is off instead of calling out.
+	Enabled bool `yaml:"enabled"`
+	// Collection is where ingested pages are vectorized.
+	Collection string `yaml:"collection"`
+	// Providers is the ordered failover chain ("deepseek", "tavily",
+	// "firecrawl", "searxng"). The first one that answers wins.
+	Providers []string `yaml:"providers"`
+	// Count is the default number of results to request.
+	Count int `yaml:"count"`
+	// IngestTopN is how many of the ranked results get fetched and stored.
+	IngestTopN int `yaml:"ingest_top_n"`
+	// FreshnessDays bounds how old a stored page may be before the server
+	// considers it stale and searches again. 0 = no limit.
+	FreshnessDays int `yaml:"freshness_days"`
+	// CacheScoreThreshold is the rerank score a stored hit needs for the
+	// server to answer from the library instead of searching again. The
+	// raw cosine cannot be used here: with this embedding model every
+	// query scores 0.13-0.25 against any document, matching or not.
+	CacheScoreThreshold float64 `yaml:"cache_score_threshold"`
+	// CacheMinOverlap is the fraction of the query's content terms that
+	// must appear in the stored text. The reranker alone is not enough:
+	// a query about train fares scores 0.81 against a paragraph about
+	// off-peak prices, so the lexical signal has to agree as well.
+	CacheMinOverlap float64 `yaml:"cache_min_overlap"`
+	// DedupThreshold is the rerank score at or above which a fetched page
+	// is treated as a near-duplicate of an already stored page.
+	DedupThreshold float64 `yaml:"dedup_threshold"`
+	// MaxContentChars caps how much of a page body is stored.
+	MaxContentChars int `yaml:"max_content_chars"`
+	// TimeoutSeconds bounds one provider request.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// Topic is the default search topic ("general" or "news").
+	Topic string `yaml:"topic"`
+	// Lang is the default language bias passed to the providers.
+	Lang string `yaml:"lang"`
+	// Tags are attached to every ingested chunk.
+	Tags []string `yaml:"tags"`
+
+	DeepSeek  ProviderConfig `yaml:"deepseek"`
+	Tavily    ProviderConfig `yaml:"tavily"`
+	Firecrawl ProviderConfig `yaml:"firecrawl"`
+	SearXNG   SearXNGConfig  `yaml:"searxng"`
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
@@ -153,6 +240,26 @@ func DefaultConfig() *Config {
 			Recall:        30,
 			QueryMaxChars: 500,
 			DocMaxChars:   1000,
+		},
+		Search: SearchConfig{
+			Enabled:             true,
+			Collection:          "web_kb",
+			Providers:           []string{"deepseek", "tavily", "firecrawl", "searxng"},
+			Count:               10,
+			IngestTopN:          5,
+			FreshnessDays:       7,
+			CacheScoreThreshold: 0.5,
+			CacheMinOverlap:     0.34,
+			DedupThreshold:      0.7,
+			MaxContentChars:     20000,
+			TimeoutSeconds:      45,
+			Topic:               "general",
+			Lang:                "",
+			Tags:                []string{"web"},
+			DeepSeek:            ProviderConfig{BaseURL: "https://api.deepseek.com"},
+			Tavily:              ProviderConfig{BaseURL: "https://api.tavily.com"},
+			Firecrawl:           ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2", Country: "MY"},
+			SearXNG:             SearXNGConfig{Categories: "general"},
 		},
 	}
 }

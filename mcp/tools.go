@@ -512,6 +512,17 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 
 // Helper functions
 
+// getStringArg returns a string argument, or defaultVal when it is absent or
+// not a string.
+func getStringArg(args map[string]any, key string, defaultVal string) string {
+	if v, ok := args[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return defaultVal
+}
+
 func getIntArg(args map[string]any, key string, defaultVal int) int {
 	if v, ok := args[key]; ok {
 		if n, ok := v.(float64); ok {

@@ -96,7 +96,7 @@ func (s *fakeStore) SetPayload(collection string, payload map[string]any, filter
 
 func (s *fakeStore) Ping() error { return nil }
 
-func (s *fakeStore) KeywordSearch(collection string, query string, limit int) ([]StoreSearchResult, error) {
+func (s *fakeStore) KeywordSearch(collection string, query string, limit int, filter map[string]any) ([]StoreSearchResult, error) {
 	return nil, nil
 }
 

@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
+	"github.com/RoyChong5053/rag-mcp-server/search"
 	"github.com/RoyChong5053/rag-mcp-server/settings"
 	"github.com/RoyChong5053/rag-mcp-server/webui"
 )
@@ -203,6 +205,55 @@ func main() {
 
 	// Register all RAG tools
 	mcp.RegisterTools(mcpServer, eng)
+
+	// Web search: build the provider chain from config and register the
+	// web tools. The chain is ordered, so the first provider that answers
+	// wins and the rest are only used as failover.
+	if cfg.Search.Enabled {
+		timeout := time.Duration(cfg.Search.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 45 * time.Second
+		}
+		providers := make([]search.Provider, 0, len(cfg.Search.Providers))
+		for _, name := range cfg.Search.Providers {
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "deepseek":
+				providers = append(providers, search.NewDeepSeek(cfg.Search.DeepSeek.BaseURL, cfg.Search.DeepSeek.Key(), timeout))
+			case "tavily":
+				providers = append(providers, search.NewTavily(cfg.Search.Tavily.BaseURL, cfg.Search.Tavily.Key(), timeout))
+			case "firecrawl":
+				p := search.NewFirecrawl(cfg.Search.Firecrawl.BaseURL, cfg.Search.Firecrawl.Key(), timeout)
+				if c := cfg.Search.Firecrawl.Country; c != "" {
+					p.Country = c
+				}
+				p.Location = cfg.Search.Firecrawl.Location
+				providers = append(providers, p)
+			case "searxng":
+				providers = append(providers, search.NewSearXNG(cfg.Search.SearXNG.BaseURL, timeout))
+			default:
+				log.Printf("Unknown search provider in config: %q (ignored)", name)
+			}
+		}
+		chain := search.NewChain(providers...)
+		webSvc := mcp.NewWebService(eng, chain, mcp.WebOptions{
+			Collection:          cfg.Search.Collection,
+			Count:               cfg.Search.Count,
+			IngestTopN:          cfg.Search.IngestTopN,
+			FreshnessDays:       cfg.Search.FreshnessDays,
+			CacheScoreThreshold: cfg.Search.CacheScoreThreshold,
+			CacheMinOverlap:     cfg.Search.CacheMinOverlap,
+			DedupThreshold:      cfg.Search.DedupThreshold,
+			MaxContentChars:     cfg.Search.MaxContentChars,
+			Timeout:             timeout,
+			Topic:               cfg.Search.Topic,
+			Lang:                cfg.Search.Lang,
+			Tags:                cfg.Search.Tags,
+		})
+		webSvc.Register(mcpServer)
+		log.Printf("Web search: collection=%s providers=[%s]", cfg.Search.Collection, strings.Join(webSvc.Providers(), ", "))
+	} else {
+		log.Printf("Web search: disabled (search.enabled=false)")
+	}
 
 	// HTTP handler
 	http.HandleFunc("/mcp", mcpServer.HandleMCP)
