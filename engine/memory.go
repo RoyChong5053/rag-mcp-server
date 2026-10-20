@@ -137,18 +137,18 @@ func (e *Engine) countMatches(collectionID string, filter map[string]any) (int, 
 
 // VerifyDeepResult is the three-layer health report.
 type VerifyDeepResult struct {
-	Collection     string   `json:"collection"`
-	OK             bool     `json:"ok"`
-	StructureOK    bool     `json:"structure_ok"`
+	Collection      string        `json:"collection"`
+	OK              bool          `json:"ok"`
+	StructureOK     bool          `json:"structure_ok"`
 	StructureIssues []VerifyIssue `json:"structure_issues,omitempty"`
-	TextCoverage   float64  `json:"text_coverage,omitempty"`
-	TextMatched    int      `json:"text_matched,omitempty"`
-	TextTotal      int      `json:"text_total,omitempty"`
-	OrphanCards    int      `json:"orphan_cards,omitempty"`
-	VectorMedian   float64  `json:"vector_median,omitempty"`
-	VectorSamples  int      `json:"vector_samples,omitempty"`
-	VectorNote     string   `json:"vector_note,omitempty"`
-	UpdatedAt      string   `json:"updated_at"`
+	TextCoverage    float64       `json:"text_coverage,omitempty"`
+	TextMatched     int           `json:"text_matched,omitempty"`
+	TextTotal       int           `json:"text_total,omitempty"`
+	OrphanCards     int           `json:"orphan_cards,omitempty"`
+	VectorMedian    float64       `json:"vector_median,omitempty"`
+	VectorSamples   int           `json:"vector_samples,omitempty"`
+	VectorNote      string        `json:"vector_note,omitempty"`
+	UpdatedAt       string        `json:"updated_at"`
 }
 
 // VerifyDeep runs structure (existing) + text coverage (re-chunk raw source

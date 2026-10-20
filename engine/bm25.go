@@ -67,10 +67,10 @@ type bm25Doc struct {
 
 // bm25Index is a plain in-memory inverted index over one collection.
 type bm25Index struct {
-	docs   []*bm25Doc
-	df     map[string]int
-	n      int
-	avgdl  float64
+	docs  []*bm25Doc
+	df    map[string]int
+	n     int
+	avgdl float64
 }
 
 func buildBM25(docs []*bm25Doc) *bm25Index {

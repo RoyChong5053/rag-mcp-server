@@ -7,8 +7,8 @@ import (
 
 // Problem represents a detected chunk issue
 type Problem struct {
-	Index  int    `json:"index"`
-	Reason string `json:"reason"`
+	Index   int    `json:"index"`
+	Reason  string `json:"reason"`
 	Preview string `json:"preview,omitempty"`
 }
 

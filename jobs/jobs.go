@@ -239,7 +239,7 @@ func (m *Manager) runIndex(job *Job, absPath, collection, backend string, opts *
 			}
 			if herr := m.eng.AppendHistory(engine.HistoryEntry{
 				Op: op, File: absPath, SHA256: sum, Collection: collection, Backend: backend,
-				Mode: map[bool]string{true: "rebuild", false: "append"}[rebuild],
+				Mode:   map[bool]string{true: "rebuild", false: "append"}[rebuild],
 				Chunks: resChunks(res), EmbedProvider: prov, EmbedModel: model, VectorDim: dim,
 				OK: err == nil, Error: errString(err),
 			}); herr != nil {

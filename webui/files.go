@@ -19,8 +19,6 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 )
 
-
-
 // Files larger than this skip hashing in listings (shown as status unknown-hash).
 const maxHashBytes = 50 << 20
 

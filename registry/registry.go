@@ -23,22 +23,22 @@ type ChunkConfig struct {
 // vectors were computed. Query policy (top_k/threshold) is deliberately
 // NOT here: that's the caller's decision at query time.
 type Entry struct {
-	DisplayName  string      `json:"display_name"`
-	Description  string      `json:"description"`
-	Tags         []string    `json:"tags"`
-	Enabled      bool        `json:"enabled"`
-	Consumers    []string    `json:"consumers"`
-	Backend      string      `json:"backend,omitempty"`
-	SourceFile   string      `json:"source_file"`
-	SourceSHA256 string      `json:"source_sha256"`
-	EmbedModel   string      `json:"embed_model"`
-	EmbedProvider string     `json:"embed_provider,omitempty"`
-	VectorDim    int         `json:"vector_dim,omitempty"`
-	VectorDistance string    `json:"vector_distance,omitempty"`
-	CreatedAt    string      `json:"created_at"`
-	UpdatedAt    string      `json:"updated_at"`
-	ChunkCount   int         `json:"chunk_count"`
-	Chunk        ChunkConfig `json:"chunk"`
+	DisplayName    string      `json:"display_name"`
+	Description    string      `json:"description"`
+	Tags           []string    `json:"tags"`
+	Enabled        bool        `json:"enabled"`
+	Consumers      []string    `json:"consumers"`
+	Backend        string      `json:"backend,omitempty"`
+	SourceFile     string      `json:"source_file"`
+	SourceSHA256   string      `json:"source_sha256"`
+	EmbedModel     string      `json:"embed_model"`
+	EmbedProvider  string      `json:"embed_provider,omitempty"`
+	VectorDim      int         `json:"vector_dim,omitempty"`
+	VectorDistance string      `json:"vector_distance,omitempty"`
+	CreatedAt      string      `json:"created_at"`
+	UpdatedAt      string      `json:"updated_at"`
+	ChunkCount     int         `json:"chunk_count"`
+	Chunk          ChunkConfig `json:"chunk"`
 }
 
 // Registry is a concurrency-safe file-backed collection registry.
