@@ -3,6 +3,7 @@ package settings
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -54,6 +55,20 @@ type Settings struct {
 	// FusionMethod picks how the vector and BM25 lists merge: "rrf" (default)
 	// or "weighted".
 	FusionMethod string `json:"fusion_method"`
+	// SearchProviders lists the web-search providers this server was built
+	// with. It is seeded from the config and is not editable: it reports
+	// what the server can actually reach, so the dashboard can offer the
+	// choice without inventing providers that would fail.
+	SearchProviders []string `json:"search_providers,omitempty"`
+	// DefaultSearchProvider is the provider web_search uses when the caller
+	// does not name one. Empty = walk the configured chain in order, first
+	// answer wins. Frontends that only want "search the web" (a slash
+	// command, say) set this once instead of carrying provider lists
+	// around.
+	DefaultSearchProvider string `json:"default_search_provider"`
+	// DefaultSearchCount is how many results web_search asks for when the
+	// caller does not specify. 0 = use the server default.
+	DefaultSearchCount int `json:"default_search_count"`
 }
 
 // EmbedProvider describes one embedding endpoint. APIKeyEnv names an
@@ -86,6 +101,8 @@ type Patch struct {
 	ActiveEmbedProvider     *string          `json:"active_embed_provider"`
 	BM25Enabled             *bool            `json:"bm25_enabled"`
 	FusionMethod            *string          `json:"fusion_method"`
+	DefaultSearchProvider   *string          `json:"default_search_provider"`
+	DefaultSearchCount      *int             `json:"default_search_count"`
 }
 
 // Store is a concurrency-safe runtime settings store backed by a JSON file.
@@ -182,6 +199,16 @@ func (s *Store) Update(p Patch) error {
 	}
 	if p.FusionMethod != nil {
 		s.data.FusionMethod = *p.FusionMethod
+	}
+	if p.DefaultSearchProvider != nil {
+		s.data.DefaultSearchProvider = strings.TrimSpace(*p.DefaultSearchProvider)
+	}
+	if p.DefaultSearchCount != nil {
+		if *p.DefaultSearchCount < 0 {
+			s.data.DefaultSearchCount = 0
+		} else {
+			s.data.DefaultSearchCount = *p.DefaultSearchCount
+		}
 	}
 
 	return s.save()

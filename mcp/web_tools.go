@@ -40,8 +40,8 @@ type WebOptions struct {
 // WebService wires the external search providers to the RAG engine.
 //
 // The design rule is that the agent never has to know which provider is
-// configured: it calls web_search, the server checks its own library first,
-// and only reaches out when the library has nothing fresh enough.
+// configured: it calls web_search, and the server picks a provider (the
+// one the operator made the default, or the failover chain).
 type WebService struct {
 	eng   *engine.Engine
 	chain *search.Chain
@@ -51,7 +51,7 @@ type WebService struct {
 // NewWebService builds the service.
 func NewWebService(eng *engine.Engine, chain *search.Chain, opts WebOptions) *WebService {
 	if opts.Collection == "" {
-		opts.Collection = "web_kb"
+		opts.Collection = "web_cache"
 	}
 	if opts.Count <= 0 {
 		opts.Count = 10
@@ -93,9 +93,13 @@ func (s *WebService) Register(server *Server) {
 					"type":        "integer",
 					"description": "Optional: how many results to return. Defaults to the server setting.",
 				},
+				"store": map[string]any{
+					"type":        "boolean",
+					"description": "Optional: also vectorize the pages into the web collection so later turns can recall them. Default true. Set false to search without filing anything.",
+				},
 				"ingest": map[string]any{
 					"type":        "integer",
-					"description": "Optional: how many of the results to fetch and vectorize into the web collection. 0 = store all of them.",
+					"description": "Optional: how many of the results to fetch and vectorize into the web collection. 0 = store all of them. Ignored when store=false.",
 				},
 				"freshness_days": map[string]any{
 					"type":        "integer",
@@ -155,11 +159,18 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
-	count := getIntArg(args, "count", s.opts.Count)
-	if count <= 0 {
-		count = s.opts.Count
+	st := s.eng.Settings().Get()
+	countDefault := s.opts.Count
+	if st.DefaultSearchCount > 0 {
+		countDefault = st.DefaultSearchCount
 	}
-	// ingest = 0 means "store every result". A negative value is the same.
+	count := getIntArg(args, "count", countDefault)
+	if count <= 0 {
+		count = countDefault
+	}
+	// store=false searches without filing anything. ingest is how many of
+	// the results get filed; 0 = all of them.
+	store := getBoolArg(args, "store", true)
 	ingest := getIntArg(args, "ingest", s.opts.IngestTopN)
 	if ingest < 0 {
 		ingest = 0
@@ -177,7 +188,7 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		lang = s.opts.Lang
 	}
 	domains := getStringSliceArg(args, "domains")
-	providerName := strings.TrimSpace(getStringArg(args, "provider", ""))
+	providerName := s.resolveProvider(strings.TrimSpace(getStringArg(args, "provider", "")))
 
 	collection := s.opts.Collection
 
@@ -189,7 +200,7 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	q := search.Query{
 		Text:          query,
 		Count:         count,
-		NeedContent:   ingest > 0,
+		NeedContent:   store,
 		FreshnessDays: freshness,
 		Domains:       domains,
 		Lang:          lang,
@@ -229,8 +240,11 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		return fmt.Sprintf("No live web results for %q (provider: %s).", query, orDefault(usedProvider, "none")), nil
 	}
 
-	// Store what was found so the next turn can recall it.
-	stored, skipped := s.ingestResults(ctx, collection, results, ingest)
+	// File what was found so the next turn can recall it.
+	var pages, chunks, skipped int
+	if store {
+		pages, chunks, skipped = s.ingestResults(ctx, collection, results, ingest)
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Live web results for %q (provider: %s, %d hits, fetched %s)\n\n",
@@ -247,8 +261,13 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 				r.PublishedAt.Format("2006-01-02"),
 				engine.WebDocumentAge(r.PublishedAt.UTC().Format(time.RFC3339), time.Now()))
 		}
+		// Authority is a DeepSeek tier; the other providers do not rate
+		// their sources. The line is always there so the shape of a hit
+		// does not change from one provider to the next.
 		if r.Authority >= 0 {
 			fmt.Fprintf(&b, "   authority: %d/4\n", r.Authority)
+		} else {
+			fmt.Fprintf(&b, "   authority: n/a\n")
 		}
 		summary := r.Summary
 		if summary == "" {
@@ -262,30 +281,57 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "Stored: %d page(s) vectorized into '%s'%s.\n", stored, collection, ingestNote(skipped))
-	b.WriteString("These pages are now recallable with search_memory. Use web_search again when you need newer information than the dates above.")
+	if store {
+		fmt.Fprintf(&b, "Stored: %d page(s) (%d chunks) vectorized into '%s'%s.\n", pages, chunks, collection, ingestNote(skipped))
+		b.WriteString("These pages are now recallable with search_memory. Use web_search again when you need newer information than the dates above.")
+	} else {
+		b.WriteString("Not stored (store=false): these pages were not vectorized, so they cannot be recalled later.")
+	}
 	return b.String(), nil
 }
 
-// ingestNote describes pages that could not be stored, if any.
+// resolveProvider picks the provider for one call. An explicit argument
+// always wins and is validated by the caller; otherwise the operator's
+// default provider is used when it is reachable, and the failover chain
+// covers everything else. The default is a preference, never a requirement:
+// a provider without a key must not take the whole search down.
+func (s *WebService) resolveProvider(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	def := strings.TrimSpace(s.eng.Settings().Get().DefaultSearchProvider)
+	if def == "" {
+		return ""
+	}
+	if p := s.chain.Get(def); p != nil && p.Available() {
+		return def
+	}
+	log.Printf("web_search: default provider %q is not available, using the failover chain", def)
+	return ""
+}
+
+// ingestNote describes pages that could not be filed, if any. The reason is
+// not always the fetch: a page that could be fetched but failed to embed is
+// also skipped, so the wording stays deliberately vague.
 func ingestNote(skipped int) string {
 	if skipped <= 0 {
 		return ""
 	}
-	return fmt.Sprintf(", %d could not be fetched", skipped)
+	return fmt.Sprintf(", %d could not be stored", skipped)
 }
 
 // ingestResults fetches and stores the results. ingest == 0 means every
 // result: whatever was searched goes into the collection. It returns how many
-// pages were stored and how many could not be fetched.
-func (s *WebService) ingestResults(ctx context.Context, collection string, results []search.Result, ingest int) (int, int) {
+// pages were stored, how many chunks they produced, and how many could not be
+// fetched. Pages and chunks are counted apart on purpose: a page is a web
+// document, a chunk is a slice of it, and "65 pages" would be a lie.
+func (s *WebService) ingestResults(ctx context.Context, collection string, results []search.Result, ingest int) (pages, chunks, skipped int) {
 	if ingest <= 0 {
 		ingest = len(results)
 	}
 	if ingest > len(results) {
 		ingest = len(results)
 	}
-	stored, skipped := 0, 0
 	for i := 0; i < ingest; i++ {
 		r := results[i]
 		content := r.Content
@@ -326,9 +372,10 @@ func (s *WebService) ingestResults(ctx context.Context, collection string, resul
 			skipped++
 			continue
 		}
-		stored += res.ChunksIndexed
+		pages++
+		chunks += res.ChunksIndexed
 	}
-	return stored, skipped
+	return pages, chunks, skipped
 }
 
 // handleFetchURL is the fetch_url tool handler.

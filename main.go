@@ -141,6 +141,7 @@ func main() {
 		FailoverEnabled:  true,
 		BM25Enabled:      true,
 		FusionMethod:     "rrf",
+		SearchProviders:  cfg.Search.Providers,
 		EmbedProviders: []settings.EmbedProvider{{
 			ID: cfg.OneAPI.ProviderName, BaseURL: cfg.OneAPI.BaseURL, BackupURL: cfg.OneAPI.BackupURL,
 			Model: cfg.OneAPI.EmbedModel, Dim: cfg.OneAPI.VectorDim, Distance: cfg.OneAPI.VectorDistance,

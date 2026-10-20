@@ -167,12 +167,21 @@ func (p *FirecrawlProvider) Search(ctx context.Context, q Query) ([]Result, erro
 		if url == "" {
 			continue
 		}
+		// Firecrawl's web source carries no date at all. The page usually
+		// does, near the top, so it is worth looking — but only best
+		// effort: a hit that stays undated is honest, a wrong date is not.
+		published := time.Time{}
+		if t := parseDateFromText(r.Markdown); !t.IsZero() {
+			published = t
+		} else if t := parseDateFromText(r.Description); !t.IsZero() {
+			published = t
+		}
 		out = append(out, Result{
 			Title:       joinTitle(r.Title, r.Metadata.Title),
 			URL:         url,
 			Snippet:     r.Description,
 			Content:     r.Markdown,
-			PublishedAt: time.Time{},
+			PublishedAt: published,
 			Authority:   -1,
 			Provider:    p.Name(),
 		})

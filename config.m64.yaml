@@ -69,7 +69,7 @@ rerank:
 # in the service environment (or export them before starting the server).
 search:
   enabled: true
-  collection: "web_kb"
+  collection: "web_cache"
   providers:
     - deepseek
     - tavily

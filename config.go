@@ -237,7 +237,7 @@ func DefaultConfig() *Config {
 		},
 		Search: SearchConfig{
 			Enabled:         true,
-			Collection:      "web_kb",
+			Collection:      "web_cache",
 			Providers:       []string{"deepseek", "tavily", "firecrawl", "searxng"},
 			Count:           10,
 			IngestTopN:      0,

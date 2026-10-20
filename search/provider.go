@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -220,4 +222,110 @@ func parseDate(s string) time.Time {
 // errProvider builds a provider-scoped error.
 func errProvider(name string, err error) error {
 	return fmt.Errorf("%s: %w", name, err)
+}
+
+var (
+	isoDateRe = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
+	dayMonRe  = regexp.MustCompile(`\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\b`)
+	monDayRe  = regexp.MustCompile(`\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b`)
+)
+
+var monthNames = map[string]time.Month{
+	"jan": time.January, "january": time.January,
+	"feb": time.February, "february": time.February,
+	"mar": time.March, "march": time.March,
+	"apr": time.April, "april": time.April,
+	"may": time.May,
+	"jun": time.June, "june": time.June,
+	"jul": time.July, "july": time.July,
+	"aug": time.August, "august": time.August,
+	"sep": time.September, "sept": time.September, "september": time.September,
+	"oct": time.October, "october": time.October,
+	"nov": time.November, "november": time.November,
+	"dec": time.December, "december": time.December,
+}
+
+// parseDateFromText makes a best effort at finding a publication date in the
+// head of a page body.
+//
+// Some search sources do not date their results at all — Firecrawl's web
+// source never does — yet the page itself usually carries the date in its
+// first lines. Recovering it there is worth doing: a reader who cannot tell
+// yesterday's news from today's is reading noise.
+//
+// It is deliberately conservative. Only the head of the text is scanned, a
+// match has to look like a date rather than any number, and a year outside
+// 2000-2099 is rejected. Nothing is guessed when nothing matches: a wrong
+// date is worse than no date.
+func parseDateFromText(text string) time.Time {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}
+	}
+	head := text
+	if len(head) > 1500 {
+		head = head[:1500]
+	}
+
+	for _, loc := range isoDateRe.FindAllStringIndex(head, -1) {
+		if !dateBoundaryOK(head, loc[0], loc[1]) {
+			continue
+		}
+		t, err := time.Parse("2006-01-02", head[loc[0]:loc[1]])
+		if err != nil || t.Year() < 2000 || t.Year() > 2099 {
+			continue
+		}
+		return t.UTC()
+	}
+
+	if m := dayMonRe.FindStringSubmatch(head); m != nil {
+		if t, ok := monthDayYear(m[2], m[1], m[3]); ok {
+			return t
+		}
+	}
+	if m := monDayRe.FindStringSubmatch(head); m != nil {
+		if t, ok := monthDayYear(m[1], m[2], m[3]); ok {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// dateBoundaryOK rejects a numeric match that is part of a longer token, so
+// "v2026-10-16-rc1" or "/2026/10/16/" is not read as a date.
+func dateBoundaryOK(s string, start, end int) bool {
+	bad := func(c byte) bool {
+		return c == '-' || c == '/' || c == '.' || c == '_' || c == ':'
+	}
+	if start > 0 && (bad(s[start-1]) || isDigit(s[start-1])) {
+		return false
+	}
+	if end < len(s) && (bad(s[end]) || isDigit(s[end])) {
+		return false
+	}
+	return true
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// monthDayYear turns a month name, a day and a year into a date.
+func monthDayYear(mon, day, year string) (time.Time, bool) {
+	m, ok := monthNames[strings.ToLower(strings.TrimSuffix(mon, "."))]
+	if !ok {
+		return time.Time{}, false
+	}
+	d, err := strconv.Atoi(day)
+	if err != nil || d < 1 || d > 31 {
+		return time.Time{}, false
+	}
+	y, err := strconv.Atoi(year)
+	if err != nil || y < 2000 || y > 2099 {
+		return time.Time{}, false
+	}
+	t := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	// Reject impossible dates like 31 February, which time.Date would roll over.
+	if t.Day() != d || t.Month() != m {
+		return time.Time{}, false
+	}
+	return t, true
 }

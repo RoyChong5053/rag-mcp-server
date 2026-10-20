@@ -186,7 +186,7 @@ scope can fall back to a local vectra collection:
 | `set_collection_meta` | Display name, tags, consumers, enabled flag, backend (backend refused once the collection holds vectors) |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy and report the active backend |
-| `web_search` | Search the live web and return what the provider found. It always queries the live web — it never answers from stored material — and every hit carries its publication date. The pages it finds are also vectorized into the web collection, so later turns can recall them with `search_memory` |
+| `web_search` | Search the live web and return what the provider found. It always queries the live web — it never answers from stored material — and every hit carries its publication date. The pages it finds are also vectorized into the web collection, so later turns can recall them with `search_memory`. Pass `store:false` to search without filing anything |
 | `fetch_url` | Fetch one page as markdown, optionally vectorizing it into the web collection |
 
 ### Web search
@@ -210,24 +210,32 @@ search_memory(query)→  recall what was searched before, with its dates
   (or `unknown`), and a recalled web page shows its publication date, its
   fetch date, its age, and a stale flag once it is older than
   `stale_after_days`. A stale page is still returned: knowing that something
-  is old is more useful than not knowing it exists.
+  is old is more useful than not knowing it exists. Some providers do not
+  date their results at all (Firecrawl's web source never does); the server
+  makes a best effort at recovering the date from the page itself and leaves
+  it `unknown` when it cannot.
 - **Everything that was searched is stored** (`ingest_top_n: 0` stores all of
   it). Deciding what is worth keeping is the caller's job; a server that
   silently drops material makes the knowledge base impossible to reason
   about. One page lives per canonical URL, so re-searching the same article
-  replaces it instead of piling up.
+  replaces it instead of piling up. `store:false` opts out entirely.
 - **Providers** are tried in order (`search.providers`); the first one that
   answers wins, so a dead or rate-limited provider fails over to the next:
   `deepseek` (search + fetch in one request, with publication date and a
   source-authority tier), `tavily` (page-level chunks), `firecrawl` (anti-bot
   scraping, news results), `searxng` (self-hosted, free, no key).
+- **One default provider, set in the dashboard.** The *Search Defaults* panel
+  has a "web search provider" dropdown; `web_search` uses it when the caller
+  names no provider. A frontend that only wants "search the web" — a slash
+  command, a button — then does not have to carry provider names around.
+  Changing it takes effect immediately, no restart.
 - **API keys** come from environment variables (`api_key_env`), never from
   the tracked config file.
 
 ```yaml
 search:
   enabled: true
-  collection: "web_kb"      # keep web content apart from personal memory
+  collection: "web_cache"      # keep web content apart from personal memory
   providers: [deepseek, tavily, firecrawl, searxng]
   ingest_top_n: 0           # 0 = store every result
   freshness_days: 0         # default age limit on search results (0 = none)

@@ -122,13 +122,18 @@ func (p *TavilyProvider) Search(ctx context.Context, q Query) ([]Result, error) 
 		if url == "" {
 			continue
 		}
+		published := parseDate(r.PublishedDate)
+		if published.IsZero() && r.RawContent != "" {
+			// Tavily did not date this hit. The raw page often does.
+			published = parseDateFromText(r.RawContent)
+		}
 		out = append(out, Result{
 			Title:       r.Title,
 			URL:         url,
 			Snippet:     r.Content,
 			Content:     r.RawContent,
 			Chunks:      r.Chunks,
-			PublishedAt: parseDate(r.PublishedDate),
+			PublishedAt: published,
 			Authority:   -1,
 			Score:       r.Score,
 			Provider:    p.Name(),

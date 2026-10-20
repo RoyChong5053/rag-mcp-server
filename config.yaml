@@ -68,7 +68,7 @@ search:
   enabled: true
   # Collection the fetched pages are vectorized into. Keep it separate from
   # the personal-memory collection so web content never outranks your own facts.
-  collection: "web_kb"
+  collection: "web_cache"
   # Ordered failover chain. The first provider that answers wins.
   providers:
     - deepseek

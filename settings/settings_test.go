@@ -3,6 +3,7 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -114,5 +115,55 @@ func TestLegacyDefaultCollectionMigrates(t *testing.T) {
 	}
 	if got.DefaultTopK != 15 {
 		t.Fatalf("other legacy fields should still load: %+v", got)
+	}
+}
+
+// TestPatchFieldsAreApplied guards the trap of declaring a field in Patch and
+// forgetting to apply it in Update. The failure is quiet and nasty: the
+// dashboard saves the value, settings.json shows it, the API echoes it back —
+// and the server keeps using the old one, because the patch was decoded and
+// then dropped on the floor.
+//
+// The check is structural: every scalar field of Patch must move the matching
+// field of Settings.
+func TestPatchFieldsAreApplied(t *testing.T) {
+	pt := reflect.TypeOf(Patch{})
+	st := reflect.TypeOf(Settings{})
+	for i := 0; i < pt.NumField(); i++ {
+		pf := pt.Field(i)
+		if _, ok := st.FieldByName(pf.Name); !ok {
+			t.Errorf("Patch.%s has no matching Settings field", pf.Name)
+			continue
+		}
+		pv := reflect.New(pt).Elem()
+		fv := pv.Field(i)
+		// Every Patch field is a pointer, so the value to inject lives one
+		// level down.
+		if fv.Kind() != reflect.Ptr {
+			continue
+		}
+		elem := fv.Type().Elem()
+		nv := reflect.New(elem)
+		switch elem.Kind() {
+		case reflect.String:
+			nv.Elem().SetString("sentinel-value")
+		case reflect.Int:
+			nv.Elem().SetInt(42)
+		case reflect.Bool:
+			nv.Elem().SetBool(true)
+		case reflect.Float64:
+			nv.Elem().SetFloat(0.42)
+		default:
+			continue // slices need a specific value to assert on
+		}
+		fv.Set(nv)
+		store := New("", Settings{})
+		if err := store.Update(pv.Interface().(Patch)); err != nil {
+			t.Fatalf("Update with %s: %v", pf.Name, err)
+		}
+		got := reflect.ValueOf(store.Get()).FieldByName(pf.Name).Interface()
+		if reflect.DeepEqual(got, reflect.Zero(elem).Interface()) {
+			t.Errorf("Patch.%s was accepted but Settings.%s stayed at its zero value", pf.Name, pf.Name)
+		}
 	}
 }
