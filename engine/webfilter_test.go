@@ -3,6 +3,7 @@ package engine
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // metaPoint builds a point whose payload carries a metadata map in the same
@@ -132,40 +133,23 @@ func TestStoreToSearchResultReadsMetadata(t *testing.T) {
 	}
 }
 
-// TestWebTermOverlap checks the lexical half of the "already known?" gate.
-func TestWebTermOverlap(t *testing.T) {
+// TestWebDocumentAge covers the age rendering used next to a recalled chunk.
+func TestWebDocumentAge(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
-		name  string
-		query string
-		doc   string
-		want  float64
+		in   string
+		want string
 	}{
-		{
-			name:  "matching query",
-			query: "DeepSeek V4 model release",
-			doc:   "DeepSeek released the V4 model with faster reasoning and shorter outputs",
-			want:  1,
-		},
-		{
-			name:  "prefix match counts",
-			query: "DeepSeek release notes",
-			doc:   "DeepSeek released V4 notes",
-			want:  1,
-		},
-		{
-			name:  "unrelated query",
-			query: "Malaysia MRT Kajang Line fare and station list",
-			doc:   "off-peak prices set at half of the peak-hour prices, encouraging users to schedule their tasks based on actual usage. August 16, 2026.",
-			want:  0,
-		},
+		{"", "unknown"},
+		{"not a date", "unknown"},
+		{"2026-10-21T10:00:00Z", "2 hours ago"},
+		{"2026-10-20T12:00:00Z", "1 days ago"},
+		{"2026-08-21T12:00:00Z", "2 months ago"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := webTermOverlap(tc.query, tc.doc)
-			if got != tc.want {
-				t.Fatalf("overlap = %v, want %v", got, tc.want)
-			}
-		})
+		if got := WebDocumentAge(tc.in, now); got != tc.want {
+			t.Errorf("WebDocumentAge(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

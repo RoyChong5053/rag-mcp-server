@@ -76,11 +76,12 @@ search:
     - firecrawl
     - searxng
   count: 10
-  ingest_top_n: 5
-  freshness_days: 7
-  cache_score_threshold: 0.5
-  cache_min_overlap: 0.34
-  dedup_threshold: 0.7
+  # 0 = every result: whatever was searched goes into the collection.
+  ingest_top_n: 0
+  # Default age limit on search results: 0 = no limit.
+  freshness_days: 0
+  # A recalled web page older than this is flagged as stale (still returned).
+  stale_after_days: 7
   max_content_chars: 20000
   timeout_seconds: 45
   topic: "general"

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 )
@@ -593,11 +594,26 @@ func getFilterArg(args map[string]any) map[string]any {
 	return map[string]any{"must": must}
 }
 
+// webFreshnessDays is the window after which a recalled web page is flagged
+// as stale. 0 disables the flag. It is set from the search config at startup;
+// the flag is a hint for the reader, never a filter: a stale page is still
+// returned, because knowing that something is old is more useful than not
+// knowing it exists.
+var webFreshnessDays int
+
+// SetWebStaleAfterDays sets the staleness window used when rendering
+// recalled web pages.
+func SetWebStaleAfterDays(days int) { webFreshnessDays = days }
+
+// formatSearchResults renders search hits for the caller. Web-sourced hits
+// carry their publication date and age, because a reader has to be able to
+// tell yesterday's news from today's.
 func formatSearchResults(results []engine.SearchResult) string {
 	if len(results) == 0 {
 		return "No results found."
 	}
 
+	now := time.Now()
 	result := fmt.Sprintf("Found %d results:\n\n", len(results))
 	for i, r := range results {
 		result += fmt.Sprintf("--- Result %d (score: %.3f) ---\n", i+1, r.Score)
@@ -624,12 +640,38 @@ func formatSearchResults(results []engine.SearchResult) string {
 		if len(r.Tags) > 0 {
 			result += fmt.Sprintf("Tags: %s\n", strings.Join(r.Tags, ", "))
 		}
+		if r.Metadata["source_type"] == "web" {
+			result += formatWebProvenance(r, now)
+		}
 		// Chunking already bounds the length, so the full chunk goes out as
 		// stored. Truncating here (as a byte slice) split UTF-8 runes and made
 		// the MCP payload differ from what the dashboard shows for the same hit.
 		result += fmt.Sprintf("%s\n\n", r.Text)
 	}
 	return result
+}
+
+// formatWebProvenance renders the date information of a recalled web page.
+// The publication date says how old the news is; the fetch date says when it
+// entered the library. Both are shown, and a page older than the freshness
+// window is flagged rather than hidden.
+func formatWebProvenance(r engine.SearchResult, now time.Time) string {
+	out := ""
+	if u := r.Metadata["url"]; u != "" {
+		out += fmt.Sprintf("URL: %s\n", u)
+	}
+	if p := r.Metadata["published_at"]; p != "" {
+		out += fmt.Sprintf("Published: %s (%s)\n", p, engine.WebDocumentAge(p, now))
+	} else {
+		out += "Published: unknown\n"
+	}
+	if f := r.Metadata["fetched_at"]; f != "" {
+		out += fmt.Sprintf("Fetched: %s (%s)\n", f, engine.WebDocumentAge(f, now))
+	}
+	if webFreshnessDays > 0 && !engine.WebDocumentFresh(r.Metadata["fetched_at"], webFreshnessDays) {
+		out += fmt.Sprintf("[STALE: older than %d days — search again for current information]\n", webFreshnessDays)
+	}
+	return out
 }
 
 func formatCollectionList(collections []engine.CollectionInfo) string {

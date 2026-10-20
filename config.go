@@ -164,23 +164,17 @@ type SearchConfig struct {
 	// Count is the default number of results to request.
 	Count int `yaml:"count"`
 	// IngestTopN is how many of the ranked results get fetched and stored.
+	// 0 = every result.
 	IngestTopN int `yaml:"ingest_top_n"`
-	// FreshnessDays bounds how old a stored page may be before the server
-	// considers it stale and searches again. 0 = no limit.
+	// FreshnessDays is the default age limit on search results: 0 = no
+	// limit. It is only a default; web_search's freshness_days argument
+	// overrides it per call.
 	FreshnessDays int `yaml:"freshness_days"`
-	// CacheScoreThreshold is the rerank score a stored hit needs for the
-	// server to answer from the library instead of searching again. The
-	// raw cosine cannot be used here: with this embedding model every
-	// query scores 0.13-0.25 against any document, matching or not.
-	CacheScoreThreshold float64 `yaml:"cache_score_threshold"`
-	// CacheMinOverlap is the fraction of the query's content terms that
-	// must appear in the stored text. The reranker alone is not enough:
-	// a query about train fares scores 0.81 against a paragraph about
-	// off-peak prices, so the lexical signal has to agree as well.
-	CacheMinOverlap float64 `yaml:"cache_min_overlap"`
-	// DedupThreshold is the rerank score at or above which a fetched page
-	// is treated as a near-duplicate of an already stored page.
-	DedupThreshold float64 `yaml:"dedup_threshold"`
+	// StaleAfterDays is the age after which a recalled web page is
+	// flagged as stale. 0 = never flag. Flagging never hides a page:
+	// knowing that something is old is more useful than not knowing it
+	// exists.
+	StaleAfterDays int `yaml:"stale_after_days"`
 	// MaxContentChars caps how much of a page body is stored.
 	MaxContentChars int `yaml:"max_content_chars"`
 	// TimeoutSeconds bounds one provider request.
@@ -242,24 +236,21 @@ func DefaultConfig() *Config {
 			DocMaxChars:   1000,
 		},
 		Search: SearchConfig{
-			Enabled:             true,
-			Collection:          "web_kb",
-			Providers:           []string{"deepseek", "tavily", "firecrawl", "searxng"},
-			Count:               10,
-			IngestTopN:          5,
-			FreshnessDays:       7,
-			CacheScoreThreshold: 0.5,
-			CacheMinOverlap:     0.34,
-			DedupThreshold:      0.7,
-			MaxContentChars:     20000,
-			TimeoutSeconds:      45,
-			Topic:               "general",
-			Lang:                "",
-			Tags:                []string{"web"},
-			DeepSeek:            ProviderConfig{BaseURL: "https://api.deepseek.com"},
-			Tavily:              ProviderConfig{BaseURL: "https://api.tavily.com"},
-			Firecrawl:           ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2", Country: "MY"},
-			SearXNG:             SearXNGConfig{Categories: "general"},
+			Enabled:         true,
+			Collection:      "web_kb",
+			Providers:       []string{"deepseek", "tavily", "firecrawl", "searxng"},
+			Count:           10,
+			IngestTopN:      0,
+			FreshnessDays:   7,
+			MaxContentChars: 20000,
+			TimeoutSeconds:  45,
+			Topic:           "general",
+			Lang:            "",
+			Tags:            []string{"web"},
+			DeepSeek:        ProviderConfig{BaseURL: "https://api.deepseek.com"},
+			Tavily:          ProviderConfig{BaseURL: "https://api.tavily.com"},
+			Firecrawl:       ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2", Country: "MY"},
+			SearXNG:         SearXNGConfig{Categories: "general"},
 		},
 	}
 }

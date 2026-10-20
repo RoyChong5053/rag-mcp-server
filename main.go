@@ -206,6 +206,9 @@ func main() {
 	// Register all RAG tools
 	mcp.RegisterTools(mcpServer, eng)
 
+	// The window after which a recalled web page is flagged as stale.
+	mcp.SetWebStaleAfterDays(cfg.Search.StaleAfterDays)
+
 	// Web search: build the provider chain from config and register the
 	// web tools. The chain is ordered, so the first provider that answers
 	// wins and the rest are only used as failover.
@@ -236,18 +239,15 @@ func main() {
 		}
 		chain := search.NewChain(providers...)
 		webSvc := mcp.NewWebService(eng, chain, mcp.WebOptions{
-			Collection:          cfg.Search.Collection,
-			Count:               cfg.Search.Count,
-			IngestTopN:          cfg.Search.IngestTopN,
-			FreshnessDays:       cfg.Search.FreshnessDays,
-			CacheScoreThreshold: cfg.Search.CacheScoreThreshold,
-			CacheMinOverlap:     cfg.Search.CacheMinOverlap,
-			DedupThreshold:      cfg.Search.DedupThreshold,
-			MaxContentChars:     cfg.Search.MaxContentChars,
-			Timeout:             timeout,
-			Topic:               cfg.Search.Topic,
-			Lang:                cfg.Search.Lang,
-			Tags:                cfg.Search.Tags,
+			Collection:      cfg.Search.Collection,
+			Count:           cfg.Search.Count,
+			IngestTopN:      cfg.Search.IngestTopN,
+			FreshnessDays:   cfg.Search.FreshnessDays,
+			MaxContentChars: cfg.Search.MaxContentChars,
+			Timeout:         timeout,
+			Topic:           cfg.Search.Topic,
+			Lang:            cfg.Search.Lang,
+			Tags:            cfg.Search.Tags,
 		})
 		webSvc.Register(mcpServer)
 		log.Printf("Web search: collection=%s providers=[%s]", cfg.Search.Collection, strings.Join(webSvc.Providers(), ", "))

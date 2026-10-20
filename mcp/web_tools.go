@@ -18,18 +18,13 @@ type WebOptions struct {
 	// Count is the default number of results to request.
 	Count int
 	// IngestTopN is how many ranked results get fetched and stored.
+	// 0 = every result.
 	IngestTopN int
-	// FreshnessDays bounds how old a stored page may be before it counts
-	// as stale. 0 = never stale.
+	// FreshnessDays is the default age limit on search results. 0 = no limit.
 	FreshnessDays int
-	// CacheScoreThreshold is the rerank score a stored hit needs for the
-	// server to answer from the library instead of searching again.
-	CacheScoreThreshold float64
-	// CacheMinOverlap is the fraction of the query's content terms that
-	// must also appear in the stored text for the library hit to count.
-	CacheMinOverlap float64
-	// DedupThreshold is the near-duplicate gate for ingestion.
-	DedupThreshold float64
+	// StaleAfterDays is the age after which a recalled web page is flagged
+	// as stale. 0 = never flag.
+	StaleAfterDays int
 	// MaxContentChars caps how much of a page body is stored.
 	MaxContentChars int
 	// Timeout bounds one provider request.
@@ -82,10 +77,10 @@ func (s *WebService) Providers() []string {
 func (s *WebService) Register(server *Server) {
 	server.RegisterTool(Tool{
 		Name: "web_search",
-		Description: "Search the live web and file what you find into the shared knowledge base. " +
-			"Before hitting the network the server checks its own library: if the query is already covered by a stored page that is still fresh, it answers from the library and makes no external request. " +
-			"Otherwise it queries the configured providers (in order, first one that answers wins), returns the ranked hits, and vectorizes the top results into the web collection so later turns can recall them instead of searching again. " +
-			"Pass force_refresh=true to skip the library check and always search. " +
+		Description: "Search the live web and return what the search provider found. " +
+			"This always queries the live web: it never answers from stored material, so the results are current. " +
+			"The pages it finds are also vectorized into the web collection, so later turns can recall them with search_memory instead of searching again. " +
+			"Every hit carries its publication date (or 'unknown'), because a reader has to be able to tell yesterday's news from today's. " +
 			"Returns a ranked list with title, url, publication date and snippet; use fetch_url for the full text of one page.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -100,11 +95,11 @@ func (s *WebService) Register(server *Server) {
 				},
 				"ingest": map[string]any{
 					"type":        "integer",
-					"description": "Optional: how many of the top results to fetch and vectorize into the web collection. 0 = do not store anything.",
+					"description": "Optional: how many of the results to fetch and vectorize into the web collection. 0 = store all of them.",
 				},
 				"freshness_days": map[string]any{
 					"type":        "integer",
-					"description": "Optional: only results from the last N days, and stored pages older than N days count as stale. 0 = no limit.",
+					"description": "Optional: only return results published in the last N days. 0 = no limit.",
 				},
 				"provider": map[string]any{
 					"type":        "string",
@@ -122,10 +117,6 @@ func (s *WebService) Register(server *Server) {
 					"type":        "array",
 					"items":       map[string]any{"type": "string"},
 					"description": "Optional: restrict results to these hostnames.",
-				},
-				"force_refresh": map[string]any{
-					"type":        "boolean",
-					"description": "Optional: skip the library check and always search the live web.",
 				},
 			},
 			"required": []string{"query"},
@@ -168,6 +159,7 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	if count <= 0 {
 		count = s.opts.Count
 	}
+	// ingest = 0 means "store every result". A negative value is the same.
 	ingest := getIntArg(args, "ingest", s.opts.IngestTopN)
 	if ingest < 0 {
 		ingest = 0
@@ -185,22 +177,15 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		lang = s.opts.Lang
 	}
 	domains := getStringSliceArg(args, "domains")
-	forceRefresh := getBoolArg(args, "force_refresh", false)
 	providerName := strings.TrimSpace(getStringArg(args, "provider", ""))
 
 	collection := s.opts.Collection
 
-	// Step 1: the library first. A fresh hit means no external call at all.
-	if !forceRefresh {
-		hits, err := s.eng.WebCacheHits(query, collection, count, s.opts.CacheScoreThreshold, s.opts.CacheMinOverlap, freshness)
-		if err != nil {
-			log.Printf("web_search: library lookup failed: %v", err)
-		} else if len(hits) > 0 {
-			return s.formatCacheAnswer(query, collection, hits, freshness), nil
-		}
-	}
-
-	// Step 2: query the providers.
+	// web_search always goes to the live web and reports what the provider
+	// returned. It never answers from the library: a tool named web_search
+	// that silently serves stored material lies to its caller, and yesterday's
+	// news is not today's news. Recalling what was searched before is
+	// search_memory's job, and the caller decides when to ask for fresh truth.
 	q := search.Query{
 		Text:          query,
 		Count:         count,
@@ -241,19 +226,26 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	}
 
 	if len(results) == 0 {
-		return fmt.Sprintf("No web results for %q (provider: %s). The library has no fresh copy either.", query, orDefault(usedProvider, "none")), nil
+		return fmt.Sprintf("No live web results for %q (provider: %s).", query, orDefault(usedProvider, "none")), nil
 	}
 
-	// Step 3: store the top hits so the next turn can recall them.
+	// Store what was found so the next turn can recall it.
 	stored, skipped := s.ingestResults(ctx, collection, results, ingest)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Web results for %q (provider: %s, %d hits)\n\n", query, orDefault(usedProvider, "none"), len(results))
+	fmt.Fprintf(&b, "Live web results for %q (provider: %s, %d hits, fetched %s)\n\n",
+		query, orDefault(usedProvider, "none"), len(results), time.Now().UTC().Format("2006-01-02 15:04 UTC"))
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, orDefault(r.Title, r.URL))
-		fmt.Fprintf(&b, "   %s\n", r.URL)
-		if !r.PublishedAt.IsZero() {
-			fmt.Fprintf(&b, "   published: %s\n", r.PublishedAt.Format("2006-01-02"))
+		fmt.Fprintf(&b, "   url: %s\n", r.URL)
+		// The date matters: a reader has to be able to tell yesterday's
+		// news from today's, so it is always shown, never omitted.
+		if r.PublishedAt.IsZero() {
+			fmt.Fprintf(&b, "   published: unknown\n")
+		} else {
+			fmt.Fprintf(&b, "   published: %s (%s)\n",
+				r.PublishedAt.Format("2006-01-02"),
+				engine.WebDocumentAge(r.PublishedAt.UTC().Format(time.RFC3339), time.Now()))
 		}
 		if r.Authority >= 0 {
 			fmt.Fprintf(&b, "   authority: %d/4\n", r.Authority)
@@ -270,16 +262,25 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "Library: %d page(s) vectorized into '%s', %d skipped (duplicate or no content).\n", stored, collection, skipped)
-	b.WriteString("Later turns can recall these with search_memory; no need to search again unless the topic moved.")
+	fmt.Fprintf(&b, "Stored: %d page(s) vectorized into '%s'%s.\n", stored, collection, ingestNote(skipped))
+	b.WriteString("These pages are now recallable with search_memory. Use web_search again when you need newer information than the dates above.")
 	return b.String(), nil
 }
 
-// ingestResults fetches and stores the top N results. It returns how many
-// pages were stored and how many were skipped.
+// ingestNote describes pages that could not be stored, if any.
+func ingestNote(skipped int) string {
+	if skipped <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d could not be fetched", skipped)
+}
+
+// ingestResults fetches and stores the results. ingest == 0 means every
+// result: whatever was searched goes into the collection. It returns how many
+// pages were stored and how many could not be fetched.
 func (s *WebService) ingestResults(ctx context.Context, collection string, results []search.Result, ingest int) (int, int) {
 	if ingest <= 0 {
-		return 0, 0
+		ingest = len(results)
 	}
 	if ingest > len(results) {
 		ingest = len(results)
@@ -318,51 +319,16 @@ func (s *WebService) ingestResults(ctx context.Context, collection string, resul
 			Tags:         s.opts.Tags,
 		}
 		res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{
-			DedupThreshold: s.opts.DedupThreshold,
-			MaxChars:       s.opts.MaxContentChars,
+			MaxChars: s.opts.MaxContentChars,
 		})
 		if err != nil {
 			log.Printf("web_search: ingest %s failed: %v", r.URL, err)
 			skipped++
 			continue
 		}
-		if res.Duplicate {
-			skipped++
-			continue
-		}
-		stored++
+		stored += res.ChunksIndexed
 	}
 	return stored, skipped
-}
-
-// formatCacheAnswer renders the "already in the library" reply.
-func (s *WebService) formatCacheAnswer(query, collection string, hits []engine.WebCacheHit, freshness int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Already in the library — no external search was made for %q.\n\n", query)
-	for i, h := range hits {
-		md := h.Result.Metadata
-		title := md["title"]
-		if title == "" {
-			title = h.Result.Source
-		}
-		fmt.Fprintf(&b, "%d. %s\n", i+1, title)
-		if u := md["url"]; u != "" {
-			fmt.Fprintf(&b, "   %s\n", u)
-		}
-		if md["published_at"] != "" {
-			fmt.Fprintf(&b, "   published: %s\n", md["published_at"])
-		}
-		fmt.Fprintf(&b, "   fetched: %s (similarity %.2f)\n", orDefault(h.Fetched, "unknown"), h.Result.Score)
-		if h.Stale {
-			fmt.Fprintf(&b, "   [stale: older than %d days — call web_search with force_refresh=true to refresh]\n", freshness)
-		}
-		if h.Result.Text != "" {
-			fmt.Fprintf(&b, "   %s\n", truncateText(h.Result.Text, 400))
-		}
-		b.WriteString("\n")
-	}
-	fmt.Fprintf(&b, "Collection: '%s'. Use search_memory to pull more of this material in one call.", collection)
-	return b.String()
 }
 
 // handleFetchURL is the fetch_url tool handler.
@@ -399,13 +365,10 @@ func (s *WebService) handleFetchURL(args map[string]any) (any, error) {
 			Tags:         s.opts.Tags,
 		}
 		res, err := s.eng.IngestWebDocument(s.opts.Collection, doc, engine.WebIngestOptions{
-			DedupThreshold: s.opts.DedupThreshold,
-			MaxChars:       s.opts.MaxContentChars,
+			MaxChars: s.opts.MaxContentChars,
 		})
 		if err != nil {
 			log.Printf("fetch_url: ingest failed: %v", err)
-		} else if res.Duplicate {
-			return fmt.Sprintf("%s\n\n[already stored in '%s' — skipped]\n\n%s", page.Title, s.opts.Collection, content), nil
 		} else {
 			return fmt.Sprintf("%s\n\n[stored in '%s': %d chunks]\n\n%s", page.Title, s.opts.Collection, res.ChunksIndexed, content), nil
 		}

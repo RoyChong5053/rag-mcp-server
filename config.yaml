@@ -76,21 +76,15 @@ search:
     - firecrawl
     - searxng
   count: 10
-  # How many of the ranked results get fetched and vectorized.
-  ingest_top_n: 5
-  # A stored page older than this counts as stale and is searched again.
-  freshness_days: 7
-  # Rerank score a stored page needs before the server answers from the
-  # library instead of calling out. The raw cosine cannot be used: with this
-  # embedding model every query scores 0.13-0.19 against any document.
-  cache_score_threshold: 0.5
-  # Fraction of the query's content terms that must also appear in the stored
-  # text. The reranker alone is not enough: a query about train fares scores
-  # 0.81 against a paragraph about off-peak prices.
-  cache_min_overlap: 0.34
-  # Rerank score at or above which a fetched page counts as a near-duplicate
-  # of something already stored and is skipped (same story, another outlet).
-  dedup_threshold: 0.7
+  # How many of the ranked results get fetched and vectorized. 0 = all of
+  # them: whatever was searched goes into the collection.
+  ingest_top_n: 0
+  # Default age limit on search results: 0 = no limit. The web_search
+  # argument freshness_days overrides it per call.
+  freshness_days: 0
+  # A recalled web page older than this is flagged as stale (it is still
+  # returned — knowing something is old beats not knowing it exists).
+  stale_after_days: 7
   # Cap on how much of a page body is stored.
   max_content_chars: 20000
   timeout_seconds: 45

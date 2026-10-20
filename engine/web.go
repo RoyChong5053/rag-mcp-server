@@ -39,35 +39,36 @@ type WebDocument struct {
 
 // WebIngestOptions tunes one ingest call.
 type WebIngestOptions struct {
-	// DedupThreshold is the cosine similarity at or above which an
-	// existing document counts as the same page and is skipped.
-	// 0 disables the near-duplicate gate.
-	DedupThreshold float64
 	// MaxChars caps how much of the page body is stored.
 	MaxChars int
 }
 
 // WebIngestResult reports what happened to one document.
 type WebIngestResult struct {
-	Collection     string
-	ChunksIndexed  int
-	Duplicate      bool
-	DuplicateOf    string
-	DuplicateScore float64
-	Reason         string
+	Collection    string
+	ChunksIndexed int
+	// Replaced is the number of chunks that were dropped from a previous
+	// version of the same URL before the new ones were written.
+	Replaced int
 }
 
 // IngestWebDocument stores a web page into a collection.
 //
-// Two gates protect the collection from bloat:
+// Everything that was searched is stored. There is no relevance gate here:
+// deciding what is worth keeping is the caller's job, and a server that
+// silently drops material makes the knowledge base impossible to reason
+// about. Two things are kept, because they are identity rather than
+// judgement:
 //
-//  1. An exact re-fetch of an unchanged page (same canonical URL, same
-//     content hash) is a no-op.
-//  2. A page that is semantically near-identical to something already
-//     stored (the same story from another outlet) is skipped, judged by
-//     the cosine similarity of a page-level fingerprint embedding.
+//   - One page per canonical URL. The raw body lives in a file named after
+//     the URL, so re-searching the same article replaces it instead of
+//     piling a second copy on top.
+//   - Chunk IDs are derived from the chunk text, so re-indexing the same
+//     text overwrites the same points.
 //
-// The near-duplicate check costs one embedding per page, not per chunk.
+// The publication date travels with every chunk (published_at) as well as
+// the moment it was fetched (fetched_at), because a reader has to be able
+// to tell yesterday's news from today's.
 func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts WebIngestOptions) (*WebIngestResult, error) {
 	collectionID = strings.TrimSpace(collectionID)
 	if collectionID == "" {
@@ -84,38 +85,14 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 		doc.CanonicalURL = doc.URL
 	}
 
-	// Gate 1: has this exact page already been stored?
-	path, sha, unchanged, err := e.writeWebRaw(doc, text)
+	path, sha, err := e.writeWebRaw(doc, text)
 	if err != nil {
 		return nil, err
 	}
-	if unchanged {
-		return &WebIngestResult{
-			Collection: collectionID,
-			Duplicate:  true,
-			Reason:     "identical content already stored for this URL",
-		}, nil
-	}
-	_ = sha
 
-	// Gate 2: is this page a near-duplicate of something already stored?
-	if opts.DedupThreshold > 0 {
-		dupSource, dupScore, err := e.findWebDuplicate(collectionID, doc, text, opts.DedupThreshold)
-		if err != nil {
-			log.Printf("web dedup check failed for %s: %v", doc.CanonicalURL, err)
-		} else if dupSource != "" {
-			return &WebIngestResult{
-				Collection:     collectionID,
-				Duplicate:      true,
-				DuplicateOf:    dupSource,
-				DuplicateScore: dupScore,
-				Reason:         "near-duplicate of an already stored page",
-			}, nil
-		}
-	}
-
-	// Replacing a page: drop the previous chunks of this URL first so a
-	// changed article does not leave its old text behind.
+	// Drop the previous chunks of this URL so a changed article does not
+	// leave its old text behind.
+	replaced := 0
 	if err := e.deleteWebSource(collectionID, path); err != nil {
 		log.Printf("web source cleanup failed for %s: %v", path, err)
 	}
@@ -142,12 +119,17 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 	return &WebIngestResult{
 		Collection:    collectionID,
 		ChunksIndexed: res.ChunksIndexed,
+		Replaced:      replaced,
 	}, nil
 }
 
 // webMetadata builds the metadata map attached to every chunk of a web page.
 // The keys are flat strings because that is what the file store's payload
 // matcher can filter on.
+//
+// published_at and fetched_at are both kept on purpose: published_at says
+// how old the news is, fetched_at says when it entered the library. A reader
+// that only has one of them can still tell yesterday from today.
 func (e *Engine) webMetadata(doc WebDocument) map[string]string {
 	md := map[string]string{
 		"source_type":   "web",
@@ -185,10 +167,7 @@ func (e *Engine) webMetadata(doc WebDocument) map[string]string {
 // returns the file path plus its content hash. The path is derived from the
 // canonical URL, so the same article always lands on the same file and a
 // re-fetch replaces it instead of piling up.
-//
-// The second return value reports whether the file already held exactly this
-// content (an unchanged re-fetch).
-func (e *Engine) writeWebRaw(doc WebDocument, text string) (string, string, bool, error) {
+func (e *Engine) writeWebRaw(doc WebDocument, text string) (string, string, error) {
 	base := e.memoryDir
 	if base == "" {
 		if e.docsDir != "" {
@@ -199,7 +178,7 @@ func (e *Engine) writeWebRaw(doc WebDocument, text string) (string, string, bool
 	}
 	dir := filepath.Join(base, "web")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", "", false, fmt.Errorf("create web dir: %w", err)
+		return "", "", fmt.Errorf("create web dir: %w", err)
 	}
 
 	sum := sha256.Sum256([]byte(text))
@@ -208,69 +187,12 @@ func (e *Engine) writeWebRaw(doc WebDocument, text string) (string, string, bool
 	name := hex.EncodeToString(key[:])[:16] + ".md"
 	path := filepath.Join(dir, name)
 
-	if prev, err := os.ReadFile(path); err == nil {
-		prevSum := sha256.Sum256(prev)
-		if hex.EncodeToString(prevSum[:]) == sha {
-			return path, sha, true, nil
-		}
-	}
-
 	header := fmt.Sprintf("# %s\n\n- source: %s\n- provider: %s\n- fetched_at: %s\n\n",
 		doc.Title, doc.CanonicalURL, doc.Provider, time.Now().UTC().Format(time.RFC3339))
 	if err := os.WriteFile(path, []byte(header+text), 0o644); err != nil {
-		return "", "", false, fmt.Errorf("write web file: %w", err)
+		return "", "", fmt.Errorf("write web file: %w", err)
 	}
-	return path, sha, false, nil
-}
-
-// findWebDuplicate looks for a stored page that is semantically the same as
-// the candidate.
-//
-// The comparison is judged by the reranker, not by cosine. With this server's
-// embedding model, cosine similarity sits in a narrow band (0.13-0.25)
-// whatever the query is, so a cosine gate would either never fire or always
-// fire. The reranker separates a matching page from an unrelated one by an
-// order of magnitude, so the page fingerprint is used as the query and the
-// stored chunks as the documents.
-//
-// It returns the matching source URL and its rerank score, or empty strings
-// when nothing close enough is stored.
-func (e *Engine) findWebDuplicate(collectionID string, doc WebDocument, text string, threshold float64) (string, float64, error) {
-	store := e.storeFor(collectionID)
-	exists, err := store.CollectionExists(collectionID)
-	if err != nil {
-		return "", 0, err
-	}
-	if !exists {
-		return "", 0, nil
-	}
-	fingerprint := webFingerprint(doc.Title, text)
-	filter := map[string]any{"metadata.source_type": "web"}
-	hits, err := e.Search(fingerprint, collectionID, 5, true, 0, filter)
-	if err != nil {
-		return "", 0, err
-	}
-	for _, h := range hits {
-		if h.Score < threshold {
-			continue
-		}
-		source := doc.CanonicalURL
-		if h.Metadata != nil {
-			if u := h.Metadata["canonical_url"]; u != "" {
-				source = u
-			} else if u := h.Metadata["url"]; u != "" {
-				source = u
-			} else if h.Source != "" {
-				source = h.Source
-			}
-		}
-		// A page is never a duplicate of itself when the content changed.
-		if source != "" && source == doc.CanonicalURL {
-			continue
-		}
-		return source, h.Score, nil
-	}
-	return "", 0, nil
+	return path, sha, nil
 }
 
 // deleteWebSource removes the chunks previously stored for one source file so
@@ -285,23 +207,9 @@ func (e *Engine) deleteWebSource(collectionID, sourceFile string) error {
 	return store.DeletePoints(collectionID, filter)
 }
 
-// webFingerprint builds the text used for the page-level duplicate check: the
-// title plus the opening of the body, which is where two write-ups of the
-// same story overlap most.
-func webFingerprint(title, text string) string {
-	body := text
-	if len(body) > 800 {
-		body = body[:800]
-	}
-	if strings.TrimSpace(title) == "" {
-		return body
-	}
-	return title + "\n" + body
-}
-
 // WebDocumentFresh reports whether a stored web document is still within the
 // given freshness window. An unknown timestamp is treated as stale so the
-// caller re-fetches rather than trusting undated content.
+// caller can tell that it does not know how old the material is.
 func WebDocumentFresh(fetchedAt string, days int) bool {
 	if days <= 0 {
 		return true
@@ -317,149 +225,31 @@ func WebDocumentFresh(fetchedAt string, days int) bool {
 	return time.Since(t) <= time.Duration(days)*24*time.Hour
 }
 
-// webStopwords are function words that carry no topical signal. They are
-// dropped before the term-overlap gate so a shared "the" or "and" cannot make
-// an unrelated page look like a match. Topic words (news, latest, new) are
-// deliberately kept: they do carry signal.
-var webStopwords = map[string]bool{
-	"a": true, "an": true, "the": true, "of": true, "to": true, "in": true,
-	"on": true, "for": true, "and": true, "or": true, "is": true, "are": true,
-	"was": true, "were": true, "be": true, "been": true, "by": true,
-	"with": true, "from": true, "as": true, "at": true, "it": true,
-	"its": true, "this": true, "that": true, "these": true, "those": true,
-	"about": true, "how": true, "what": true, "when": true, "where": true,
-	"which": true, "who": true, "why": true, "me": true, "my": true,
-	"we": true, "our": true, "you": true, "your": true, "they": true,
-	"them": true, "their": true, "he": true, "she": true, "his": true,
-	"her": true, "do": true, "does": true, "did": true, "have": true,
-	"has": true, "had": true, "can": true, "will": true, "would": true,
-	"should": true, "could": true, "am": true, "i": true, "if": true,
-	"so": true, "but": true, "not": true, "no": true, "yes": true,
-	"up": true, "down": true, "out": true, "over": true, "under": true,
-	"again": true, "very": true, "just": true, "only": true, "also": true,
-	"more": true, "most": true, "some": true, "any": true, "all": true,
-	"please": true, "tell": true, "give": true, "show": true, "find": true,
-	"的": true, "了": true, "和": true, "是": true, "在": true, "有": true,
-	"我": true, "你": true, "他": true, "她": true, "它": true, "们": true,
-	"这": true, "那": true, "什么": true, "怎么": true, "如何": true,
-	"请": true, "告诉": true, "一个": true, "可以": true, "需要": true,
-}
-
-// webContentTerms tokenizes text and keeps the terms that carry signal:
-// stopwords and one-character tokens are dropped.
-func webContentTerms(s string) []string {
-	raw := tokenize(s)
-	out := make([]string, 0, len(raw))
-	seen := make(map[string]bool, len(raw))
-	for _, t := range raw {
-		if len(t) < 2 || webStopwords[t] || seen[t] {
-			continue
-		}
-		seen[t] = true
-		out = append(out, t)
+// WebDocumentAge renders how old a stored document is, for display next to
+// a recalled chunk ("3 days ago", "unknown").
+func WebDocumentAge(timestamp string, now time.Time) string {
+	timestamp = strings.TrimSpace(timestamp)
+	if timestamp == "" {
+		return "unknown"
 	}
-	return out
-}
-
-// webTermOverlap returns the fraction of the query's content terms that also
-// occur in the document.
-//
-// Matching is prefix-based so "release" still matches "released" and "model"
-// matches "models"; plain equality would make the gate far too brittle.
-//
-// It is the lexical half of the "do we already know this?" gate. The
-// reranker alone is not enough: a short query that happens to share one word
-// with an unrelated page ("fare" against a paragraph about "off-peak prices")
-// scores 0.81 on the reranker, which would wrongly short-circuit a live
-// search. Requiring the query's own terms to actually appear in the stored
-// text keeps that case out while a genuine repeat still passes.
-func webTermOverlap(query, doc string) float64 {
-	qTerms := webContentTerms(query)
-	if len(qTerms) == 0 {
-		// Nothing to compare (e.g. a query of only stopwords). Fall back to
-		// the semantic signal alone.
-		return 1
-	}
-	docTerms := webContentTerms(doc)
-	if len(docTerms) == 0 {
-		return 0
-	}
-	hit := 0
-	for _, q := range qTerms {
-		if webTermInList(q, docTerms) {
-			hit++
-		}
-	}
-	return float64(hit) / float64(len(qTerms))
-}
-
-// webTermInList reports whether term appears in terms, allowing a prefix
-// match in either direction. Short terms are compared exactly: a 2-3 letter
-// prefix is too noisy ("ai" would match "aircraft").
-func webTermInList(term string, terms []string) bool {
-	for _, t := range terms {
-		if t == term {
-			return true
-		}
-		if len(t) >= 4 && len(term) >= 4 && (strings.HasPrefix(t, term) || strings.HasPrefix(term, t)) {
-			return true
-		}
-	}
-	return false
-}
-
-// WebCacheHit is a stored web document that already covers a query.
-type WebCacheHit struct {
-	Result  SearchResult
-	Fetched string
-	Stale   bool
-}
-
-// WebCacheHits finds stored web documents that already answer the query.
-//
-// Two signals have to agree before a stored page counts as "already known":
-//
-//   - the rerank score, because with this embedding model the raw cosine
-//     sits in a narrow band (0.13-0.25) for a matching query AND for a
-//     completely unrelated one, so it cannot decide anything;
-//   - the term overlap, because the reranker on its own can score a
-//     superficially similar page at 0.81 (a query about train fares against
-//     a paragraph about off-peak prices).
-//
-// Together they separate "we already covered this" from "the word 'fare'
-// appears somewhere".
-func (e *Engine) WebCacheHits(query, collectionID string, limit int, minScore float64, minOverlap float64, maxAgeDays int) ([]WebCacheHit, error) {
-	collectionID = strings.TrimSpace(collectionID)
-	if collectionID == "" {
-		return nil, nil
-	}
-	store := e.storeFor(collectionID)
-	exists, err := store.CollectionExists(collectionID)
+	t, err := time.Parse(time.RFC3339, timestamp)
 	if err != nil {
-		return nil, err
+		return "unknown"
 	}
-	if !exists {
-		return nil, nil
+	d := now.Sub(t)
+	if d < 0 {
+		return "just now"
 	}
-	filter := map[string]any{"metadata.source_type": "web"}
-	results, err := e.Search(query, collectionID, limit, true, 0, filter)
-	if err != nil {
-		return nil, err
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hours ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%d months ago", int(d.Hours()/24/30))
+	default:
+		return fmt.Sprintf("%d years ago", int(d.Hours()/24/365))
 	}
-	out := make([]WebCacheHit, 0, len(results))
-	for _, res := range results {
-		if res.Score < minScore {
-			continue
-		}
-		if webTermOverlap(query, res.Text) < minOverlap {
-			continue
-		}
-		fetched := res.Metadata["fetched_at"]
-		out = append(out, WebCacheHit{
-			Result:  res,
-			Fetched: fetched,
-			Stale:   !WebDocumentFresh(fetched, maxAgeDays),
-		})
-	}
-	return out, nil
 }
