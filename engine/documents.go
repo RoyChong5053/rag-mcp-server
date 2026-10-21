@@ -46,10 +46,10 @@ const (
 	// DocCategoryNone is the category of a document no rule matched.
 	DocCategoryNone = "_"
 
-	// maxDocBytes is the largest document body the vault stores. A raw page
-	// is capped far below this by the search config; the limit only guards
-	// against a runaway file being copied in.
-	maxDocBytes = 16 << 20
+	// maxDocBytes is the largest document body the vault stores. A book or
+	// a long chat log is a legitimate document, so the limit is generous;
+	// it only guards against a runaway file being copied in.
+	maxDocBytes = 100 << 20
 )
 
 // CategoryRule files a document into a category folder when Match matches the

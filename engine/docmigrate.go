@@ -209,21 +209,21 @@ func (e *Engine) MigrateDocuments(dryRun bool) (*MigrateReport, error) {
 		return report, nil
 	}
 
-	// Re-point the vector index at the new files.
+	// Re-point the vector index at the new files. One pass per collection:
+	// a collection with a big index would otherwise be loaded and saved
+	// once per moved file.
 	fs := e.FileStore()
 	if fs != nil {
 		cols, err := fs.ListCollections()
 		if err == nil {
 			for _, c := range cols {
-				for oldPath, newPath := range moves {
-					n, err := fs.RenameSource(c.Name, oldPath, newPath)
-					if err != nil {
-						report.Errors = append(report.Errors,
-							fmt.Sprintf("%s: rename source %s: %v", c.Name, filepath.Base(oldPath), err))
-						continue
-					}
-					report.ChunksRepointed += n
+				n, err := fs.RenameSources(c.Name, moves)
+				if err != nil {
+					report.Errors = append(report.Errors,
+						fmt.Sprintf("%s: re-point sources: %v", c.Name, err))
+					continue
 				}
+				report.ChunksRepointed += n
 			}
 		}
 	}

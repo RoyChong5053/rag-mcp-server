@@ -1079,7 +1079,18 @@ func (f *FileStore) DeleteCollection(name string) error {
 // data-bank tree, so a later re-index of the same file lands on the same
 // chunks instead of a second copy.
 func (f *FileStore) RenameSource(collection, oldSource, newSource string) (int, error) {
-	if oldSource == "" || newSource == "" || oldSource == newSource {
+	return f.RenameSources(collection, map[string]string{oldSource: newSource})
+}
+
+// RenameSources moves several source references inside a collection in one
+// pass: the catalog keys, the index folders and the source_file/source_rel
+// of every chunk that came from them.
+//
+// One pass per collection is the point. A collection with a big index would
+// otherwise be loaded and saved once per moved file, which is what turns a
+// hundred moved files into an hour of work.
+func (f *FileStore) RenameSources(collection string, moves map[string]string) (int, error) {
+	if len(moves) == 0 {
 		return 0, nil
 	}
 	f.mu.Lock()
@@ -1093,56 +1104,55 @@ func (f *FileStore) RenameSource(collection, oldSource, newSource string) (int, 
 		return 0, fmt.Errorf("collection '%s' not found", collection)
 	}
 
-	// Find the catalog entry of the old source. It may be stored under a
-	// different spelling of the same path (relative vs absolute).
-	var (
-		oldKey  string
-		meta    vectraSourceMeta
-		found   bool
-		oldName = oldSource
-	)
-	for name, m := range cat.Sources {
-		if name == oldSource || f.sourceKey(name) == f.sourceKey(oldSource) {
-			oldKey, meta, found, oldName = m.Key, m, true, name
-			break
+	// The same source can be stored under a different spelling of the same
+	// path (relative vs absolute), so the lookup is by derived key.
+	byKey := make(map[string]string, len(moves))
+	for old, newSource := range moves {
+		byKey[f.sourceKey(old)] = newSource
+	}
+	lookup := func(source string) (string, bool) {
+		if newSource, ok := moves[source]; ok {
+			return newSource, true
 		}
+		newSource, ok := byKey[f.sourceKey(source)]
+		return newSource, ok
 	}
 
-	newKey := f.sourceKey(newSource)
+	// Move the catalog entries and their index folders.
 	moved := 0
-	if found {
-		// Move the index folder so it keeps mirroring the data bank.
-		if oldKey != "" && newKey != "" && oldKey != newKey {
-			oldPath := f.indexPath(collection, oldKey)
+	for name, m := range cat.Sources {
+		newSource, ok := lookup(name)
+		if !ok {
+			continue
+		}
+		newKey := f.sourceKey(newSource)
+		if m.Key != "" && newKey != "" && m.Key != newKey {
+			oldPath := f.indexPath(collection, m.Key)
 			newPath := f.indexPath(collection, newKey)
 			if _, err := os.Stat(oldPath); err == nil {
 				if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err == nil {
 					if err := os.Rename(oldPath, newPath); err != nil {
 						// A rename can fail when the target exists; keep the
 						// old folder and point the catalog at it.
-						newKey = oldKey
+						newKey = m.Key
 					}
 				}
 			}
 		}
 		if newKey == "" {
-			newKey = oldKey
+			newKey = m.Key
 		}
-		delete(cat.Sources, oldName)
-		meta.Key = newKey
-		cat.Sources[newSource] = meta
+		delete(cat.Sources, name)
+		m.Key = newKey
+		cat.Sources[newSource] = m
+		moved++
+	}
+	if moved == 0 {
+		return 0, nil
 	}
 
-	// Rewrite the payload of every chunk that came from the old source.
-	newRel := newSource
-	if f.sourceRoot != "" {
-		if abs, err := filepath.Abs(newSource); err == nil {
-			if rel, err := filepath.Rel(f.sourceRoot, abs); err == nil &&
-				rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				newRel = filepath.ToSlash(rel)
-			}
-		}
-	}
+	// Rewrite the payload of every chunk that came from a moved source.
+	total := 0
 	for _, m := range cat.Sources {
 		idx, err := f.loadIndex(collection, m.Key)
 		if err != nil || idx == nil {
@@ -1150,27 +1160,43 @@ func (f *FileStore) RenameSource(collection, oldSource, newSource string) (int, 
 		}
 		changed := false
 		for i := range idx.Items {
-			if payloadString(idx.Items[i].Metadata, "source_file") != oldSource {
+			old := payloadString(idx.Items[i].Metadata, "source_file")
+			newSource, ok := lookup(old)
+			if !ok {
 				continue
 			}
 			idx.Items[i].Metadata["source_file"] = newSource
-			if _, ok := idx.Items[i].Metadata["source_rel"]; ok {
-				idx.Items[i].Metadata["source_rel"] = newRel
+			if _, has := idx.Items[i].Metadata["source_rel"]; has {
+				idx.Items[i].Metadata["source_rel"] = f.sourceRel(newSource)
 			}
 			changed = true
-			moved++
+			total++
 		}
 		if changed {
 			if err := f.saveIndex(collection, m.Key, idx); err != nil {
-				return moved, err
+				return total, err
 			}
 		}
 	}
 	if err := f.saveCatalog(collection, cat); err != nil {
-		return moved, err
+		return total, err
 	}
 	f.dropCachedCollection(collection)
-	return moved, nil
+	return total, nil
+}
+
+// sourceRel is the path of a source relative to the data-bank root.
+func (f *FileStore) sourceRel(source string) string {
+	if f.sourceRoot == "" {
+		return filepath.ToSlash(source)
+	}
+	if abs, err := filepath.Abs(source); err == nil {
+		if rel, err := filepath.Rel(f.sourceRoot, abs); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(source)
 }
 
 // SetPayload backfills payload fields onto matching items.
