@@ -386,6 +386,24 @@ func (e *Engine) VerifyLedger() LedgerVerifyResult {
 	return res
 }
 
+// ledgerMonth is the monthly ledger file a document belongs to.
+//
+// The path carries the filing date (<yyyy-mm-dd>/<channel>/...), so it is the
+// truth about where the file lives. The timestamp is only a fallback: taken
+// in UTC it can name a different month than the document is filed under, and
+// a row rewritten into the wrong monthly file is a row that has left the file
+// that held it.
+func ledgerMonth(en DocEntry) string {
+	// The path starts with the filing date: <yyyy-mm-dd>/<channel>/...
+	if len(en.Path) >= 11 && en.Path[4] == '-' && en.Path[7] == '-' && en.Path[10] == '/' {
+		return en.Path[:7]
+	}
+	if t, err := time.Parse(time.RFC3339, en.UpdatedAt); err == nil {
+		return t.UTC().Format("2006-01")
+	}
+	return "unknown"
+}
+
 // PruneLedger drops the ledger rows whose file is gone.
 func (e *Engine) PruneLedger(dryRun bool) (int, error) {
 	if e.ledger == nil {
@@ -406,10 +424,7 @@ func (e *Engine) PruneLedger(dryRun bool) (int, error) {
 	// Rewrite the affected monthly files without the dead rows.
 	byMonth := map[string][]DocEntry{}
 	for _, en := range entries {
-		month := "unknown"
-		if t, err := time.Parse(time.RFC3339, en.UpdatedAt); err == nil {
-			month = t.UTC().Format("2006-01")
-		}
+		month := ledgerMonth(en)
 		byMonth[month] = append(byMonth[month], en)
 	}
 	for month, list := range byMonth {

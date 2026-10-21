@@ -43,6 +43,9 @@ func usage() {
   rag-mcp-server docs-verify [-config f]
       Check the documents vault against its ledger.
 
+  rag-mcp-server docs-prune [-config f] [-apply]
+      Drop the ledger rows whose document file is gone.
+
   rag-mcp-server docs-repair [-config f]
       Re-point the collections at the documents that now hold their text.
 
@@ -132,6 +135,16 @@ func runMaintenance(cmd string, args []string) {
 
 	case "docs-verify":
 		emit(eng.VerifyLedger())
+
+	case "docs-prune":
+		n, err := eng.PruneLedger(!*apply)
+		if err != nil {
+			fatal("docs-prune: %v", err)
+		}
+		emit(map[string]any{"pruned": n, "apply": *apply})
+		if !*apply {
+			fmt.Fprintln(os.Stderr, "\n(dry run: nothing was changed. re-run with -apply to prune.)")
+		}
 
 	case "docs-repair":
 		res, err := eng.RepairSources()
