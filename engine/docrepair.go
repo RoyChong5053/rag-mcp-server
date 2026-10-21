@@ -93,7 +93,13 @@ func (e *Engine) RepairSources() (*RepairReport, error) {
 				rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no hash)")
 				continue
 			}
+			// The index recorded the hash of the text it indexed: the
+			// trimmed body for text, the raw bytes for a file. The vault
+			// knows both.
 			entry, ok := e.ledger.Lookup(s.SHA256)
+			if !ok || entry.Path == "" {
+				entry, ok = e.ledger.LookupRaw(s.SHA256)
+			}
 			if !ok || entry.Path == "" {
 				rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no document with that hash)")
 				continue

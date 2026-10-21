@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -150,12 +152,16 @@ func (e *Engine) importOneFile(path string, channel string, collection string, r
 	if ext == "" {
 		ext = ".md"
 	}
+	// The hash of the file exactly as it is: an index built from this file
+	// recorded that hash.
+	fileSum := sha256.Sum256(data)
 	file, err := e.fileDocument(Document{
 		Channel:    channel,
 		Title:      title,
 		Text:       text,
 		Collection: collection,
 		Ext:        ext,
+		RawSHA256:  hex.EncodeToString(fileSum[:]),
 	})
 	if err != nil {
 		return "", err

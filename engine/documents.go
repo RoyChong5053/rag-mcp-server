@@ -81,6 +81,11 @@ type Document struct {
 	Collection string
 	// Ext is the file extension, including the dot. Empty becomes ".md".
 	Ext string
+	// RawSHA256 is the hash of the text exactly as it was handed over, before
+	// it was trimmed. An index that was built from a file records the hash
+	// of the raw bytes, and the repair needs both to find the document
+	// again.
+	RawSHA256 string
 }
 
 // DocMeta is the front-matter of a vaulted document. It is the document's
@@ -94,6 +99,7 @@ type DocMeta struct {
 	URL         string   `yaml:"url,omitempty" json:"url,omitempty"`
 	URLs        []string `yaml:"urls,omitempty" json:"urls,omitempty"`
 	SHA256      string   `yaml:"sha256" json:"sha256"`
+	RawSHA256   string   `yaml:"raw_sha256,omitempty" json:"raw_sha256,omitempty"`
 	Provider    string   `yaml:"provider,omitempty" json:"provider,omitempty"`
 	PublishedAt string   `yaml:"published_at,omitempty" json:"published_at,omitempty"`
 	FetchedAt   string   `yaml:"fetched_at" json:"fetched_at"`
@@ -379,6 +385,10 @@ func (e *Engine) fileDocument(doc Document) (*DocFile, error) {
 	sum := sha256.Sum256([]byte(body))
 	sha := hex.EncodeToString(sum[:])
 	sha8 := sha[:8]
+	rawSHA := strings.TrimSpace(doc.RawSHA256)
+	if rawSHA == "" {
+		rawSHA = sha
+	}
 
 	ext := doc.Ext
 	if ext == "" {
@@ -397,6 +407,7 @@ func (e *Engine) fileDocument(doc Document) (*DocFile, error) {
 			abs := filepath.Join(e.documentsDir(), filepath.FromSlash(prev.Path))
 			meta := prev.DocMeta
 			meta.SHA256 = sha
+			meta.RawSHA256 = rawSHA
 			meta.UpdatedAt = now.Format(time.RFC3339)
 			meta.FetchedAt = now.Format(time.RFC3339)
 			meta.Bytes = len(body)
@@ -428,6 +439,7 @@ func (e *Engine) fileDocument(doc Document) (*DocFile, error) {
 		Title:      title,
 		URL:        doc.URL,
 		SHA256:     sha,
+		RawSHA256:  rawSHA,
 		Provider:   doc.Provider,
 		FetchedAt:  now.Format(time.RFC3339),
 		UpdatedAt:  now.Format(time.RFC3339),

@@ -22,6 +22,31 @@ func settingsNew() *settings.Store {
 	return settings.New("", settings.Settings{})
 }
 
+// TestParseLegacyWebHeaderKeepsTheBody pins the header parsing: only the
+// known field lines are header. A body that starts with a heading or a list
+// item is body - eating its first line would change the document's hash and
+// the index would no longer find it.
+func TestParseLegacyWebHeaderKeepsTheBody(t *testing.T) {
+	legacy := "# Title\n\n- source: https://example.com/p\n- provider: tavily\n\n" +
+		"# A heading in the body\n- and a list item\nthe real text\n"
+	h, body := parseLegacyWebHeader([]byte(legacy))
+	if h.Title != "Title" {
+		t.Errorf("title = %q, want Title", h.Title)
+	}
+	if h.URL != "https://example.com/p" {
+		t.Errorf("url = %q", h.URL)
+	}
+	if h.Provider != "tavily" {
+		t.Errorf("provider = %q", h.Provider)
+	}
+	if !strings.HasPrefix(body, "# A heading in the body") {
+		t.Fatalf("the body lost its first line: %q", body)
+	}
+	if !strings.Contains(body, "the real text") {
+		t.Errorf("the body is incomplete: %q", body)
+	}
+}
+
 // TestMigrateDocumentsMovesLegacyFiles covers the whole migration: the file
 // is filed into the vault, the old file is put aside, and the vector index is
 // re-pointed at the new file (a recall that points at a file that no longer

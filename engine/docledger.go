@@ -49,10 +49,15 @@ func ledgerLog(err error) {
 
 // docLedger is the append-only index of the documents vault.
 type docLedger struct {
-	mu      sync.RWMutex
-	dir     string
-	window  time.Duration
-	bySHA   map[string]DocEntry
+	mu     sync.RWMutex
+	dir    string
+	window time.Duration
+	// bySHA indexes the body hash: the vault's identity.
+	bySHA map[string]DocEntry
+	// byRaw indexes the hash of the text as it was handed over. An index
+	// built from a file records that one, so the repair needs it to find
+	// the document again.
+	byRaw   map[string]DocEntry
 	ordered []DocEntry
 }
 
@@ -70,6 +75,7 @@ func newDocLedger(root string, windowDays int) (*docLedger, error) {
 		dir:    dir,
 		window: time.Duration(windowDays) * 24 * time.Hour,
 		bySHA:  map[string]DocEntry{},
+		byRaw:  map[string]DocEntry{},
 	}
 	l.load()
 	return l, nil
@@ -94,6 +100,9 @@ func (l *docLedger) Append(entry DocEntry) {
 	if entry.SHA256 != "" {
 		l.bySHA[entry.SHA256] = entry
 	}
+	if entry.RawSHA256 != "" {
+		l.byRaw[entry.RawSHA256] = entry
+	}
 	l.ordered = append(l.ordered, entry)
 	l.trimLocked()
 }
@@ -108,9 +117,13 @@ func (l *docLedger) trimLocked() {
 	drop := len(l.ordered) - maxLedgerEntries
 	l.ordered = append(l.ordered[:0], l.ordered[drop:]...)
 	l.bySHA = make(map[string]DocEntry, len(l.ordered))
+	l.byRaw = make(map[string]DocEntry, len(l.ordered))
 	for _, en := range l.ordered {
 		if en.SHA256 != "" {
 			l.bySHA[en.SHA256] = en
+		}
+		if en.RawSHA256 != "" {
+			l.byRaw[en.RawSHA256] = en
 		}
 	}
 }
@@ -123,6 +136,18 @@ func (l *docLedger) Lookup(sha string) (DocEntry, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	e, ok := l.bySHA[sha]
+	return e, ok
+}
+
+// LookupRaw finds a document by the hash of the text as it was handed over
+// (before it was trimmed). An index built from a file records that one.
+func (l *docLedger) LookupRaw(sha string) (DocEntry, bool) {
+	if l == nil || sha == "" {
+		return DocEntry{}, false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	e, ok := l.byRaw[sha]
 	return e, ok
 }
 
@@ -149,6 +174,7 @@ func (l *docLedger) reload() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.bySHA = map[string]DocEntry{}
+	l.byRaw = map[string]DocEntry{}
 	l.ordered = nil
 	l.loadLocked()
 	return nil
@@ -229,6 +255,9 @@ func (l *docLedger) loadFile(path string, cutoff time.Time) {
 			continue
 		}
 		l.bySHA[entry.SHA256] = entry
+		if entry.RawSHA256 != "" {
+			l.byRaw[entry.RawSHA256] = entry
+		}
 		l.ordered = append(l.ordered, entry)
 	}
 	l.trimLocked()

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,40 +70,54 @@ type legacyWebHeader struct {
 
 // parseLegacyWebHeader reads the header of an old web raw file and returns
 // the body.
+//
+// The header is a fixed block:
+//
+//	# Title
+//	<blank>
+//	- source: https://...
+//	- provider: tavily
+//	- fetched_at: 2026-10-22T14:35:12Z
+//	<blank>
+//	<body>
+//
+// Only the known field names are treated as header. A body that starts with
+// a heading or a list item is body, not header: eating the first line of
+// the text would change its hash, and the index would no longer find the
+// document again.
 func parseLegacyWebHeader(data []byte) (legacyWebHeader, string) {
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	var h legacyWebHeader
 	lines := strings.Split(text, "\n")
-	bodyStart := 0
-	for i, ln := range lines {
-		trimmed := strings.TrimSpace(ln)
+	i := 0
+	// The title is the first line, if it is a heading.
+	if i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "# ") {
+		h.Title = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i]), "# "))
+		i++
+	}
+	// The known field lines follow, separated by blank lines.
+header:
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
 		if trimmed == "" {
+			i++
 			continue
 		}
-		if strings.HasPrefix(trimmed, "# ") {
-			h.Title = strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
-			bodyStart = i + 1
-			continue
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "- source:"):
+			h.URL = strings.TrimSpace(trimmed[len("- source:"):])
+		case strings.HasPrefix(lower, "- provider:"):
+			h.Provider = strings.TrimSpace(trimmed[len("- provider:"):])
+		case strings.HasPrefix(lower, "- fetched_at:"):
+			h.FetchedAt = strings.TrimSpace(trimmed[len("- fetched_at:"):])
+		default:
+			// Not a header field: the body starts here.
+			break header
 		}
-		if strings.HasPrefix(trimmed, "- ") {
-			field := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-			switch {
-			case strings.HasPrefix(field, "source:"):
-				h.URL = strings.TrimSpace(strings.TrimPrefix(field, "source:"))
-			case strings.HasPrefix(field, "provider:"):
-				h.Provider = strings.TrimSpace(strings.TrimPrefix(field, "provider:"))
-			case strings.HasPrefix(field, "fetched_at:"):
-				h.FetchedAt = strings.TrimSpace(strings.TrimPrefix(field, "fetched_at:"))
-			}
-			bodyStart = i + 1
-			continue
-		}
-		break
+		i++
 	}
-	body := ""
-	if bodyStart < len(lines) {
-		body = strings.Join(lines[bodyStart:], "\n")
-	}
+	body := strings.Join(lines[i:], "\n")
 	return h, strings.TrimSpace(body)
 }
 
@@ -164,6 +180,11 @@ func (e *Engine) MigrateDocuments(dryRun bool) (*MigrateReport, error) {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: %v", ent.Name(), err))
 				continue
 			}
+			// The hash of the file exactly as it is. An index that was built
+			// from this file recorded that hash, so the repair can find the
+			// document again.
+			fileSum := sha256.Sum256(data)
+			doc.RawSHA256 = hex.EncodeToString(fileSum[:])
 			if src.channel == DocChannelWeb {
 				h, body := parseLegacyWebHeader(data)
 				doc.Title = h.Title
