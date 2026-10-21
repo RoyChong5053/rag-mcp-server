@@ -37,6 +37,8 @@ const (
 	// KindWeb is a background web ingest: the pages a web_search found are
 	// fetched, chunked and embedded while the caller has already moved on.
 	KindWeb = "web"
+	// KindImport files a folder of raw material into the documents vault.
+	KindImport = "import"
 )
 
 // Job is one background task. Index jobs fill the dashboard fields

@@ -12,11 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RoyChong5053/rag-mcp-server/engine"
 	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/mcp"
 	"github.com/RoyChong5053/rag-mcp-server/search"
-	"github.com/RoyChong5053/rag-mcp-server/settings"
 	"github.com/RoyChong5053/rag-mcp-server/webui"
 )
 
@@ -83,6 +81,23 @@ func itoa(n int) string {
 }
 
 func main() {
+	// Maintenance subcommands. They are operational work, not agent work, so
+	// they live outside the MCP tool surface.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		switch os.Args[1] {
+		case "serve":
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		case "index-verify", "index-prune", "index-import", "verify-deep",
+			"docs-migrate", "docs-verify", "docs-search":
+			runMaintenance(os.Args[1], os.Args[2:])
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+			usage()
+			os.Exit(2)
+		}
+	}
+
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	flag.Parse()
 
@@ -123,75 +138,7 @@ func main() {
 
 	ver, com := buildInfo()
 
-	// Runtime settings (search defaults + rerank behavior). config.yaml seeds
-	// the initial values; settings.json persists WebUI edits on top.
-	settingsPath := cfg.SettingsPath
-	if settingsPath == "" {
-		settingsPath = "settings.json"
-	}
-	settingsStore := settings.New(settingsPath, settings.Settings{
-		ActiveBackend:    "",
-		DefaultTopK:      10,
-		DefaultThreshold: 0.25,
-		RerankEnabled:    cfg.Rerank.Enabled,
-		RerankRecall:     cfg.Rerank.Recall,
-		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
-		DocMaxChars:      cfg.Rerank.DocMaxChars,
-		EmbedBatchSize:   0,
-		FailoverEnabled:  true,
-		BM25Enabled:      true,
-		FusionMethod:     "rrf",
-		SearchProviders:  cfg.Search.Providers,
-		EmbedProviders: []settings.EmbedProvider{{
-			ID: cfg.OneAPI.ProviderName, BaseURL: cfg.OneAPI.BaseURL, BackupURL: cfg.OneAPI.BackupURL,
-			Model: cfg.OneAPI.EmbedModel, Dim: cfg.OneAPI.VectorDim, Distance: cfg.OneAPI.VectorDistance,
-			APIKeyEnv: "ONE_API_KEY",
-		}},
-	})
-
-	// Resolve the file-backed store dir (and optional memory dir) against the
-	// config file's directory, so a relative "Vectra" lands in the project
-	// folder even when the process CWD differs (e.g. setsid from $HOME).
-	vectraDir := cfg.Storage.VectraDir
-	if vectraDir != "" && !filepath.IsAbs(vectraDir) {
-		vectraDir = filepath.Join(cfgDir, vectraDir)
-	}
-	memoryDir := cfg.Storage.MemoryDir
-	if memoryDir != "" && !filepath.IsAbs(memoryDir) {
-		memoryDir = filepath.Join(cfgDir, memoryDir)
-	}
-
-	// Create engine
-	engineConfig := &engine.EngineConfig{
-		VectraDir:        vectraDir,
-		Backend:          cfg.Storage.Backend,
-		DocsDir:          cfg.DocsDir,
-		MemoryDir:        memoryDir,
-		OneAPIBaseURL:    cfg.OneAPI.BaseURL,
-		OneAPIBackupURL:  cfg.OneAPI.BackupURL,
-		EmbedModel:       cfg.OneAPI.EmbedModel,
-		EmbedProvider:    cfg.OneAPI.ProviderName,
-		VectorDim:        cfg.OneAPI.VectorDim,
-		VectorDistance:   cfg.OneAPI.VectorDistance,
-		RerankModel:      cfg.OneAPI.RerankModel,
-		APIKey:           cfg.OneAPI.APIKey,
-		EmbedTimeout:     time.Duration(cfg.OneAPI.EmbedTimeoutSeconds) * time.Second,
-		BulkEmbedTimeout: time.Duration(cfg.OneAPI.BulkEmbedTimeoutSeconds) * time.Second,
-		RerankTimeout:    time.Duration(cfg.OneAPI.RerankTimeoutSeconds) * time.Second,
-		SearchBudget:     time.Duration(cfg.OneAPI.SearchBudgetSeconds) * time.Second,
-		BulkConcurrency:  cfg.OneAPI.BulkConcurrency,
-		ChunkSize:        cfg.Chunking.ChunkSize,
-		OverlapPercent:   cfg.Chunking.OverlapPercent,
-		ChunkStrategy:    cfg.Chunking.Strategy,
-		RerankEnabled:    cfg.Rerank.Enabled,
-		RerankRecall:     cfg.Rerank.Recall,
-		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
-		DocMaxChars:      cfg.Rerank.DocMaxChars,
-		RegistryPath:     cfg.RegistryPath,
-		HistoryPath:      filepath.Join(cfgDir, "logs", "index_history.jsonl"),
-	}
-
-	eng, err := engine.NewEngine(engineConfig, settingsStore)
+	eng, err := buildEngine(cfg, cfgDir)
 	if err != nil {
 		log.Fatalf("Failed to create engine: %v", err)
 	}
@@ -208,6 +155,7 @@ func main() {
 
 	// Register all RAG tools
 	mcp.RegisterTools(mcpServer, eng)
+	mcp.RegisterDocumentTools(mcpServer, eng)
 
 	// The window after which a recalled web page is flagged as stale.
 	mcp.SetWebStaleAfterDays(cfg.Search.StaleAfterDays)
@@ -270,9 +218,9 @@ func main() {
 	log.Printf("RAG MCP Server %s (%s) starting on %s", ver, com, addr)
 	log.Printf("MCP endpoint: http://%s/mcp", addr)
 	log.Printf("one-api: %s", cfg.OneAPI.BaseURL)
-	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, vectraDir)
+	log.Printf("Storage backend: %s (vectra_dir=%s)", cfg.Storage.Backend, eng.Config().VectraDir)
 	log.Printf("Registry: %s", cfg.RegistryPath)
-	log.Printf("Settings: %s", settingsPath)
+	log.Printf("Settings: %s", eng.Config().SettingsPath)
 	log.Printf("Audit: %s", auditPath)
 	if cfg.Admin.Username != "" {
 		log.Printf("Admin auth: enabled (user=%s)", cfg.Admin.Username)
@@ -284,10 +232,10 @@ func main() {
 	// any LAN device can reach it during development; there is no TLS).
 	adminAddr := fmt.Sprintf("%s:%d", cfg.Admin.Host, cfg.Admin.Port)
 	if cfg.Admin.Host != "" {
-		docsAbs, err := filepath.Abs(cfg.DocsDir)
-		if err != nil {
-			log.Fatalf("Resolve docs dir: %v", err)
-		}
+		// The dashboard and the engine must agree on the data-bank root,
+		// otherwise a document the dashboard lists is not the document the
+		// engine indexed.
+		docsAbs := eng.Config().DocsDir
 		admin := webui.NewWithJobs(eng, auditPath, docsAbs, webui.BuildInfo{
 			Version:   ver,
 			Commit:    com,

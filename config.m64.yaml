@@ -22,6 +22,34 @@ audit_path: "logs/rag-mcp.log"
 # Prefer absolute on servers (ssh CWD is $HOME, not the app dir).
 docs_dir: "docs"
 
+# Documents vault: the raw-text corpus.
+#
+# Filed by machine under <dir>/<yyyy-mm-dd>/<channel>/<category>/, so the
+# date comes first: a date range is then a list of directories instead of a
+# walk over the whole corpus. The categories below are rules, not a taxonomy
+# anybody has to maintain.
+documents:
+  # Empty = <docs_dir>/documents.
+  dir: ""
+  # auto = ripgrep when the host has it (m64 has rg 14.1.0), else the
+  # built-in scanner. The built-in scanner is what keeps this independent
+  # of the host.
+  search_backend: "auto"
+  rg_path: ""
+  timeout_seconds: 60
+  max_matches: 200
+  per_file: 5
+  ledger_window_days: 30
+  categories:
+    - match: "^github\\.com|^gitlab\\.com|^codeberg\\."
+      category: code
+    - match: "^arxiv\\.org|^doi\\.org"
+      category: paper
+    - match: "^news\\.|^bbc\\.|^reuters\\.|^apnews\\."
+      category: news
+    - match: "^docs\\.|^developer\\.|^readthedocs\\."
+      category: docs
+
 # Vector backend (vectra-only).
 storage:
   backend: "vectra"

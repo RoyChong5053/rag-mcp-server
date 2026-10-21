@@ -98,6 +98,14 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 .modal-back { position: fixed; inset: 0; background: #000a; display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
 .modal-back.hidden { display: none; }
 .modal { background: #1a1f26; border: 1px solid #444; border-radius: 10px; padding: 16px; max-width: 440px; width: 100%; box-shadow: 0 10px 40px #000b; box-sizing: border-box; }
+.modal.wide { max-width: 1000px; }
+#dm-body { background: #000; color: #9d9; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px; max-height: 62vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; }
+#dm-body div.hit { background: #3a3320; color: #ffe9a8; }
+/* documents panel */
+.doc-hit { border-left: 3px solid #468; margin: 10px 0; padding: 6px 10px; background: #181818; font-size: 13px; }
+.doc-hit .doc-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.doc-hit .doc-line { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfe; white-space: pre-wrap; overflow-wrap: anywhere; padding: 1px 0; }
+.doc-hit .row { margin-top: 6px; }
 .modal h3 { margin: 0 0 8px; font-size: 16px; }
 .modal #m-body { font-size: 14px; overflow-wrap: anywhere; }
 .modal .row { justify-content: flex-end; margin-top: 14px; }
@@ -246,26 +254,28 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 
 <div class="panel">
   <div class="panel-head">
-    <h2>Data Bank</h2>
-    <span class="prov">raw files live under docs/ on the server — upload, or scp them yourself</span>
+    <h2>Documents</h2>
+    <span class="prov" id="doc-dir">raw corpus — filed by machine, never curated by hand</span>
     <span class="spacer"></span>
-    <button onclick="withBusy(this, () => loadFiles())">refresh</button>
+    <button onclick="withBusy(this, () => loadDocs())">refresh</button>
   </div>
   <div class="row">
+    <input type="text" id="doc-q" placeholder="search the raw documents… (literal by default)" style="flex:1;min-width:220px" onkeydown="if(event.key==='Enter')docSearch()">
+    <select id="doc-mode" onchange="docSearch()"><option value="literal">literal</option><option value="regex">regex</option></select>
+    <label style="display:inline" title="case sensitive"><input type="checkbox" id="doc-case" onchange="docSearch()"> Aa</label>
+    <label style="display:inline" title="whole word"><input type="checkbox" id="doc-word" onchange="docSearch()"> whole word</label>
+    <select id="doc-channel" onchange="docSearch()"><option value="">all channels</option></select>
+    <select id="doc-range" onchange="docSearch()"><option value="">any date</option><option value="1">today</option><option value="7">last 7 days</option><option value="30">last 30 days</option></select>
+    <button onclick="withBusy(this, () => docSearch())">Search</button>
+  </div>
+  <div id="doc-status" class="prov"></div>
+  <div id="doc-results"></div>
+  <div class="row">
     <input type="file" id="up-file">
-    <button onclick="withBusy(this, () => upload())">Upload to staging/</button>
+    <button onclick="withBusy(this, () => upload())">File into the vault</button>
+    <span class="prov">documents land in &lt;date&gt;/&lt;channel&gt;/&lt;category&gt;/ and are named after their content</span>
   </div>
-  <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
-    <span>per page <select id="fp-size" onchange="fbState.size=+this.value;fbState.page=0;fbApply()"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></span>
-    <span>status <select id="fp-status" onchange="fbState.status=this.value;fbState.page=0;fbApply()"><option value="">all</option><option value="indexed_fresh">indexed · fresh</option><option value="indexed_stale">indexed · changed</option><option value="unindexed">not indexed</option><option value="unknown">unknown</option></select></span>
-    <label style="display:inline"><input type="checkbox" id="fp-recent" checked onchange="fbState.recentFirst=this.checked;fbApply()"> recent uploads first</label>
-    <label style="display:inline" title="agent journals (docs/memory/agent/) are hidden by default"><input type="checkbox" id="fp-agent" onchange="fbState.showAgent=this.checked;fbApply()"> show agent journals</label>
-    <span class="spacer"></span>
-    <button onclick="fbState.page=Math.max(0,fbState.page-1);fbApply()">‹</button>
-    <span id="fp-page" class="prov"></span>
-    <button onclick="fbState.page++;fbApply()">›</button>
-  </div>
-  <div class="table-wrap"><table id="ftbl"><thead><tr><th data-sort="name" style="cursor:pointer" onclick="fbSetSort('name')">File</th><th data-sort="size" style="cursor:pointer" onclick="fbSetSort('size')">Size</th><th data-sort="status" style="cursor:pointer" onclick="fbSetSort('status')">Status</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
+  <div class="table-wrap"><table id="ftbl"><thead><tr><th>Document</th><th>Filed</th><th>Channel</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <div id="index-panel">
@@ -318,6 +328,16 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <div class="row">
       <button type="button" id="m-cancel">Cancel</button>
       <button type="button" id="m-ok">OK</button>
+    </div>
+  </div>
+</div>
+<div id="doc-modal" class="modal-back hidden">
+  <div class="modal wide" role="dialog" aria-modal="true">
+    <h3 id="dm-title"></h3>
+    <div id="dm-meta" class="prov"></div>
+    <pre id="dm-body"></pre>
+    <div class="row">
+      <button type="button" onclick="closeDoc()">Close</button>
     </div>
   </div>
 </div>
@@ -403,7 +423,6 @@ const api = (m, url, body, raw, timeoutMs) => {
 };
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[m]));
 const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
-const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + 'M' : n > 1024 ? (n / 1024).toFixed(0) + 'K' : n + 'B';
 const fmtUptime = s => s >= 86400 ? Math.floor(s / 86400) + 'd' + Math.floor(s % 86400 / 3600) + 'h' : s >= 3600 ? Math.floor(s / 3600) + 'h' + Math.floor(s % 3600 / 60) + 'm' : s >= 60 ? Math.floor(s / 60) + 'm' : s + 's';
 
 /* ---- feedback: busy buttons + toast + modal ---- */
@@ -813,50 +832,119 @@ async function saveSettings() {
   } catch (e) { st.textContent = 'save failed: ' + e.message; st.style.color = '#c00'; }
 }
 
-/* ---- data bank ---- */
-const badge = s => ({indexed_fresh: '<span class="badge b-fresh">indexed · fresh</span>', indexed_stale: '<span class="badge b-stale">indexed · changed</span>', unindexed: '<span class="badge b-new">not indexed</span>', unknown: '<span class="badge b-unk">unknown</span>'}[s] || s);
-const fbState = { showAgent: false, sort: 'mtime', dir: -1, page: 0, size: 10, status: '', recentFirst: true, recent: [] };
-function fbRender(files) {
+/* ---- documents vault ---- */
+let docState = { channels: {}, dir: '' };
+// The search is the "10%" path: the exact string, in the raw document, with
+// the document's identity attached.
+function docSince() {
+  const v = document.getElementById('doc-range').value;
+  if (!v) return '';
+  const d = new Date();
+  d.setDate(d.getDate() - (parseInt(v, 10) - 1));
+  return d.toISOString().slice(0, 10);
+}
+async function docSearch() {
+  const q = document.getElementById('doc-q').value.trim();
+  const box = document.getElementById('doc-results');
+  const status = document.getElementById('doc-status');
+  if (!q) { box.innerHTML = ''; status.textContent = ''; return; }
+  const p = new URLSearchParams();
+  p.set('q', q);
+  p.set('mode', document.getElementById('doc-mode').value);
+  p.set('channel', document.getElementById('doc-channel').value);
+  p.set('word', document.getElementById('doc-word').checked ? '1' : '0');
+  p.set('case_sensitive', document.getElementById('doc-case').checked ? '1' : '0');
+  const since = docSince();
+  if (since) p.set('since', since);
+  status.textContent = 'searching…';
+  let res;
+  try { res = await api('GET', '/api/documents/search?' + p.toString(), undefined, false, 180000); }
+  catch (e) { status.textContent = 'search failed: ' + e.message; return; }
+  status.textContent = res.total_matches + ' matches in ' + res.documents.length + ' documents · ' +
+    res.scanned_files + ' files scanned · ' + res.elapsed_ms + 'ms · engine: ' + res.engine +
+    (res.truncated ? ' · truncated' : '');
+  box.innerHTML = '';
+  if (!res.documents.length) { box.innerHTML = '<div class="doc-hit dim">nothing matched</div>'; return; }
+  for (const doc of res.documents) {
+    const d = document.createElement('div');
+    d.className = 'doc-hit';
+    d.innerHTML = '<div class="doc-head"><b>' + esc(doc.title || doc.path) + '</b>' +
+      '<span class="badge b-vec">' + esc(doc.channel || '') + '/' + esc(doc.category || '') + '</span>' +
+      (doc.published_at ? '<span class="prov">published ' + esc(doc.published_at.slice(0, 10)) + '</span>' : '') +
+      '<span class="prov">' + esc(doc.path) + '</span></div>' +
+      (doc.url ? '<div class="prov">' + esc(doc.url) + '</div>' : '');
+    for (const m of doc.matches) {
+      const line = document.createElement('div');
+      line.className = 'doc-line';
+      line.textContent = 'L' + m.line + ': ' + m.text;
+      d.appendChild(line);
+    }
+    const acts = document.createElement('div');
+    acts.className = 'row';
+    const bo = document.createElement('button'); bo.textContent = 'open';
+    bo.onclick = () => withBusy(bo, () => openDoc(doc.path, q));
+    const bi = document.createElement('button'); bi.textContent = 'Vectorize…';
+    bi.onclick = () => withBusy(bi, () => openIndex(doc.docs_path || doc.path, false));
+    acts.appendChild(bo); acts.appendChild(bi);
+    d.appendChild(acts);
+    box.appendChild(d);
+  }
+}
+async function openDoc(path, q) {
+  let d;
+  try { d = await api('GET', '/api/documents/raw?path=' + encodeURIComponent(path)); } catch (e) { toast('open failed: ' + e.message, 'err'); return; }
+  document.getElementById('dm-title').textContent = d.meta.title || path;
+  document.getElementById('dm-meta').textContent = [
+    d.meta.channel ? d.meta.channel + '/' + d.meta.category : '',
+    d.meta.url || '',
+    d.meta.published_at ? 'published ' + d.meta.published_at : '',
+    d.meta.fetched_at ? 'filed ' + d.meta.fetched_at : ''
+  ].filter(Boolean).join(' · ');
+  const pre = document.getElementById('dm-body');
+  pre.innerHTML = '';
+  const needle = (q || '').toLowerCase();
+  for (const ln of (d.body || '').split('\n')) {
+    const div = document.createElement('div');
+    div.textContent = ln;
+    if (needle && ln.toLowerCase().includes(needle)) div.className = 'hit';
+    pre.appendChild(div);
+  }
+  document.getElementById('doc-modal').classList.remove('hidden');
+}
+function closeDoc() { document.getElementById('doc-modal').classList.add('hidden'); }
+async function loadDocs() {
+  let j;
+  try { j = await api('GET', '/api/documents?limit=100'); } catch (e) { toast('documents failed: ' + e.message, 'err'); return; }
+  docState.channels = j.channels || {};
+  docState.dir = j.dir || '';
+  document.getElementById('doc-dir').textContent = docState.dir + ' — filed by machine, never curated by hand';
+  const sel = document.getElementById('doc-channel');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">all channels</option>' +
+    Object.keys(docState.channels).sort().map(c => '<option value="' + esc(c) + '">' + esc(c) + ' (' + docState.channels[c] + ')</option>').join('');
+  sel.value = cur;
   const tb = document.querySelector('#ftbl tbody');
   tb.innerHTML = '';
-  let list = files.filter(f => (!fbState.status || f.status === fbState.status) && (fbState.showAgent || (f.visibility || 'manual') !== 'agent'));
-  const key = fbState.sort;
-  const val = f => key === 'name' ? f.path : key === 'size' ? f.size : key === 'mtime' ? (f.mtime || '') : key === 'status' ? f.status : (f.collection || '');
-  list.sort((a, b) => {
-    let x = val(a), y = val(b);
-    if (typeof x === 'string') { x = x.toLowerCase(); y = (y || '').toLowerCase(); }
-    if (x < y) return -fbState.dir; if (x > y) return fbState.dir; return 0;
-  });
-  if (fbState.recentFirst) {
-    const isRecent = f => fbState.recent.some(r => r.file && r.file.endsWith('/' + f.path));
-    const pinned = list.filter(isRecent);
-    const rest = list.filter(f => !isRecent(f));
-    list = pinned.concat(rest);
-  }
-  const total = list.length;
-  const pages = Math.max(1, Math.ceil(total / fbState.size));
-  if (fbState.page > pages - 1) fbState.page = pages - 1;
-  const slice = list.slice(fbState.page * fbState.size, (fbState.page + 1) * fbState.size);
-  document.getElementById('fp-page').textContent = 'page ' + (fbState.page + 1) + '/' + pages + ' · ' + total + ' files';
-  for (const f of slice) {
+  for (const d of j.documents) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td data-label="File">' + esc(f.path) + '<br><small style="color:#666">' + fmtSize(f.size) + ' · ' + esc((f.mtime || '').slice(0, 10)) + (f.collection ? ' → ' + esc(f.collection) : '') + '</small></td>' +
-      '<td data-label="Size" class="num">' + fmtSize(f.size) + '</td>' +
-      '<td data-label="Status">' + badge(f.status) + '</td>';
+    tr.innerHTML = '<td data-label="Document">' + esc(d.title || d.path) + '<br><small style="color:#666">' + esc(d.path) + '</small></td>' +
+      '<td data-label="Filed">' + esc((d.fetched_at || '').slice(0, 19).replace('T', ' ')) + '</td>' +
+      '<td data-label="Channel">' + esc(d.channel + '/' + d.category) +
+      (d.collection ? '<br><small style="color:#666">→ ' + esc(d.collection) + '</small>' : '') + '</td>';
     const td = document.createElement('td');
     td.setAttribute('data-label', '');
-    const bp = document.createElement('button'); bp.textContent = 'preview';
-    bp.onclick = () => withBusy(bp, () => openIndex(f.path, true));
+    const bo = document.createElement('button'); bo.textContent = 'open';
+    bo.onclick = () => withBusy(bo, () => openDoc(d.path));
     const bi = document.createElement('button'); bi.textContent = 'Vectorize…';
-    bi.onclick = () => withBusy(bi, () => openIndex(f.path, false));
+    bi.onclick = () => withBusy(bi, () => openIndex(d.docs_path || d.path, false));
     const bl = document.createElement('button'); bl.textContent = 'logs';
-    bl.onclick = () => withBusy(bl, () => toggleHistory(f, tr));
-    td.appendChild(bp); td.appendChild(bi); td.appendChild(bl);
+    bl.onclick = () => withBusy(bl, () => toggleHistory(d.docs_path || d.path, tr));
+    td.appendChild(bo); td.appendChild(bi); td.appendChild(bl);
     tr.appendChild(td);
     tb.appendChild(tr);
   }
 }
-async function toggleHistory(f, tr) {
+async function toggleHistory(path, tr) {
   let row = tr.nextElementSibling;
   if (row && row.dataset && row.dataset.hist === '1') { row.remove(); return; }
   const hrow = document.createElement('tr');
@@ -867,26 +955,10 @@ async function toggleHistory(f, tr) {
   hrow.appendChild(td);
   tr.parentNode.insertBefore(hrow, tr.nextSibling);
   try {
-    const items = await api('GET', '/api/files/history?path=' + encodeURIComponent(f.path));
+    const items = await api('GET', '/api/files/history?path=' + encodeURIComponent(path));
     if (!items.length) { td.innerHTML = '<small class="dim">no index history yet</small>'; return; }
     td.innerHTML = items.map(en => '<div class="prov">' + esc(en.ts.replace('T', ' ').slice(0, 19)) + ' · <b>' + esc(en.op) + '</b>' + (en.collection ? ' → ' + esc(en.collection) : '') + (en.backend ? ' [' + esc(en.backend) + ']' : '') + (en.embed_provider ? ' · ' + esc(en.embed_provider) + '/' + esc(en.embed_model || '?') : '') + (en.chunks ? ' · ' + en.chunks + ' chunks' : '') + (en.ok ? '' : ' · <span style="color:#c00">' + esc(en.error || 'failed') + '</span>') + '</div>').join('');
   } catch (e) { td.innerHTML = '<small style="color:#c00">' + esc(e.message) + '</small>'; }
-}
-async function loadFiles() {
-  await fbReload();
-}
-async function fbReload() {
-  let files = [];
-  try { files = await api('GET', '/api/files'); } catch (e) { toast('files failed: ' + e.message, 'err'); return; }
-  try { fbState.recent = await api('GET', '/api/files/recent-uploads'); } catch (e) { fbState.recent = []; }
-  fbFiles = files;
-  fbRender(files);
-}
-let fbFiles = [];
-function fbApply() { if (fbFiles.length) fbRender(fbFiles); }
-function fbSetSort(key) {
-  if (fbState.sort === key) { fbState.dir = -fbState.dir; } else { fbState.sort = key; fbState.dir = key === 'mtime' ? -1 : 1; }
-  fbApply();
 }
 async function upload() {
   const inp = document.getElementById('up-file');
@@ -894,12 +966,13 @@ async function upload() {
   const fd = new FormData();
   fd.append('file', inp.files[0]);
   try {
-    const r = await api('POST', '/api/upload', fd, true, 120000);
-    toast('uploaded: ' + r.path);
+    const r = await api('POST', '/api/documents/upload', fd, true, 120000);
+    toast(r.deduped ? 'already in the vault: ' + r.path : 'filed: ' + r.path);
     inp.value = '';
-    loadFiles();
+    loadDocs();
   } catch (e) { toast('upload failed: ' + e.message, 'err'); }
 }
+
 function openIndex(path, autoPreview) {
   ipFile = path;
   document.getElementById('index-panel').style.display = 'block';
@@ -1012,7 +1085,7 @@ async function loadAudit() {
 
 let booted = false;
 async function boot() {
-  if (booted) { loadInfo(); load().then(loadSettings); loadFiles(); loadJobs(); loadAudit(); return; }
+  if (booted) { loadInfo(); load().then(loadSettings); loadDocs(); loadJobs(); loadAudit(); return; }
   booted = true;
   // Auth gate: /api/me is public; if the server has auth enabled and this
   // browser holds no valid token, park on the login overlay instead of
@@ -1024,7 +1097,7 @@ async function boot() {
   } catch (e) { if (e.status === 401) { showLogin(); return; } }
   loadInfo();
   load().then(loadSettings);
-  loadFiles(); loadJobs(); loadAudit();
+  loadDocs(); loadJobs(); loadAudit();
 }
 document.getElementById('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('login-user').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });

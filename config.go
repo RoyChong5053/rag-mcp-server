@@ -5,17 +5,20 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/RoyChong5053/rag-mcp-server/engine"
 )
 
 type Config struct {
-	Server       ServerConfig   `yaml:"server"`
-	Admin        AdminConfig    `yaml:"admin"`
-	Storage      StorageConfig  `yaml:"storage"`
-	OneAPI       OneAPIConfig   `yaml:"oneapi"`
-	Chunking     ChunkingConfig `yaml:"chunking"`
-	Rerank       RerankConfig   `yaml:"rerank"`
-	Search       SearchConfig   `yaml:"search"`
-	RegistryPath string         `yaml:"registry_path"`
+	Server       ServerConfig    `yaml:"server"`
+	Admin        AdminConfig     `yaml:"admin"`
+	Storage      StorageConfig   `yaml:"storage"`
+	OneAPI       OneAPIConfig    `yaml:"oneapi"`
+	Chunking     ChunkingConfig  `yaml:"chunking"`
+	Rerank       RerankConfig    `yaml:"rerank"`
+	Search       SearchConfig    `yaml:"search"`
+	Documents    DocumentsConfig `yaml:"documents"`
+	RegistryPath string          `yaml:"registry_path"`
 	// AuditPath is the append-only log the dashboard tails (MCP method calls +
 	// tool invocations). Relative paths resolve against the config file's
 	// directory so it survives a working-directory change (systemd/setsid).
@@ -43,6 +46,39 @@ type StorageConfig struct {
 	// MemoryDir is where store_memory raw text is persisted. Empty defaults to
 	// <docs_dir>/memory (agent journal: <memory>/agent/YYYY-MM-DD.md).
 	MemoryDir string `yaml:"memory_dir"`
+}
+
+// DocumentsConfig configures the documents vault: the raw-text corpus that
+// backs the "search the original" path.
+//
+// The vault is never curated by hand. Documents are filed by machine under
+// <dir>/<yyyy-mm-dd>/<channel>/<category>/<time>-<hash>-<slug>.md, and
+// ripgrep (or the built-in scanner) is how anything is found again.
+type DocumentsConfig struct {
+	// Dir is the vault root. Empty defaults to <docs_dir>/documents.
+	Dir string `yaml:"dir"`
+	// SearchBackend picks the grep engine:
+	//   auto   - use ripgrep when the host has it, else the built-in scanner
+	//   rg     - insist on ripgrep (fail loudly when it is missing)
+	//   builtin - always use the built-in scanner
+	SearchBackend string `yaml:"search_backend"`
+	// RGPath is an explicit ripgrep binary. Empty = look it up on PATH.
+	RGPath string `yaml:"rg_path"`
+	// TimeoutSeconds bounds one document search. 0 = 60.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// MaxMatches caps the matches one search returns. 0 = 200.
+	MaxMatches int `yaml:"max_matches"`
+	// PerFile caps the matches reported per document. 0 = 5.
+	PerFile int `yaml:"per_file"`
+	// LedgerWindowDays is how far back the in-memory ledger index reaches.
+	// Older documents are still found (the ledger files hold them), but a
+	// body that reappears after the window is filed as a new document.
+	// 0 = 30.
+	LedgerWindowDays int `yaml:"ledger_window_days"`
+	// Categories are the rules that file a document into a category folder.
+	// The first matching rule wins; a document that matches none lands in
+	// "_".
+	Categories []engine.CategoryRule `yaml:"categories"`
 }
 
 type ServerConfig struct {
@@ -263,6 +299,13 @@ func DefaultConfig() *Config {
 			Tavily:          ProviderConfig{BaseURL: "https://api.tavily.com"},
 			Firecrawl:       ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2", Country: "MY"},
 			SearXNG:         SearXNGConfig{Categories: "general"},
+		},
+		Documents: DocumentsConfig{
+			SearchBackend:    "auto",
+			TimeoutSeconds:   60,
+			MaxMatches:       200,
+			PerFile:          5,
+			LedgerWindowDays: 30,
 		},
 	}
 }

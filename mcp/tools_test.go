@@ -8,11 +8,14 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/engine"
 )
 
-// The MCP surface is synchronous now: RAG tools plus vault maintenance, no
-// job queue and no wait_seconds knob.
+// The MCP surface is the work surface: recall, store, delete, the document
+// tools and the web tools. Maintenance (verifying the vector index, pruning
+// it, restoring it from a backup) is operational work and lives in the
+// server's CLI, not in an agent's tool list.
 func TestRegisterToolsSurface(t *testing.T) {
 	s := NewServer()
 	RegisterTools(s, nil)
+	RegisterDocumentTools(s, nil)
 
 	want := []string{
 		"search_memory",
@@ -23,13 +26,13 @@ func TestRegisterToolsSurface(t *testing.T) {
 		"collection_info",
 		"set_collection_meta",
 		"delete_collection",
-		"vault_verify",
-		"vault_prune",
-		"vault_import",
 		"get_chunk",
 		"update_memory",
-		"verify_deep",
 		"tag_tree",
+		"search_document",
+		"read_document",
+		"list_documents",
+		"documents_import",
 	}
 	if len(s.tools) != len(want) {
 		t.Fatalf("registered %d tools, want %d", len(s.tools), len(want))
@@ -39,10 +42,21 @@ func TestRegisterToolsSurface(t *testing.T) {
 			t.Fatalf("tool %q not registered", name)
 		}
 	}
-	for _, gone := range []string{"job_status", "job_list"} {
+	// The maintenance tools must not be reachable by an agent.
+	for _, gone := range []string{"job_status", "job_list", "vault_verify", "vault_prune", "vault_import", "verify_deep"} {
 		if _, ok := s.tools[gone]; ok {
 			t.Fatalf("tool %q must be removed", gone)
 		}
+	}
+}
+
+// search_memory must point at search_document for exact strings: that is the
+// whole point of having both.
+func TestSearchMemoryPointsAtDocumentSearch(t *testing.T) {
+	s := NewServer()
+	RegisterTools(s, nil)
+	if !strings.Contains(s.tools["search_memory"].Description, "search_document") {
+		t.Fatal("search_memory should tell the caller when to use search_document")
 	}
 }
 

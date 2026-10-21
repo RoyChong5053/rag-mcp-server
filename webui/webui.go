@@ -114,6 +114,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/files/history", h.requireAuth(h.handleFileHistory))
 	mux.HandleFunc("GET /api/files/recent-uploads", h.requireAuth(h.handleRecentUploads))
 	mux.HandleFunc("POST /api/upload", h.requireAuth(h.handleUpload))
+	// The documents vault: the raw-text corpus. The listing comes from the
+	// ledger and the search from ripgrep, so nothing walks the corpus.
+	mux.HandleFunc("GET /api/documents", h.requireAuth(h.handleDocuments))
+	mux.HandleFunc("GET /api/documents/search", h.requireAuth(h.handleDocumentSearch))
+	mux.HandleFunc("GET /api/documents/raw", h.requireAuth(h.handleDocumentRaw))
+	mux.HandleFunc("POST /api/documents/import", h.requireAuth(h.handleDocumentImport))
+	mux.HandleFunc("POST /api/documents/upload", h.requireAuth(h.handleDocumentUpload))
 	mux.HandleFunc("POST /api/index", h.requireAuth(h.handleSubmitIndex))
 	mux.HandleFunc("GET /api/jobs", h.requireAuth(h.handleJobs))
 	mux.HandleFunc("POST /api/jobs/clear", h.requireAuth(h.handleClearJobs))

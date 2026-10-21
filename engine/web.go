@@ -1,12 +1,8 @@
 package engine
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -98,7 +94,7 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 		doc.CanonicalURL = doc.URL
 	}
 
-	path, sha, err := e.writeWebRaw(doc, text)
+	path, sha, err := e.writeWebRaw(collectionID, doc, text)
 	if err != nil {
 		return nil, err
 	}
@@ -207,36 +203,29 @@ func (e *Engine) webMetadata(doc WebDocument) map[string]string {
 	return md
 }
 
-// writeWebRaw persists the page body next to the other data-bank files and
-// returns the file path plus its content hash. The path is derived from the
-// canonical URL, so the same article always lands on the same file and a
-// re-fetch replaces it instead of piling up.
-func (e *Engine) writeWebRaw(doc WebDocument, text string) (string, string, error) {
-	base := e.memoryDir
-	if base == "" {
-		if e.docsDir != "" {
-			base = filepath.Join(e.docsDir, "memory")
-		} else {
-			base = filepath.Join("docs", "memory")
-		}
+// writeWebRaw files the page body in the documents vault and returns the file
+// path plus its content hash.
+//
+// The document is filed by machine: the date folder shards the corpus, the
+// channel says where it came from, the category comes from the rule table and
+// the file name carries the time and the body hash. The same page fetched
+// again lands on the same file (the body hash is the identity), so the corpus
+// does not fill up with copies of the same article.
+func (e *Engine) writeWebRaw(collectionID string, doc WebDocument, text string) (string, string, error) {
+	file, err := e.fileDocument(Document{
+		Channel:     DocChannelWeb,
+		Title:       doc.Title,
+		URL:         doc.CanonicalURL,
+		Text:        text,
+		Provider:    doc.Provider,
+		PublishedAt: doc.PublishedAt,
+		Tags:        doc.Tags,
+		Collection:  collectionID,
+	})
+	if err != nil {
+		return "", "", err
 	}
-	dir := filepath.Join(base, "web")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", "", fmt.Errorf("create web dir: %w", err)
-	}
-
-	sum := sha256.Sum256([]byte(text))
-	sha := hex.EncodeToString(sum[:])
-	key := sha256.Sum256([]byte(doc.CanonicalURL))
-	name := hex.EncodeToString(key[:])[:16] + ".md"
-	path := filepath.Join(dir, name)
-
-	header := fmt.Sprintf("# %s\n\n- source: %s\n- provider: %s\n- fetched_at: %s\n\n",
-		doc.Title, doc.CanonicalURL, doc.Provider, time.Now().UTC().Format(time.RFC3339))
-	if err := os.WriteFile(path, []byte(header+text), 0o644); err != nil {
-		return "", "", fmt.Errorf("write web file: %w", err)
-	}
-	return path, sha, nil
+	return file.Path, file.SHA256, nil
 }
 
 // deleteWebSource removes the chunks previously stored for one source file so

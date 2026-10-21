@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +44,12 @@ type Engine struct {
 	embedCache map[string]*EmbeddingClient
 	docsDir    string
 	memoryDir  string
+
+	// ledger indexes the documents vault so a document can be found again
+	// without walking the corpus.
+	ledger *docLedger
+	// docCategoryRules are the compiled category rules of the vault.
+	docCategoryRules []compiledCategoryRule
 
 	// healthMu guards downUntil. A backend marked down is skipped until the
 	// deadline so a dead qdrant doesn't cost a full timeout on every call.
@@ -89,10 +96,35 @@ type EngineConfig struct {
 	QueryMaxChars  int
 	DocMaxChars    int
 	RegistryPath   string
+	// SettingsPath is the runtime settings file (settings.json).
+	SettingsPath string
 	// HistoryPath is the append-only JSONL audit of every index/reindex/
 	// upload/delete so a raw file stays traceable to its collections even
 	// after the collection itself is deleted. Empty disables history.
 	HistoryPath string
+	// DocumentsDir is the root of the raw-document vault. Empty defaults to
+	// <DocsDir>/documents.
+	DocumentsDir string
+	// DocCategories are the rules that file a document into a category
+	// folder (see engine/documents.go).
+	DocCategories []CategoryRule
+	// DocSearchBackend picks the grep engine: auto | rg | builtin.
+	DocSearchBackend string
+	// DocRGPath is an explicit ripgrep binary. Empty = look it up on PATH.
+	DocRGPath string
+	// DocSearchTimeout bounds one document search. 0 = 60s.
+	DocSearchTimeout time.Duration
+	// DocMaxMatches / DocPerFile cap what one search returns.
+	DocMaxMatches int
+	DocPerFile    int
+	// LedgerWindowDays is how far back the in-memory ledger index reaches.
+	LedgerWindowDays int
+}
+
+// compiledCategoryRule is a category rule with its pattern compiled once.
+type compiledCategoryRule struct {
+	re       *regexp.Regexp
+	Category string
 }
 
 // SearchResult represents a search result
@@ -189,6 +221,19 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 		memoryDir:      config.MemoryDir,
 		downUntil:      make(map[string]time.Time),
 	}
+	// The documents vault: the raw-text half of the system. The ledger is
+	// an index over the corpus, so it is opened once and kept in memory.
+	if rules, err := compileCategoryRules(config.DocCategories); err != nil {
+		log.Printf("documents category rules: %v", err)
+		e.docCategoryRules = rules
+	} else {
+		e.docCategoryRules = rules
+	}
+	if ledger, err := newDocLedger(e.documentsDir(), config.LedgerWindowDays); err != nil {
+		log.Printf("documents ledger unavailable: %v", err)
+	} else {
+		e.ledger = ledger
+	}
 	// Rerank truncation follows runtime settings without a restart.
 	rerank.SetLimitsProvider(func() (int, int) {
 		s := st.Get()
@@ -226,6 +271,9 @@ func (e *Engine) PrewarmVectra() {
 func (e *Engine) Settings() *settings.Store {
 	return e.settings
 }
+
+// Config exposes the engine configuration for management surfaces.
+func (e *Engine) Config() *EngineConfig { return e.config }
 
 // DefaultBackend returns the configured global storage backend.
 func (e *Engine) DefaultBackend() string {
@@ -1462,9 +1510,13 @@ func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]stri
 	return res, nil
 }
 
-// writeMemoryRaw appends ad-hoc memory text to the daily agent journal
-// (<memoryDir>/agent/YYYY-MM-DD.md) with a timestamp header. It returns the
-// journal path for provenance.
+// writeMemoryRaw files one memory in the documents vault and appends it to the
+// daily agent journal.
+//
+// Two artefacts on purpose: the vault document is what ripgrep finds later
+// (one file per memory, named by time and content hash), the journal is the
+// human-readable log of the day. The document path is returned for
+// provenance, so a recalled card points at the file that holds it.
 func (e *Engine) writeMemoryRaw(text string) (string, error) {
 	base := e.memoryDir
 	if base == "" {
@@ -1479,17 +1531,48 @@ func (e *Engine) writeMemoryRaw(text string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, now.Format("2006-01-02")+".md")
+	journal := filepath.Join(dir, now.Format("2006-01-02")+".md")
 	entry := fmt.Sprintf("\n\n---\n## %s\n\n%s\n", now.Format("15:04:05"), strings.TrimSpace(text))
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if f, err := os.OpenFile(journal, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		if _, werr := f.WriteString(entry); werr != nil {
+			log.Printf("memory journal append failed: %v", werr)
+		}
+		f.Close()
+	} else {
+		log.Printf("memory journal append failed: %v", err)
+	}
+
+	file, err := e.fileDocument(Document{
+		Channel: DocChannelAgent,
+		Title:   docTitleFromText(text),
+		Text:    text,
+	})
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
-		return "", err
+	return file.Path, nil
+}
+
+// docTitleFromText derives a readable title from a memory body: its first
+// non-empty line, without markdown heading marks.
+func docTitleFromText(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		l = strings.TrimLeft(l, "#>-* \t")
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		r := []rune(l)
+		if len(r) > 80 {
+			l = string(r[:80])
+		}
+		return l
 	}
-	return path, nil
+	return ""
 }
 
 // EnsureCollection creates a collection in Qdrant if it does not exist yet, so

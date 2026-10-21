@@ -25,6 +25,8 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 			"Long queries are truncated to the server's query_max_chars setting (head kept) before embedding. " +
 			"Optionally restrict by metadata: pass metadata {\"key\":\"value\"} for exact matches on chunk metadata, " +
 			"or a filter object with match.value clauses for advanced matching. " +
+			"This is the tool for meaning. For exact strings - URLs, IDs, error codes, version numbers, names, anything a typo would hide - use search_document instead: " +
+			"embedding similarity fuzzes over those, a literal search does not. " +
 			"The call is synchronous and can take up to the server's one-api timeout; if retrieval is unavailable the tool returns an error and the caller should proceed without RAG.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -317,69 +319,6 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 	})
 
 	server.RegisterTool(Tool{
-		Name:        "vault_verify",
-		Description: "Read-only self-check of the file vault: catalog<->index.json consistency, counts, dims, orphans. Omit collection_id to check all.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"collection_id": map[string]any{
-					"type":        "string",
-					"description": "Collection to verify. Empty checks all.",
-				},
-			},
-		},
-	}, func(args map[string]any) (any, error) {
-		collectionID, _ := args["collection_id"].(string)
-		if strings.TrimSpace(collectionID) != "" {
-			return ConvertToJSON(eng.VerifyCollection(strings.TrimSpace(collectionID))), nil
-		}
-		return ConvertToJSON(eng.VerifyAll()), nil
-	})
-
-	server.RegisterTool(Tool{
-		Name:        "vault_prune",
-		Description: "Remove empty sources (0 items) from a collection and refresh its manifest. Safe cleanup for verify empty_source findings.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"collection_id": map[string]any{
-					"type":        "string",
-					"description": "Collection to prune",
-				},
-			},
-			"required": []string{"collection_id"},
-		},
-	}, func(args map[string]any) (any, error) {
-		collectionID, _ := args["collection_id"].(string)
-		n, err := eng.PruneCollection(collectionID)
-		if err != nil {
-			return nil, err
-		}
-		return fmt.Sprintf("Pruned %d empty sources from '%s'", n, collectionID), nil
-	})
-
-	server.RegisterTool(Tool{
-		Name:        "vault_import",
-		Description: "Make a vault folder live after rclone copy: scan collections, verify, register missing entries, refresh cache. Pass the vault root path (server-local).",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "Vault root path on the server. Empty uses the configured store.",
-				},
-			},
-		},
-	}, func(args map[string]any) (any, error) {
-		path, _ := args["path"].(string)
-		res, err := eng.ImportVault(strings.TrimSpace(path))
-		if err != nil {
-			return nil, err
-		}
-		return ConvertToJSON(res), nil
-	})
-
-	server.RegisterTool(Tool{
 		Name:        "get_chunk",
 		Description: "Fetch one memory card by chunk ID or content SHA without embedding (zero token cost). Use after search_memory to precisely re-read a card before updating or deleting it.",
 		InputSchema: map[string]any{
@@ -448,38 +387,6 @@ func RegisterTools(server *Server, eng *engine.Engine) {
 		metadata := getStringMapArg(args, "metadata")
 		dryRun := getBoolArg(args, "dry_run", false)
 		res, err := eng.UpdateMemory(collectionID, ids, filter, newText, metadata, dryRun)
-		if err != nil {
-			return nil, err
-		}
-		return ConvertToJSON(res), nil
-	})
-
-	server.RegisterTool(Tool{
-		Name:        "verify_deep",
-		Description: "Three-layer collection health check: structure (catalog/index) + text coverage (re-chunk raw source, content-SHA sets) + vector spot-check (re-embed N samples, median cosine). Catches corruption, chunk drift and pooling/model swaps that dim gates miss.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"collection_id": map[string]any{
-					"type":        "string",
-					"description": "Collection to check",
-				},
-				"source_path": map[string]any{
-					"type":        "string",
-					"description": "Optional raw source file for text-coverage layer (server-local path)",
-				},
-				"sample_n": map[string]any{
-					"type":        "integer",
-					"description": "Vector spot-check samples (default 20, max 50)",
-				},
-			},
-			"required": []string{"collection_id"},
-		},
-	}, func(args map[string]any) (any, error) {
-		collectionID, _ := args["collection_id"].(string)
-		sourcePath, _ := args["source_path"].(string)
-		sampleN := getIntArg(args, "sample_n", 20)
-		res, err := eng.VerifyDeep(collectionID, sourcePath, sampleN)
 		if err != nil {
 			return nil, err
 		}

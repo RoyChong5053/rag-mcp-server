@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/chunking"
 	"github.com/RoyChong5053/rag-mcp-server/engine"
@@ -28,6 +26,10 @@ const maxUploadBytes = 100 << 20
 var collectionNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 // FileEntry is one raw file under the docs root with its index status.
+//
+// The data bank is no longer browsed as a tree: the documents panel lists the
+// vault through its ledger and searches it with ripgrep. Walking the whole
+// tree on every request is what breaks at a million files.
 type FileEntry struct {
 	Path       string `json:"path"` // relative to docs root, slash-separated
 	Size       int64  `json:"size"`
@@ -35,16 +37,6 @@ type FileEntry struct {
 	SHA256     string `json:"sha256,omitempty"`
 	Status     string `json:"status"` // unindexed | indexed_fresh | indexed_stale | unknown
 	Collection string `json:"collection,omitempty"`
-	// Visibility groups the data bank: agent journals default hidden, manual
-	// uploads default shown. The dashboard toggles them client-side.
-	Visibility string `json:"visibility"`
-}
-
-func fileVisibility(rel string) string {
-	if rel == "memory/agent" || len(rel) > 13 && (rel[:13] == "memory/agent" && rel[13] == '/') {
-		return "agent"
-	}
-	return "manual"
 }
 
 // jail resolves rel under root and rejects escapes and absolute inputs.
@@ -73,56 +65,6 @@ func fileSHA256(abs string, size int64) string {
 		return ""
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// listFiles walks the docs root (cap 2000 entries) and matches registry provenance.
-func (h *Handler) listFiles() ([]FileEntry, error) {
-	bySource := make(map[string]string) // abs source_file -> collection
-	for name, en := range h.eng.Registry().List() {
-		if en.SourceFile != "" && en.SourceFile != "direct_text" {
-			bySource[en.SourceFile] = name
-		}
-	}
-	var out []FileEntry
-	err := filepath.Walk(h.docsRoot, func(abs string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable, keep walking
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if len(out) >= 2000 {
-			return filepath.SkipAll
-		}
-		rel, err := filepath.Rel(h.docsRoot, abs)
-		if err != nil {
-			return nil
-		}
-		fe := FileEntry{
-			Path:       filepath.ToSlash(rel),
-			Size:       info.Size(),
-			Mtime:      info.ModTime().UTC().Format(time.RFC3339),
-			Status:     "unindexed",
-			Visibility: fileVisibility(filepath.ToSlash(rel)),
-		}
-		if col, ok := bySource[abs]; ok {
-			fe.Collection = col
-			en := h.eng.Registry().Get(col)
-			sum := fileSHA256(abs, info.Size())
-			fe.SHA256 = sum
-			switch {
-			case sum == "" || en == nil || en.SourceSHA256 == "":
-				fe.Status = "unknown"
-			case sum == en.SourceSHA256:
-				fe.Status = "indexed_fresh"
-			default:
-				fe.Status = "indexed_stale"
-			}
-		}
-		out = append(out, fe)
-		return nil
-	})
-	return out, err
 }
 
 // handleFileHistory returns the index/reindex/upload/delete audit trail for
@@ -160,66 +102,16 @@ func (h *Handler) handleRecentUploads(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleFiles(w http.ResponseWriter, r *http.Request) {
-	entries, err := h.listFiles()
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, err)
-		return
-	}
-	if entries == nil {
-		entries = []FileEntry{}
-	}
-	writeJSON(w, http.StatusOK, entries)
+	// The data bank is not browsed as a tree any more: the documents panel
+	// lists the vault through its ledger and searches it with ripgrep. This
+	// endpoint stays as an empty stub so old clients do not break loudly.
+	writeJSON(w, http.StatusOK, []FileEntry{})
 }
 
 func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("parse upload: %w", err))
-		return
-	}
-	f, hdr, err := r.FormFile("file")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("missing file field: %w", err))
-		return
-	}
-	defer f.Close()
-	if hdr.Size > maxUploadBytes {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("file too large (max 100MB)"))
-		return
-	}
-	// Sanitize to a bare filename; subdir targeting is not allowed.
-	name := filepath.Base(hdr.Filename)
-	name = strings.TrimSpace(name)
-	if name == "" || name == "." || strings.ContainsAny(name, `/\`) {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid filename"))
-		return
-	}
-	staging := filepath.Join(h.docsRoot, "staging")
-	if err := os.MkdirAll(staging, 0o755); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	abs := filepath.Join(staging, name)
-	dst, err := os.Create(abs)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	written, err := io.Copy(dst, f)
-	dst.Close()
-	if err != nil {
-		os.Remove(abs)
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	rel, _ := filepath.Rel(h.docsRoot, abs)
-	if err := h.eng.AppendHistory(engine.HistoryEntry{Op: "upload", File: abs, OK: true}); err != nil {
-		log.Printf("history append failed: %v", err)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"path":   filepath.ToSlash(rel),
-		"size":   written,
-	})
+	// Uploads are filed into the documents vault now (see
+	// handleDocumentUpload). This stub stays so old clients keep working.
+	writeErr(w, http.StatusBadRequest, fmt.Errorf("uploads go to /api/documents/upload"))
 }
 
 type indexBody struct {

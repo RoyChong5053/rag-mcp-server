@@ -30,6 +30,39 @@ audit_path: "logs/rag-mcp.log"
 # Data-bank root browsed by the dashboard (server-local paths).
 docs_dir: "docs"
 
+# Documents vault: the raw-text corpus. The vector side answers "what did I
+# learn about X"; this side answers "where is that exact string".
+#
+# Every document is filed by machine under
+#   <dir>/<yyyy-mm-dd>/<channel>/<category>/<HHMMSS>-<sha8>-<slug><ext>
+# The date comes first so a date range is a list of directories, not a walk.
+# Channels: web | agent | upload | chat | import. The category comes from the
+# rule table below; a document that matches no rule lands in "_".
+documents:
+  # Empty = <docs_dir>/documents.
+  dir: ""
+  # Search engine: auto (ripgrep when the host has it, else the built-in
+  # scanner), rg (insist on ripgrep), builtin (always the built-in scanner).
+  # ripgrep is never bundled: it is a normal program, and the built-in
+  # scanner is what keeps the feature independent of the host.
+  search_backend: "auto"
+  # An explicit ripgrep binary. Empty = look it up on PATH.
+  rg_path: ""
+  timeout_seconds: 60
+  max_matches: 200
+  per_file: 5
+  # How far back the in-memory ledger index reaches. Older documents are
+  # still found; a body that reappears after the window is filed as new.
+  ledger_window_days: 30
+  # Category rules. The first match wins. The subject is title + url + tags.
+  categories: []
+  #  - match: "^github\\.com|^gitlab\\.com"
+  #    category: code
+  #  - match: "^arxiv\\.org"
+  #    category: paper
+  #  - match: "^news\\.|^bbc\\.|^reuters\\."
+  #    category: news
+
 # Vector backend (vectra-only). backend is accepted for compatibility.
 storage:
   backend: "vectra"

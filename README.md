@@ -22,7 +22,8 @@ RAG shouldn't be locked inside a single chat frontend. Your "memory" should be a
                    ▼
 ┌─────────────────────────────────────────────┐
 │  rag-mcp-server  (Go, :8199)               │
-│  Tools: search, store, delete, list         │
+│  Tools: recall, store, delete, list,        │
+│         search_document, read_document      │
 └──────┬──────────────────────┬───────────────┘
        │                      │
   ┌────▼──────────────┐  ┌────▼─────────────────┐
@@ -30,6 +31,13 @@ RAG shouldn't be locked inside a single chat frontend. Your "memory" should be a
   │ Qdrant :6333  or  │  │ /v1/embeddings       │
   │ Vectra/ (files)   │  │ /v1/rerank (fan-out) │
   └───────────────────┘  └──────────────────────┘
+       ▲
+       │  the same raw text, searchable by literal string
+┌──────┴───────────────────────────────┐
+│  documents/ (the vault)              │
+│  <date>/<channel>/<category>/<doc>   │
+│  indexed by ripgrep, not by a tree    │
+└──────────────────────────────────────┘
 ```
 
 ## Quick Start
@@ -61,6 +69,21 @@ admin:                    # management UI + JSON API
 registry_path: "collections.json"
 settings_path: "settings.json"
 docs_dir: "docs"
+
+# The raw-text corpus behind search_document. Every document is filed by
+# machine under <dir>/<yyyy-mm-dd>/<channel>/<category>/, so the date comes
+# first: a date range is then a list of directories, not a walk.
+documents:
+  dir: ""                    # empty = <docs_dir>/documents
+  search_backend: "auto"     # auto (ripgrep if present) | rg | builtin
+  rg_path: ""                # explicit ripgrep binary; empty = PATH
+  timeout_seconds: 60
+  max_matches: 200
+  per_file: 5
+  ledger_window_days: 30
+  categories:                # rules; the first match wins
+    - match: "^github\\.com"
+      category: code
 
 # Vector backend: "qdrant" (default) or "vectra" (local files).
 # A collection can override the default via its registry `backend` field.
@@ -178,16 +201,67 @@ scope can fall back to a local vectra collection:
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Semantic search. Omitted `collection_id` uses the active backend's default, with automatic vectra fallback when qdrant is down; optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped |
-| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). Raw text is persisted on disk by date, then indexed. Omitted `collection_id` uses the active backend's default with qdrant→vectra failover; errors loudly if there is none |
+| `search_memory` | Semantic search. Omitted `collection_id` uses the active backend's default, with automatic vectra fallback when qdrant is down; optional `top_k`/`threshold` override the server defaults. Disabled collections are always skipped. For exact strings (URLs, IDs, error codes, version numbers, names) use `search_document` instead — embedding similarity fuzzes over those |
+| `store_memory` | Vectorize and store text for later recall (the write counterpart of `search_memory`). The raw text is filed in the documents vault as well, then indexed. Omitted `collection_id` uses the active backend's default with qdrant→vectra failover; errors loudly if there is none |
 | `delete_memory` | Delete by filter or collection |
 | `list_collections` | List all collections with chunk counts |
 | `collection_info` | Live stats + registry metadata, one or all |
 | `set_collection_meta` | Display name, tags, consumers, enabled flag, backend (backend refused once the collection holds vectors) |
 | `delete_collection` | Drop whole collection, requires `confirm:true` |
 | `health_check` | Verify all components are healthy and report the active backend |
+| `search_document` | Search the raw documents of the vault for an exact string. Returns the document's title, URL and dates next to every hit. Literal by default, `mode:"regex"` for a regular expression; `channel`/`category`/`since`/`until` narrow the search |
+| `read_document` | Read one document out of the vault (optionally a line range) |
+| `list_documents` | List the documents of the vault, newest first. Reads the index, not the corpus, so it stays fast at any size |
+| `documents_import` | File a folder of raw material into the vault: every text file is dated, categorized and named after its content hash; files that are already there are skipped |
 | `web_search` | Search the live web and return what the provider found. It always queries the live web — it never answers from stored material — and every hit carries its publication date. The pages it finds are also vectorized into the web collection, so later turns can recall them with `search_memory`. Pass `store:false` to search without filing anything |
 | `fetch_url` | Fetch one page as markdown, optionally vectorizing it into the web collection |
+
+### The documents vault
+
+Semantic recall and literal search answer different questions. The vector side
+answers *"what did I learn about X"*; it is bad at exact strings, because
+embedding similarity happily puts `v1.2.3` next to `v1.2.4`. The vault
+answers *"where is that exact string"*.
+
+The vault is the raw-text corpus: every page a web search filed, every memory
+an agent stored, every file that was uploaded or imported. It is never curated
+by hand. Documents are filed by machine under
+
+```
+<documents_dir>/<yyyy-mm-dd>/<channel>/<category>/<HHMMSS>-<sha8>-<slug>.<ext>
+```
+
+- **the date comes first** so a date range is a list of directories instead of
+  a walk over the whole corpus — "search the last week" touches seven folders
+  no matter how large the corpus is;
+- **the channel** says where the document came from (`web`, `agent`, `upload`,
+  `chat`, `import`);
+- **the category** comes from a rule table in the config (host, title or tag
+  match); a document that matches no rule lands in `_`;
+- **the file name** carries the time and the first 8 hex of the body hash, so
+  the same text is always the same document.
+
+The body hash is the identity: a body that is already in the vault refreshes
+that document instead of adding a second copy, and a document whose text
+changed becomes a new one (the corpus keeps the versions).
+
+Each document carries a YAML front-matter with its title, URL, dates, channel
+and collection. The front-matter is searchable too, so looking for a title or
+a URL finds the document that carries them.
+
+### Searching the vault
+
+`search_document` uses ripgrep when the host has it, and a built-in scanner
+when it does not. Both return the same shape, and a test asserts they agree.
+ripgrep is never bundled into the binary: it is a normal program (the server
+this was written for has rg 14.1.0), and the built-in scanner is what keeps
+the feature independent of the host.
+
+```
+search_document("error code 404")        → the exact string, in the raw document
+search_document("code \\d+", mode=regex) → a pattern
+search_document("ripgrep", channel=web)  → only what the web search filed
+```
 
 ### Web search
 
@@ -287,13 +361,42 @@ instead of reading the whole file, so a large log never stalls the dashboard.
 
 ## Data Bank (dashboard)
 
-- `docs/` browser with fresh/stale/unindexed badges (sha256 vs registry provenance)
-- Upload to `docs/staging/`, zero-token chunk preview, **Vectorize** into a new/existing
-  collection with an explicit `database` (qdrant/vectra), per-job `chunk_size`/`overlap_percent`
-  (defaults 500/30), append or rebuild
+- **Documents** panel: search the raw corpus with a keyword (literal or
+  regex, case and whole-word toggles, channel and date filters), see the
+  matching lines, and open the document to read it with the hits highlighted.
+  The listing comes from the vault's index, never from a walk of the corpus,
+  so the dashboard stays usable when the corpus has millions of files
+- Upload a file: it is filed into the vault by machine (dated, categorized,
+  named after its content hash)
+- **Vectorize** any document into a collection with an explicit `database`
+  (qdrant/vectra), per-job `chunk_size`/`overlap_percent` (defaults 500/30),
+  append or rebuild, plus a zero-token chunk preview
 - Background jobs (max 2 concurrent, search never blocked) with sidebar progress
   and a **clear** button for finished jobs
 - Provenance snapshot per collection: chunk size/overlap, embed model, source sha
+
+## Maintenance commands
+
+Maintenance is operational work, not agent work, so it lives in the server's
+CLI instead of the MCP tool surface. A tool an agent can call is a tool an
+agent will call — and "check whether the vector index is still consistent" is
+not something an agent needs at 3am.
+
+```bash
+rag-mcp-server index-verify [collection]      # catalog<->index consistency
+rag-mcp-server index-prune <collection>        # drop empty sources
+rag-mcp-server index-import <path>             # make a copied store live again
+rag-mcp-server verify-deep <collection>        # structure + text coverage + vector drift
+rag-mcp-server docs-verify                     # vault against its ledger
+rag-mcp-server docs-migrate [-apply]           # move legacy raw files into the vault
+rag-mcp-server docs-search -query <text>       # the same search the dashboard uses
+```
+
+`docs-migrate` is a dry run unless `-apply` is given. It moves the legacy
+`docs/memory/web/`, `docs/staging/` and `docs/chat_history/` files into the
+vault, puts the old files aside in `docs/.migrated/`, and re-points the
+vector index at the new files so a recall still knows where the text lives.
+
 
 ## Register with one-api
 
