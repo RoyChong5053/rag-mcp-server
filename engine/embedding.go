@@ -28,14 +28,43 @@ type EmbeddingClient struct {
 	// request as a user abort — it then neither tries another channel nor
 	// penalizes the bad one (see one-api controller/relay.go). rag-mcp never
 	// cancels early; one-api decides.
+	//
+	// This is the INTERACTIVE budget: a user is waiting for a recall, so it
+	// stays short and a slow channel costs a fast fail-open instead of a
+	// three-minute stall.
 	timeout time.Duration
+
+	// bulkTimeout is the TOTAL budget for one background embed. Background
+	// work has nobody waiting, so it may wait long enough for one-api to
+	// fail over to another channel (RELAY_TIMEOUT) instead of dying at the
+	// interactive deadline. 0 = timeout.
+	bulkTimeout time.Duration
 
 	// limiter caps concurrent embedding POSTs so parallel searches / index
 	// jobs cannot stampede a CPU-only fan-out. Its capacity follows the
 	// compute mode through concurrency (GPU vs CPU fallback).
-	limiter     *dynLimiter
+	limiter *dynLimiter
+
+	// queryLimiter caps the INTERACTIVE embedding requests. It is separate
+	// from the bulk limiter on purpose: a background index job must never
+	// delay a query embed behind a queue of batch embeds. With the shared
+	// limiter a recall could wait minutes (the limiter had no fairness), which
+	// is exactly what the search budget could not interrupt.
+	queryLimiter *dynLimiter
+
 	concurrency func() int
 }
+
+// embedClass says who is asking for an embedding. It decides both the
+// limiter and the budget.
+type embedClass int
+
+const (
+	// classQuery is an interactive request: a user waits for the answer.
+	classQuery embedClass = iota
+	// classBulk is a background request: an index job, a web ingest.
+	classBulk
+)
 
 // defaultOneAPITimeout is the total per-call budget for embed/rerank when the
 // config leaves it unset. It is deliberately larger than one-api's per-attempt
@@ -96,25 +125,48 @@ func (l *dynLimiter) release() {
 }
 
 // SetConcurrencyProvider wires a callback returning the current concurrent
-// embedding-request cap. It is consulted on every acquire so the cap tracks
-// the compute mode (GPU vs CPU fallback) without a restart.
+// BACKGROUND embedding-request cap. It is consulted on every bulk acquire so
+// the cap tracks the compute mode (GPU vs CPU fallback) without a restart.
 func (c *EmbeddingClient) SetConcurrencyProvider(f func() int) {
 	c.concurrency = f
 }
 
-func (c *EmbeddingClient) acquire() {
-	if c.limiter == nil {
-		return
+// acquire takes a slot from the limiter that belongs to the class.
+//
+// The two classes use different limiters on purpose. Background work used to
+// share one limiter with queries, and because that limiter had no fairness a
+// bulk index job could keep the slot while a recall waited behind it (a
+// search_memory call once took 11 minutes). Now a query embed always has its
+// own slot, so a background ingest can slow the embedding backend down but
+// can never make the user wait for it.
+func (c *EmbeddingClient) acquire(class embedClass) {
+	switch class {
+	case classQuery:
+		if c.queryLimiter == nil {
+			return
+		}
+		c.queryLimiter.acquire()
+	default:
+		if c.limiter == nil {
+			return
+		}
+		if c.concurrency != nil {
+			c.limiter.setLimit(c.concurrency())
+		}
+		c.limiter.acquire()
 	}
-	if c.concurrency != nil {
-		c.limiter.setLimit(c.concurrency())
-	}
-	c.limiter.acquire()
 }
 
-func (c *EmbeddingClient) release() {
-	if c.limiter != nil {
-		c.limiter.release()
+func (c *EmbeddingClient) release(class embedClass) {
+	switch class {
+	case classQuery:
+		if c.queryLimiter != nil {
+			c.queryLimiter.release()
+		}
+	default:
+		if c.limiter != nil {
+			c.limiter.release()
+		}
 	}
 }
 
@@ -134,13 +186,16 @@ func NewEmbeddingClient(baseURL, backupURL, model, apiKey string) *EmbeddingClie
 		httpClient: &http.Client{
 			Timeout: defaultOneAPITimeout,
 		},
-		timeout: defaultOneAPITimeout,
-		limiter: newDynLimiter(defaultEmbedConcurrency),
+		timeout:      defaultOneAPITimeout,
+		bulkTimeout:  defaultOneAPITimeout,
+		limiter:      newDynLimiter(defaultEmbedConcurrency),
+		queryLimiter: newDynLimiter(1),
 	}
 }
 
-// SetTimeout sets the total per-call budget. 0 keeps the default. The value is
-// capped so a misconfigured config cannot pin a request forever.
+// SetTimeout sets the total per-call budget for INTERACTIVE embeds (the
+// query embed of a search). 0 keeps the default. The value is capped so a
+// misconfigured config cannot pin a request forever.
 func (c *EmbeddingClient) SetTimeout(d time.Duration) {
 	if d <= 0 {
 		return
@@ -152,11 +207,33 @@ func (c *EmbeddingClient) SetTimeout(d time.Duration) {
 	c.httpClient.Timeout = d
 }
 
+// SetBulkTimeout sets the total per-call budget for BACKGROUND embeds (index
+// jobs, web ingests). It should sit above one-api's channel-failover window
+// (RELAY_TIMEOUT) so a slow channel is survived instead of aborting the whole
+// document at the interactive deadline. 0 keeps the interactive budget.
+func (c *EmbeddingClient) SetBulkTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if d > 30*time.Minute {
+		d = 30 * time.Minute
+	}
+	c.bulkTimeout = d
+}
+
 func (c *EmbeddingClient) budget() time.Duration {
 	if c.timeout <= 0 {
 		return defaultOneAPITimeout
 	}
 	return c.timeout
+}
+
+// bulkBudget is the budget for one background embed call.
+func (c *EmbeddingClient) bulkBudget() time.Duration {
+	if c.bulkTimeout <= 0 {
+		return c.budget()
+	}
+	return c.bulkTimeout
 }
 
 // EmbeddingRequest represents the request to one-api's embedding endpoint
@@ -189,13 +266,24 @@ func (c *EmbeddingClient) batchSize() int {
 // CreateEmbeddings generates embeddings for the given texts with an explicit
 // per-POST batch cap. Use CreateEmbeddings for the default (32); index jobs
 // pass settings.embed_batch_size so CPU-only nights use 8.
+//
+// This is the INTERACTIVE path (a query embed during a search): it uses the
+// interactive budget and the query limiter, so a background ingest cannot
+// delay it.
 func (c *EmbeddingClient) CreateEmbeddings(texts []string) ([][]float32, error) {
-	return c.CreateEmbeddingsBatched(texts, 0)
+	return c.createEmbeddings(texts, 0, classQuery)
 }
 
 // CreateEmbeddingsBatched is CreateEmbeddings with a caller-chosen batch cap
 // (<=0 = default). Batches are sent sequentially to preserve chunk order.
+//
+// This is the BACKGROUND path (index jobs, web ingests): it uses the bulk
+// budget and the bulk limiter.
 func (c *EmbeddingClient) CreateEmbeddingsBatched(texts []string, batchSize int) ([][]float32, error) {
+	return c.createEmbeddings(texts, batchSize, classBulk)
+}
+
+func (c *EmbeddingClient) createEmbeddings(texts []string, batchSize int, class embedClass) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
@@ -212,10 +300,10 @@ func (c *EmbeddingClient) CreateEmbeddingsBatched(texts []string, batchSize int)
 	// Small input: single request (fast path, preserves old behavior)
 	if len(texts) <= bs {
 		// Try primary endpoint first
-		embeddings, err := c.callWithRetry(c.baseURL, req)
+		embeddings, err := c.callWithRetry(c.baseURL, req, class)
 		if err != nil && c.backupURL != "" {
 			// Fallback to backup endpoint
-			embeddings, err = c.callWithRetry(c.backupURL, req)
+			embeddings, err = c.callWithRetry(c.backupURL, req, class)
 		}
 		return embeddings, err
 	}
@@ -228,9 +316,9 @@ func (c *EmbeddingClient) CreateEmbeddingsBatched(texts []string, batchSize int)
 			end = len(texts)
 		}
 		batchReq := EmbeddingRequest{Model: c.model, Input: texts[start:end]}
-		embeddings, err := c.callWithRetry(c.baseURL, batchReq)
+		embeddings, err := c.callWithRetry(c.baseURL, batchReq, class)
 		if err != nil && c.backupURL != "" {
-			embeddings, err = c.callWithRetry(c.backupURL, batchReq)
+			embeddings, err = c.callWithRetry(c.backupURL, batchReq, class)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("batch [%d:%d]/%d (batch_size=%d): %w", start, end, len(texts), bs, err)
@@ -277,8 +365,16 @@ func retryable(err error) bool {
 // request as an user abort (context.Canceled) — no channel fallback, no health
 // penalty. So rag-mcp waits the full budget, then reports "unavailable" and
 // lets the frontend fail open.
-func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([][]float32, error) {
+//
+// The budget depends on the class: an interactive query keeps the short
+// budget (a user is waiting), a background job gets the bulk budget, which
+// sits above one-api's own failover window so a slow channel is survived
+// instead of aborting a whole document.
+func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest, class embedClass) ([][]float32, error) {
 	budget := c.budget()
+	if class == classBulk {
+		budget = c.bulkBudget()
+	}
 	deadline := time.Now().Add(budget)
 	backoff := 500 * time.Millisecond
 	const maxAttempts = 3
@@ -290,7 +386,7 @@ func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([
 			break
 		}
 		var apiErr *apiError
-		embeddings, err = c.callEndpointWithBudget(baseURL, req, remaining)
+		embeddings, err = c.callEndpointWithBudget(baseURL, req, remaining, class)
 		if err == nil {
 			return embeddings, nil
 		}
@@ -320,9 +416,9 @@ func (c *EmbeddingClient) callWithRetry(baseURL string, req EmbeddingRequest) ([
 // callEndpointWithBudget runs one HTTP attempt under the remaining slice of the
 // total budget and the concurrency limiter (so retries cannot stampede a
 // saturated CPU-only fan-out). Ping bypasses this via callEndpointWithClient.
-func (c *EmbeddingClient) callEndpointWithBudget(baseURL string, req EmbeddingRequest, remaining time.Duration) ([][]float32, error) {
-	c.acquire()
-	defer c.release()
+func (c *EmbeddingClient) callEndpointWithBudget(baseURL string, req EmbeddingRequest, remaining time.Duration, class embedClass) ([][]float32, error) {
+	c.acquire(class)
+	defer c.release(class)
 	return c.callEndpointWithClient(&http.Client{Timeout: remaining}, baseURL, req)
 }
 

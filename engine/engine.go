@@ -67,8 +67,16 @@ type EngineConfig struct {
 	// EmbedTimeout/RerankTimeout are the total per-call budgets for one-api.
 	// They must exceed one-api's own channel-failover window; rag-mcp never
 	// cancels mid-failover. 0 = defaultOneAPITimeout (180s).
-	EmbedTimeout  time.Duration
-	RerankTimeout time.Duration
+	//
+	// EmbedTimeout is the interactive budget (a recall has a user waiting).
+	// BulkEmbedTimeout is the background budget (index jobs, web ingests),
+	// where nobody waits and a slow channel should be survived.
+	EmbedTimeout     time.Duration
+	BulkEmbedTimeout time.Duration
+	RerankTimeout    time.Duration
+	// BulkConcurrency is how many background embedding requests may be in
+	// flight at once. The interactive path has its own slot. 0 = default 2.
+	BulkConcurrency int
 	// SearchBudget bounds one whole search (embed + stores + rerank) so the
 	// server answers before the caller's outer fail-safe. Checked only at
 	// stage boundaries. 0 = 170s.
@@ -106,6 +114,9 @@ type SearchResult struct {
 type IndexResult struct {
 	ChunksIndexed int    `json:"chunks_indexed"`
 	Collection    string `json:"collection"`
+	// Replaced counts the points of the same source that were dropped
+	// before the new ones were written (a re-index of a changed document).
+	Replaced int `json:"replaced,omitempty"`
 }
 
 // CollectionInfo represents collection information
@@ -130,6 +141,7 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 	embedding := NewEmbeddingClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.EmbedModel, config.APIKey)
 	rerank := NewRerankClient(config.OneAPIBaseURL, config.OneAPIBackupURL, config.RerankModel, config.APIKey, config.QueryMaxChars, config.DocMaxChars)
 	embedding.SetTimeout(config.EmbedTimeout)
+	embedding.SetBulkTimeout(config.BulkEmbedTimeout)
 	rerank.SetTimeout(config.RerankTimeout)
 
 	vectraDir := config.VectraDir
@@ -183,8 +195,13 @@ func NewEngine(config *EngineConfig, st *settings.Store) (*Engine, error) {
 		return s.QueryMaxChars, s.DocMaxChars
 	})
 	// Embedding concurrency follows the compute mode: parallel on the GPU path,
-	// serial on the CPU fallback so parallel searches/jobs cannot stampede it.
+	// a small pool on the CPU fallback so parallel searches/jobs cannot
+	// stampede it. The interactive query path has its own slot, so a bulk job
+	// can slow the backend down but never delay a recall.
 	embedding.SetConcurrencyProvider(func() int {
+		if e.config.BulkConcurrency > 0 {
+			return e.config.BulkConcurrency
+		}
 		if e.usesCPUCompute() {
 			return embeddingConcurrencyCPU
 		}
@@ -252,7 +269,10 @@ const backendDownTTL = 60 * time.Second
 // No health probe gates this: the CPU path is derived from settings.
 const (
 	embeddingConcurrencyGPU = 4
-	embeddingConcurrencyCPU = 1
+	// embeddingConcurrencyCPU is the background pool size on the CPU-only
+	// fan-out. It was 1, which was safe but slow: a bulk job held the only
+	// slot for the whole ingest.
+	embeddingConcurrencyCPU = 2
 	embedBatchSizeGPU       = 32
 	embedBatchSizeCPU       = 4
 )
@@ -1306,7 +1326,7 @@ func (e *Engine) indexDocumentInternal(backend, path, collectionID string, metad
 		VectorDistance: embedDistance,
 	}
 
-	res, used, err := e.indexTextInternalOn(backend, text, collectionID, metadata, fileName, path, opts, prog)
+	res, used, err := e.indexTextInternalOn(backend, text, collectionID, metadata, fileName, path, opts, prog, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,7 +1385,7 @@ func (e *Engine) IndexText(text string, collectionID string, metadata map[string
 
 // IndexTextWithOptions indexes raw text with per-job chunking and progress.
 func (e *Engine) IndexTextWithOptions(text string, collectionID string, metadata map[string]string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, error) {
-	res, used, err := e.indexTextInternal(text, collectionID, metadata, "direct_text", "direct_text", opts, prog)
+	res, used, err := e.indexTextInternal(text, collectionID, metadata, "direct_text", "direct_text", opts, prog, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1420,7 +1440,7 @@ func (e *Engine) StoreMemory(text, collectionID string, metadata map[string]stri
 	// Index only the new text; source_file points at the daily journal so
 	// recall can open the human-readable log.
 	sub := metadata
-	res, used, err := e.indexTextInternal(text, scope, sub, filepath.Base(path), path, nil, nil)
+	res, used, err := e.indexTextInternal(text, scope, sub, filepath.Base(path), path, nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1584,11 +1604,17 @@ func (e *Engine) checkProvenanceConflict(collectionID string) error {
 }
 
 // indexTextInternal routes to the vectra file store.
-func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
-	return e.indexTextInternalOn(BackendVectra, text, collectionID, metadata, sourceName, sourceFile, opts, prog)
+//
+// replaceSource drops the points that belong to sourceFile before the new
+// ones are written. The delete happens INSIDE the index, after the embedding
+// succeeded and the provenance/dimension gates passed: the old version stays
+// recallable while the new one is being computed, and a failed embed leaves
+// the old version intact instead of losing the document.
+func (e *Engine) indexTextInternal(text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc, replaceSource bool) (*IndexResult, ResolvedChunkOptions, error) {
+	return e.indexTextInternalOn(BackendVectra, text, collectionID, metadata, sourceName, sourceFile, opts, prog, replaceSource)
 }
 
-func (e *Engine) indexTextInternalOn(backend string, text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc) (*IndexResult, ResolvedChunkOptions, error) {
+func (e *Engine) indexTextInternalOn(backend string, text string, collectionID string, metadata map[string]string, sourceName string, sourceFile string, opts *ChunkOptions, prog ProgressFunc, replaceSource bool) (*IndexResult, ResolvedChunkOptions, error) {
 	// Chunk the text (per-job options fall back to global config)
 	used := e.ResolveChunkOptions(opts)
 	chunks := chunking.Split(text, chunking.Options{Strategy: used.Strategy, Size: used.Size, Overlap: used.Overlap})
@@ -1700,6 +1726,19 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 		}
 	}
 
+	// Replace the old version of this source only now. The embedding
+	// succeeded and the provenance/dimension gates passed, so the swap cannot
+	// lose the document: before the new points land, the old ones are still
+	// there and still recallable.
+	replaced := 0
+	if replaceSource && sourceFile != "" && sourceFile != "direct_text" {
+		if n, derr := e.DeleteMemory(collectionID, map[string]any{"source_file": sourceFile}); derr != nil {
+			log.Printf("source cleanup failed for %s: %v", sourceFile, derr)
+		} else {
+			replaced = n
+		}
+	}
+
 	// Upsert points in batches so large documents stay in small files.
 	const upsertBatchSize = 100
 	for start := 0; start < len(points); start += upsertBatchSize {
@@ -1708,7 +1747,7 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 			end = len(points)
 		}
 		if err := store.UpsertPoints(collectionID, points[start:end]); err != nil {
-			return &IndexResult{ChunksIndexed: start, Collection: collectionID}, used, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
+			return &IndexResult{ChunksIndexed: start, Collection: collectionID, Replaced: replaced}, used, fmt.Errorf("failed to upsert points [%d:%d]: %w", start, end, err)
 		}
 		if prog != nil {
 			prog(end, len(points))
@@ -1719,6 +1758,7 @@ func (e *Engine) indexTextInternalOn(backend string, text string, collectionID s
 	return &IndexResult{
 		ChunksIndexed: len(chunks),
 		Collection:    collectionID,
+		Replaced:      replaced,
 	}, used, nil
 }
 

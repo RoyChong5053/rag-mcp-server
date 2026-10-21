@@ -195,7 +195,7 @@ The server can pull live web pages in and turn them into vectors, so a shared
 knowledge base stays current without every client owning a search key.
 
 ```
-web_search(query)   →  live search → the provider's results, with dates → also stored
+web_search(query)   →  live search → the provider's results, with dates → filed in the background
 search_memory(query)→  recall what was searched before, with its dates
 ```
 
@@ -206,6 +206,15 @@ search_memory(query)→  recall what was searched before, with its dates
   before is `search_memory`'s job, and the caller decides when it needs
   fresh truth — a package that was renamed again since the last search, for
   instance.
+- **Filing happens in the background.** The call returns as soon as the
+  provider answered; the pages it found are then chunked and embedded into the
+  web collection by a background job — one job at a time, pages in rank
+  order, so the most relevant material lands first. The reply names the job
+  and the dashboard's Jobs panel shows it running. This used to happen
+  inline: a search that vectorized ten pages took longer than any caller's
+  timeout, so the fresh material was lost even though the server had it.
+  A page whose content is unchanged is not embedded again, and a page whose
+  embedding fails keeps its previous version until the new one is ready.
 - **Dates travel with everything.** A search hit shows its publication date
   (or `unknown`), and a recalled web page shows its publication date, its
   fetch date, its age, and a stale flag once it is older than
@@ -219,6 +228,10 @@ search_memory(query)→  recall what was searched before, with its dates
   silently drops material makes the knowledge base impossible to reason
   about. One page lives per canonical URL, so re-searching the same article
   replaces it instead of piling up. `store:false` opts out entirely.
+  Lowering `ingest_top_n` or `max_content_chars` does NOT save search-API
+  credits — the provider has already fetched (and billed for) the full pages
+  by the time the results come back; it only shortens the embedding work and
+  throws material away.
 - **Providers** are tried in order (`search.providers`); the first one that
   answers wins, so a dead or rate-limited provider fails over to the next:
   `deepseek` (search + fetch in one request, with publication date and a

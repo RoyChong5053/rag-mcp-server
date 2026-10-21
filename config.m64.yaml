@@ -43,8 +43,19 @@ oneapi:
   # Total per-call budget for one-api embed/rerank. Must stay above one-api's
   # own channel-failover window (EMBEDDING_TIMEOUT/RELAY_TIMEOUT x retries) so
   # one-api decides first; rag-mcp never cancels mid-failover. 0 = default 180.
+  #
+  # embed_timeout_seconds is the INTERACTIVE budget: a recall has a user
+  # waiting, so it stays short and a slow channel costs a fast fail-open.
   embed_timeout_seconds: 65
+  # bulk_embed_timeout_seconds is the BACKGROUND budget (index jobs, web
+  # ingests): nobody waits, so a slow channel is survived instead of aborting
+  # a whole document. It sits above one-api's 120s relay window on purpose.
+  bulk_embed_timeout_seconds: 180
   rerank_timeout_seconds: 95
+  # How many background embedding requests may be in flight at once. The
+  # interactive query path has its own slot, so one-api sees at most this + 1
+  # concurrent requests. 0 = 2.
+  bulk_concurrency: 2
   # Whole-search wall-clock budget (embed + stores + rerank), checked only at
   # stage boundaries. Must stay below the caller's outer fail-safe
   # (TavernLab mcp_timeout 180) so the server answers first. 0 = default 170.

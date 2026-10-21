@@ -852,6 +852,89 @@ func (f *FileStore) UpdateCatalogMeta(collection, source, sha256 string, chunkSi
 	_ = f.saveCatalog(collection, cat)
 }
 
+// SourceSHA returns the content hash the catalog recorded for one source
+// file, or "" when the source is unknown. It is what lets a repeated
+// ingest of the same content skip the embedding entirely.
+func (f *FileStore) SourceSHA(collection, sourceFile string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	cat, err := f.loadCatalog(collection)
+	if err != nil || cat == nil {
+		return ""
+	}
+	meta, ok := cat.Sources[sourceFile]
+	if !ok {
+		return ""
+	}
+	return meta.SHA256
+}
+
+// TouchSource updates the chunk metadata of one source file without
+// re-embedding it.
+//
+// A page that is re-searched and comes back unchanged keeps its vectors, but
+// it was just verified: its fetched_at must be refreshed, or the reader sees
+// a stale flag on a page that was checked a minute ago.
+func (f *FileStore) TouchSource(collection, sourceFile string, fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	cat, err := f.loadCatalog(collection)
+	if err != nil {
+		return err
+	}
+	if cat == nil {
+		return fmt.Errorf("collection '%s' not found", collection)
+	}
+	meta, ok := cat.Sources[sourceFile]
+	if !ok {
+		return fmt.Errorf("source '%s' not found in collection '%s'", sourceFile, collection)
+	}
+	idx, err := f.loadIndex(collection, meta.Key)
+	if err != nil {
+		return err
+	}
+	if idx == nil {
+		return nil
+	}
+	changed := false
+	for i := range idx.Items {
+		if idx.Items[i].Metadata == nil {
+			idx.Items[i].Metadata = map[string]any{}
+		}
+		switch md := idx.Items[i].Metadata["metadata"].(type) {
+		case map[string]string:
+			for k, v := range fields {
+				if md[k] != v {
+					md[k] = v
+					changed = true
+				}
+			}
+		case map[string]any:
+			for k, v := range fields {
+				if fmt.Sprintf("%v", md[k]) != v {
+					md[k] = v
+					changed = true
+				}
+			}
+		default:
+			nm := map[string]any{}
+			for k, v := range fields {
+				nm[k] = v
+			}
+			idx.Items[i].Metadata["metadata"] = nm
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return f.saveIndex(collection, meta.Key, idx)
+}
+
 // InvalidateCollection drops cached indexes for one collection so externally
 // copied (rclone) files are re-read from disk.
 func (f *FileStore) InvalidateCollection(name string) {

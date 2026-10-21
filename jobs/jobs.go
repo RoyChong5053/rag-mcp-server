@@ -34,6 +34,9 @@ const (
 	KindIndex  = "index"
 	KindSearch = "search"
 	KindStore  = "store"
+	// KindWeb is a background web ingest: the pages a web_search found are
+	// fetched, chunked and embedded while the caller has already moved on.
+	KindWeb = "web"
 )
 
 // Job is one background task. Index jobs fill the dashboard fields
@@ -60,6 +63,14 @@ type Job struct {
 	Strategy   string `json:"strategy,omitempty"`
 	Rebuild    bool   `json:"rebuild,omitempty"`
 
+	// Label is a human-readable title for the job: for a web ingest it is
+	// the search query, so the dashboard says what is being filed instead of
+	// showing an empty file name.
+	Label string `json:"label,omitempty"`
+	// PagesDone/PagesTotal track the pages of a web ingest.
+	PagesDone  int `json:"pages_done,omitempty"`
+	PagesTotal int `json:"pages_total,omitempty"`
+
 	CreatedAt  string `json:"created_at"`
 	FinishedAt string `json:"finished_at,omitempty"`
 
@@ -70,12 +81,13 @@ type Job struct {
 // several large vectorizations cannot stampede the embedding backend; generic
 // tasks rely on the engine's own embedding limiter for safety.
 type Manager struct {
-	eng   *engine.Engine
-	sem   chan struct{} // index-job worker slots
-	mu    sync.Mutex
-	seq   atomic.Uint64
-	jobs  map[string]*Job
-	order []string
+	eng    *engine.Engine
+	sem    chan struct{} // index-job worker slots
+	webSem chan struct{} // web-ingest worker slots
+	mu     sync.Mutex
+	seq    atomic.Uint64
+	jobs   map[string]*Job
+	order  []string
 }
 
 const maxKeptJobs = 50
@@ -87,9 +99,10 @@ func NewManager(eng *engine.Engine, maxConcurrent int) *Manager {
 		maxConcurrent = 2
 	}
 	return &Manager{
-		eng:  eng,
-		sem:  make(chan struct{}, maxConcurrent),
-		jobs: make(map[string]*Job),
+		eng:    eng,
+		sem:    make(chan struct{}, maxConcurrent),
+		webSem: make(chan struct{}, 1),
+		jobs:   make(map[string]*Job),
 	}
 }
 
@@ -154,6 +167,57 @@ func (m *Manager) Submit(kind string, run func() (any, error)) *Job {
 			}
 		})
 		res, err := run()
+		m.finish(job.ID, func(j *Job) {
+			if err != nil {
+				j.State = StateError
+				j.Stage = "failed"
+				j.Error = err.Error()
+				return
+			}
+			j.State = StateDone
+			j.Stage = "done"
+			j.Result = res
+		})
+	}()
+	return m.Get(job.ID)
+}
+
+// WebProgress reports how far a web ingest has come.
+type WebProgress struct {
+	PagesDone  int
+	PagesTotal int
+	Chunks     int
+}
+
+// SubmitWeb queues a background web ingest.
+//
+// Web jobs share one worker slot on purpose: a search pages through its
+// results in rank order, and two searches filing at once would double the
+// load on the embedding backend for no gain. The caller has already been
+// answered, so the job takes as long as it takes.
+func (m *Manager) SubmitWeb(label, collection string, run func(prog func(WebProgress)) (any, error)) *Job {
+	job := m.newJob(KindWeb)
+	m.update(job.ID, func(j *Job) {
+		j.Label = label
+		j.Collection = collection
+		j.Stage = "queued"
+	})
+	go func() {
+		m.webSem <- struct{}{}
+		defer func() { <-m.webSem }()
+		m.update(job.ID, func(j *Job) {
+			j.State = StateRunning
+			j.Stage = "filing"
+		})
+		res, err := run(func(p WebProgress) {
+			m.update(job.ID, func(j *Job) {
+				j.PagesDone = p.PagesDone
+				j.PagesTotal = p.PagesTotal
+				j.DoneChunks = p.Chunks
+				j.Chunks = p.Chunks
+				j.Stage = fmt.Sprintf("filing page %d/%d", p.PagesDone, p.PagesTotal)
+			})
+		})
 		m.finish(job.ID, func(j *Job) {
 			if err != nil {
 				j.State = StateError
@@ -310,6 +374,17 @@ func (m *Manager) ListKind(kind string) []*Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.listLocked(func(j *Job) bool { return j.Kind == kind })
+}
+
+// ListKinds returns copies newest-first, filtered to the given kinds.
+func (m *Manager) ListKinds(kinds ...string) []*Job {
+	want := map[string]bool{}
+	for _, k := range kinds {
+		want[k] = true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.listLocked(func(j *Job) bool { return want[j.Kind] })
 }
 
 func (m *Manager) listLocked(keep func(*Job) bool) []*Job {

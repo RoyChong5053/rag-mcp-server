@@ -272,9 +272,10 @@ func (h *Handler) handleSubmitIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
-	// The dashboard table is index-oriented; only background index jobs live
-	// here now that the MCP search/store calls are synchronous.
-	writeJSON(w, http.StatusOK, h.jobs.ListKind(jobs.KindIndex))
+	// The dashboard shows the background work that is actually running:
+	// index jobs (an upload being vectorized) and web jobs (the pages a
+	// web_search found, being filed while the user keeps chatting).
+	writeJSON(w, http.StatusOK, h.jobs.ListKinds(jobs.KindIndex, jobs.KindWeb))
 }
 
 // handleClearJobs drops finished jobs from the sidebar; in-flight jobs stay.

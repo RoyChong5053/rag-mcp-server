@@ -50,6 +50,10 @@ type WebIngestResult struct {
 	// Replaced is the number of chunks that were dropped from a previous
 	// version of the same URL before the new ones were written.
 	Replaced int
+	// Unchanged reports that this exact content is already indexed for this
+	// URL, so nothing had to be embedded again. Re-searching the same article
+	// is common; embedding it a second time costs a full pass for nothing.
+	Unchanged bool
 }
 
 // IngestWebDocument stores a web page into a collection.
@@ -69,6 +73,11 @@ type WebIngestResult struct {
 // The publication date travels with every chunk (published_at) as well as
 // the moment it was fetched (fetched_at), because a reader has to be able
 // to tell yesterday's news from today's.
+//
+// The old version of the page is dropped only AFTER its replacement has been
+// embedded and the provenance/dimension gates passed, so a slow or failing
+// embed never leaves the reader with neither version. Content that is already
+// indexed (same content hash) is not embedded again at all.
 func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts WebIngestOptions) (*WebIngestResult, error) {
 	collectionID = strings.TrimSpace(collectionID)
 	if collectionID == "" {
@@ -78,8 +87,12 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 	if text == "" {
 		return nil, fmt.Errorf("document has no text")
 	}
-	if opts.MaxChars > 0 && len(text) > opts.MaxChars {
-		text = text[:opts.MaxChars]
+	if opts.MaxChars > 0 {
+		// Cut on a rune boundary: a byte cut can split a multi-byte
+		// character in half and leave a replacement rune in the chunk.
+		if r := []rune(text); len(r) > opts.MaxChars {
+			text = string(r[:opts.MaxChars])
+		}
 	}
 	if doc.CanonicalURL == "" {
 		doc.CanonicalURL = doc.URL
@@ -90,15 +103,21 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 		return nil, err
 	}
 
-	// Drop the previous chunks of this URL so a changed article does not
-	// leave its old text behind.
-	replaced := 0
-	if err := e.deleteWebSource(collectionID, path); err != nil {
-		log.Printf("web source cleanup failed for %s: %v", path, err)
+	// Already indexed with the same content? Nothing to embed. The page was
+	// just verified though, so its fetched_at is refreshed: otherwise a
+	// re-verified page would be flagged as stale.
+	if stored := e.storedSourceSHA(collectionID, path); stored != "" && stored == sha {
+		if err := e.touchWebSource(collectionID, path, doc); err != nil {
+			log.Printf("web ingest: touch %s failed: %v", path, err)
+		}
+		log.Printf("web ingest: '%s' is unchanged, skipping embedding", doc.CanonicalURL)
+		return &WebIngestResult{Collection: collectionID, ChunksIndexed: 0, Unchanged: true}, nil
 	}
 
 	metadata := e.webMetadata(doc)
-	res, used, err := e.indexTextInternal(text, collectionID, metadata, doc.URL, path, nil, nil)
+	// replaceSource: the previous version of this URL is dropped inside the
+	// index, after the embedding succeeded and the gates passed.
+	res, used, err := e.indexTextInternal(text, collectionID, metadata, doc.URL, path, nil, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +138,33 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 	return &WebIngestResult{
 		Collection:    collectionID,
 		ChunksIndexed: res.ChunksIndexed,
-		Replaced:      replaced,
+		Replaced:      res.Replaced,
 	}, nil
+}
+
+// storedSourceSHA returns the content hash the collection recorded for one
+// source file, or "" when the source is unknown. It is what makes a repeated
+// search of the same article free.
+func (e *Engine) storedSourceSHA(collectionID, sourceFile string) string {
+	store := e.storeFor(collectionID)
+	fs, ok := store.(*FileStore)
+	if !ok {
+		return ""
+	}
+	return fs.SourceSHA(collectionID, sourceFile)
+}
+
+// touchWebSource refreshes the metadata of a stored page whose content did
+// not change: the vectors stay, but the page was just seen again.
+func (e *Engine) touchWebSource(collectionID, sourceFile string, doc WebDocument) error {
+	store := e.storeFor(collectionID)
+	fs, ok := store.(*FileStore)
+	if !ok {
+		return nil
+	}
+	md := e.webMetadata(doc)
+	fields := map[string]string{"fetched_at": md["fetched_at"]}
+	return fs.TouchSource(collectionID, sourceFile, fields)
 }
 
 // webMetadata builds the metadata map attached to every chunk of a web page.

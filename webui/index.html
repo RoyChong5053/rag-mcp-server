@@ -978,11 +978,23 @@ async function loadJobs() {
   if (!jobs.length) { box.innerHTML = '<small style="color:#666">no jobs yet</small>'; return; }
   box.innerHTML = '';
   for (const j of jobs.slice(0, 15)) {
-    const pct = j.total_chunks ? Math.round(j.done_chunks / j.total_chunks * 100) : (j.state === 'done' ? 100 : 0);
     const d = document.createElement('div');
     d.className = 'job ' + (j.state === 'done' ? 'done' : j.state === 'error' ? 'error' : '');
+    if (j.kind === 'web') {
+      // A web filing: the pages of one search, landing one by one.
+      const pct = j.pages_total ? Math.round(j.pages_done / j.pages_total * 100) : (j.state === 'done' ? 100 : 0);
+      d.innerHTML = '<b>' + esc(j.id) + '</b> <span class="badge b-on">web</span> ' + esc(j.state) + ' <small>' + esc(j.stage) + '</small><br>' +
+        esc(j.label || '(web search)') + ' → ' + esc(j.collection || 'web_cache') +
+        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '<small>' + (j.pages_done || 0) + '/' + (j.pages_total || '…') + ' pages' +
+        (j.chunks ? ' · ' + j.chunks + ' chunks' : '') +
+        (j.error ? '<br>ERR: ' + esc(j.error) : '') + '</small>';
+      box.appendChild(d);
+      continue;
+    }
+    const pct = j.total_chunks ? Math.round(j.done_chunks / j.total_chunks * 100) : (j.state === 'done' ? 100 : 0);
     d.innerHTML = '<b>' + esc(j.id) + '</b> ' + esc(j.state) + ' <small>' + esc(j.stage) + '</small><br>' +
-      esc(j.collection) + (j.backend ? ' <span class="badge ' + (j.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(j.backend) + '</span>' : '') + (j.rebuild ? ' (rebuild)' : '') + '<br><small>' + esc(j.file.split('/').pop()) + '</small>' +
+      esc(j.collection) + (j.backend ? ' <span class="badge ' + (j.backend === 'vectra' ? 'b-vec' : 'b-on') + '">' + esc(j.backend) + '</span>' : '') + (j.rebuild ? ' (rebuild)' : '') + '<br><small>' + esc((j.file || '').split('/').pop()) + '</small>' +
       '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
       '<small>' + j.done_chunks + '/' + (j.total_chunks || '…') + ' chunks' + (j.chunks ? ' · ' + j.chunks + ' indexed' : '') + (j.error ? '<br>ERR: ' + esc(j.error) : '') + '</small>';
     box.appendChild(d);

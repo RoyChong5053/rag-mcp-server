@@ -163,30 +163,32 @@ func main() {
 
 	// Create engine
 	engineConfig := &engine.EngineConfig{
-		VectraDir:       vectraDir,
-		Backend:         cfg.Storage.Backend,
-		DocsDir:         cfg.DocsDir,
-		MemoryDir:       memoryDir,
-		OneAPIBaseURL:   cfg.OneAPI.BaseURL,
-		OneAPIBackupURL: cfg.OneAPI.BackupURL,
-		EmbedModel:      cfg.OneAPI.EmbedModel,
-		EmbedProvider:   cfg.OneAPI.ProviderName,
-		VectorDim:       cfg.OneAPI.VectorDim,
-		VectorDistance:  cfg.OneAPI.VectorDistance,
-		RerankModel:     cfg.OneAPI.RerankModel,
-		APIKey:          cfg.OneAPI.APIKey,
-		EmbedTimeout:    time.Duration(cfg.OneAPI.EmbedTimeoutSeconds) * time.Second,
-		RerankTimeout:   time.Duration(cfg.OneAPI.RerankTimeoutSeconds) * time.Second,
-		SearchBudget:    time.Duration(cfg.OneAPI.SearchBudgetSeconds) * time.Second,
-		ChunkSize:       cfg.Chunking.ChunkSize,
-		OverlapPercent:  cfg.Chunking.OverlapPercent,
-		ChunkStrategy:   cfg.Chunking.Strategy,
-		RerankEnabled:   cfg.Rerank.Enabled,
-		RerankRecall:    cfg.Rerank.Recall,
-		QueryMaxChars:   cfg.Rerank.QueryMaxChars,
-		DocMaxChars:     cfg.Rerank.DocMaxChars,
-		RegistryPath:    cfg.RegistryPath,
-		HistoryPath:     filepath.Join(cfgDir, "logs", "index_history.jsonl"),
+		VectraDir:        vectraDir,
+		Backend:          cfg.Storage.Backend,
+		DocsDir:          cfg.DocsDir,
+		MemoryDir:        memoryDir,
+		OneAPIBaseURL:    cfg.OneAPI.BaseURL,
+		OneAPIBackupURL:  cfg.OneAPI.BackupURL,
+		EmbedModel:       cfg.OneAPI.EmbedModel,
+		EmbedProvider:    cfg.OneAPI.ProviderName,
+		VectorDim:        cfg.OneAPI.VectorDim,
+		VectorDistance:   cfg.OneAPI.VectorDistance,
+		RerankModel:      cfg.OneAPI.RerankModel,
+		APIKey:           cfg.OneAPI.APIKey,
+		EmbedTimeout:     time.Duration(cfg.OneAPI.EmbedTimeoutSeconds) * time.Second,
+		BulkEmbedTimeout: time.Duration(cfg.OneAPI.BulkEmbedTimeoutSeconds) * time.Second,
+		RerankTimeout:    time.Duration(cfg.OneAPI.RerankTimeoutSeconds) * time.Second,
+		SearchBudget:     time.Duration(cfg.OneAPI.SearchBudgetSeconds) * time.Second,
+		BulkConcurrency:  cfg.OneAPI.BulkConcurrency,
+		ChunkSize:        cfg.Chunking.ChunkSize,
+		OverlapPercent:   cfg.Chunking.OverlapPercent,
+		ChunkStrategy:    cfg.Chunking.Strategy,
+		RerankEnabled:    cfg.Rerank.Enabled,
+		RerankRecall:     cfg.Rerank.Recall,
+		QueryMaxChars:    cfg.Rerank.QueryMaxChars,
+		DocMaxChars:      cfg.Rerank.DocMaxChars,
+		RegistryPath:     cfg.RegistryPath,
+		HistoryPath:      filepath.Join(cfgDir, "logs", "index_history.jsonl"),
 	}
 
 	eng, err := engine.NewEngine(engineConfig, settingsStore)
@@ -250,6 +252,11 @@ func main() {
 			Lang:            cfg.Search.Lang,
 			Tags:            cfg.Search.Tags,
 		})
+		// The pages a search found are filed in the background. The job
+		// registry is what makes that visible: the dashboard's Jobs panel
+		// shows the filing as it runs, instead of the operator guessing from
+		// the CPU load.
+		webSvc.WithJobs(jobsMgr)
 		webSvc.Register(mcpServer)
 		log.Printf("Web search: collection=%s providers=[%s]", cfg.Search.Collection, strings.Join(webSvc.Providers(), ", "))
 	} else {

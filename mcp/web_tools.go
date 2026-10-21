@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
+	"github.com/RoyChong5053/rag-mcp-server/jobs"
 	"github.com/RoyChong5053/rag-mcp-server/search"
 )
 
@@ -42,10 +44,23 @@ type WebOptions struct {
 // The design rule is that the agent never has to know which provider is
 // configured: it calls web_search, and the server picks a provider (the
 // one the operator made the default, or the failover chain).
+//
+// The filing of what was found is NOT part of the answer. A search that
+// returns ten pages used to spend an hour vectorizing them before the tool
+// replied, which meant the caller's timeout expired long before the result
+// arrived and the fresh material was lost even though the server had it.
+// Now the search answers with the provider's hits, and the pages are filed in
+// the background, one worker at a time, while the user keeps talking.
 type WebService struct {
 	eng   *engine.Engine
 	chain *search.Chain
 	opts  WebOptions
+	jobs  *jobs.Manager
+
+	// inflight holds the canonical URLs that are being filed right now, so a
+	// repeated search does not queue the same page twice.
+	mu       sync.Mutex
+	inflight map[string]bool
 }
 
 // NewWebService builds the service.
@@ -62,7 +77,14 @@ func NewWebService(eng *engine.Engine, chain *search.Chain, opts WebOptions) *We
 	if opts.Timeout <= 0 {
 		opts.Timeout = 45 * time.Second
 	}
-	return &WebService{eng: eng, chain: chain, opts: opts}
+	return &WebService{eng: eng, chain: chain, opts: opts, inflight: map[string]bool{}}
+}
+
+// WithJobs wires the background job registry, so the pages a search found
+// show up in the dashboard's Jobs panel while they are being filed.
+func (s *WebService) WithJobs(mgr *jobs.Manager) *WebService {
+	s.jobs = mgr
+	return s
 }
 
 // Providers lists the configured provider chain in order.
@@ -79,9 +101,10 @@ func (s *WebService) Register(server *Server) {
 		Name: "web_search",
 		Description: "Search the live web and return what the search provider found. " +
 			"This always queries the live web: it never answers from stored material, so the results are current. " +
-			"The pages it finds are also vectorized into the web collection, so later turns can recall them with search_memory instead of searching again. " +
+			"The pages it finds are also vectorized into the web collection in the BACKGROUND, so later turns can recall them with search_memory instead of searching again. " +
 			"Every hit carries its publication date (or 'unknown'), because a reader has to be able to tell yesterday's news from today's. " +
-			"Returns a ranked list with title, url, publication date and snippet; use fetch_url for the full text of one page.",
+			"Returns a ranked list with title, url, publication date and snippet; use fetch_url for the full text of one page. " +
+			"The call returns as soon as the provider answered: the filing continues afterwards, so a later recall may still be incomplete for a while.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -240,10 +263,15 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		return fmt.Sprintf("No live web results for %q (provider: %s).", query, orDefault(usedProvider, "none")), nil
 	}
 
-	// File what was found so the next turn can recall it.
-	var pages, chunks, skipped int
+	// File what was found so the next turn can recall it. The filing happens
+	// in the background: the caller gets the hits now, and the library fills
+	// up while the conversation continues. A search that vectorizes before it
+	// answers used to outlast every caller timeout, and the fresh material
+	// was lost even though the server had it.
+	var jobID string
+	var queued int
 	if store {
-		pages, chunks, skipped = s.ingestResults(ctx, collection, results, ingest)
+		jobID, queued = s.startFiling(query, collection, results, ingest)
 	}
 
 	var b strings.Builder
@@ -282,8 +310,16 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		b.WriteString("\n")
 	}
 	if store {
-		fmt.Fprintf(&b, "Stored: %d page(s) (%d chunks) vectorized into '%s'%s.\n", pages, chunks, collection, ingestNote(skipped))
-		b.WriteString("These pages are now recallable with search_memory. Use web_search again when you need newer information than the dates above.")
+		switch {
+		case queued == 0:
+			b.WriteString("Nothing to file: every result is already being filed by another search.")
+		case jobID != "":
+			fmt.Fprintf(&b, "Filing %d page(s) into '%s' in the background (job %s).\n", queued, collection, jobID)
+			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context. Do not search the same material again while the filing is running.")
+		default:
+			fmt.Fprintf(&b, "Filing %d page(s) into '%s' in the background.\n", queued, collection)
+			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context.")
+		}
 	} else {
 		b.WriteString("Not stored (store=false): these pages were not vectorized, so they cannot be recalled later.")
 	}
@@ -310,36 +346,117 @@ func (s *WebService) resolveProvider(explicit string) string {
 	return ""
 }
 
-// ingestNote describes pages that could not be filed, if any. The reason is
-// not always the fetch: a page that could be fetched but failed to embed is
-// also skipped, so the wording stays deliberately vague.
-func ingestNote(skipped int) string {
-	if skipped <= 0 {
-		return ""
-	}
-	return fmt.Sprintf(", %d could not be stored", skipped)
-}
-
-// ingestResults fetches and stores the results. ingest == 0 means every
-// result: whatever was searched goes into the collection. It returns how many
-// pages were stored, how many chunks they produced, and how many could not be
-// fetched. Pages and chunks are counted apart on purpose: a page is a web
-// document, a chunk is a slice of it, and "65 pages" would be a lie.
-func (s *WebService) ingestResults(ctx context.Context, collection string, results []search.Result, ingest int) (pages, chunks, skipped int) {
+// startFiling queues the results of a search for background filing and
+// returns the job id (empty when no job registry is wired) and how many
+// pages were queued.
+//
+// Pages that are already being filed are dropped: the same article found by
+// two searches does not need to be embedded twice.
+func (s *WebService) startFiling(query, collection string, results []search.Result, ingest int) (string, int) {
 	if ingest <= 0 {
 		ingest = len(results)
 	}
 	if ingest > len(results) {
 		ingest = len(results)
 	}
+	pending := make([]search.Result, 0, ingest)
+	keys := make([]string, 0, ingest)
+	s.mu.Lock()
 	for i := 0; i < ingest; i++ {
-		r := results[i]
+		key := filingKey(results[i].URL)
+		if key == "" || s.inflight[key] {
+			continue
+		}
+		s.inflight[key] = true
+		pending = append(pending, results[i])
+		keys = append(keys, key)
+	}
+	s.mu.Unlock()
+	if len(pending) == 0 {
+		return "", 0
+	}
+
+	label := query
+	run := func(prog func(jobs.WebProgress)) (any, error) {
+		defer s.releaseKeys(keys)
+		return s.fileResults(collection, pending, prog)
+	}
+	return s.submitFiling(label, collection, run), len(pending)
+}
+
+// startFilingDoc queues one already-fetched page for background filing.
+func (s *WebService) startFilingDoc(label, collection string, doc engine.WebDocument) (string, int) {
+	key := filingKey(doc.URL)
+	s.mu.Lock()
+	if key != "" && s.inflight[key] {
+		s.mu.Unlock()
+		return "", 0
+	}
+	if key != "" {
+		s.inflight[key] = true
+	}
+	s.mu.Unlock()
+
+	run := func(prog func(jobs.WebProgress)) (any, error) {
+		defer s.releaseKeys([]string{key})
+		return s.fileDoc(collection, doc, prog)
+	}
+	return s.submitFiling(label, collection, run), 1
+}
+
+// submitFiling hands the work to the job registry (so the dashboard shows
+// it) or, without a registry, to a plain goroutine. Either way the caller
+// does not wait.
+func (s *WebService) submitFiling(label, collection string, run func(prog func(jobs.WebProgress)) (any, error)) string {
+	if s.jobs != nil {
+		job := s.jobs.SubmitWeb(label, collection, run)
+		return job.ID
+	}
+	go func() {
+		if _, err := run(func(jobs.WebProgress) {}); err != nil {
+			log.Printf("web filing failed: %v", err)
+		}
+	}()
+	return ""
+}
+
+// releaseKeys frees the in-flight marks of a finished filing.
+func (s *WebService) releaseKeys(keys []string) {
+	s.mu.Lock()
+	for _, k := range keys {
+		if k != "" {
+			delete(s.inflight, k)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// filingKey is the identity of a page for the in-flight check.
+func filingKey(rawURL string) string {
+	if k := search.CanonicalizeURL(rawURL); k != "" {
+		return k
+	}
+	return strings.TrimSpace(rawURL)
+}
+
+// fileResults fetches (when the provider gave only a snippet), chunks and
+// embeds the pages, in rank order: the most relevant material lands first,
+// so an early recall already finds the good stuff.
+func (s *WebService) fileResults(collection string, results []search.Result, prog func(jobs.WebProgress)) (any, error) {
+	pages, chunks, skipped, unchanged := 0, 0, 0, 0
+	for i, r := range results {
 		content := r.Content
 		if strings.TrimSpace(content) == "" {
+			// The provider returned a snippet only: fetch the page itself.
+			// The fetch runs on its own context: the caller's request is
+			// long gone and its deadline must not kill the filing.
+			ctx, cancel := context.WithTimeout(context.Background(), s.opts.Timeout)
 			page, err := s.chain.Fetch(ctx, r.URL)
+			cancel()
 			if err != nil {
-				log.Printf("web_search: fetch %s failed: %v", r.URL, err)
+				log.Printf("web filing: fetch %s failed: %v", r.URL, err)
 				skipped++
+				prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
 				continue
 			}
 			content = page.Content
@@ -349,6 +466,7 @@ func (s *WebService) ingestResults(ctx context.Context, collection string, resul
 		}
 		if strings.TrimSpace(content) == "" {
 			skipped++
+			prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
 			continue
 		}
 		doc := engine.WebDocument{
@@ -368,14 +486,32 @@ func (s *WebService) ingestResults(ctx context.Context, collection string, resul
 			MaxChars: s.opts.MaxContentChars,
 		})
 		if err != nil {
-			log.Printf("web_search: ingest %s failed: %v", r.URL, err)
+			log.Printf("web filing: ingest %s failed: %v", r.URL, err)
 			skipped++
+			prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
 			continue
 		}
 		pages++
+		if res.Unchanged {
+			unchanged++
+		}
 		chunks += res.ChunksIndexed
+		prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
 	}
-	return pages, chunks, skipped
+	log.Printf("web filing done: %d page(s), %d chunk(s), %d unchanged, %d skipped", pages, chunks, unchanged, skipped)
+	return map[string]any{"pages": pages, "chunks": chunks, "unchanged": unchanged, "skipped": skipped}, nil
+}
+
+// fileDoc files one already-fetched page.
+func (s *WebService) fileDoc(collection string, doc engine.WebDocument, prog func(jobs.WebProgress)) (any, error) {
+	res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{
+		MaxChars: s.opts.MaxContentChars,
+	})
+	if err != nil {
+		return nil, err
+	}
+	prog(jobs.WebProgress{PagesDone: 1, PagesTotal: 1, Chunks: res.ChunksIndexed})
+	return map[string]any{"pages": 1, "chunks": res.ChunksIndexed, "unchanged": res.Unchanged}, nil
 }
 
 // handleFetchURL is the fetch_url tool handler.
@@ -411,14 +547,13 @@ func (s *WebService) handleFetchURL(args map[string]any) (any, error) {
 			Provider:     "fetch",
 			Tags:         s.opts.Tags,
 		}
-		res, err := s.eng.IngestWebDocument(s.opts.Collection, doc, engine.WebIngestOptions{
-			MaxChars: s.opts.MaxContentChars,
-		})
-		if err != nil {
-			log.Printf("fetch_url: ingest failed: %v", err)
-		} else {
-			return fmt.Sprintf("%s\n\n[stored in '%s': %d chunks]\n\n%s", page.Title, s.opts.Collection, res.ChunksIndexed, content), nil
+		// The vectorization happens in the background: the caller asked for
+		// the page, not for a wait. The text is returned right away.
+		jobID, _ := s.startFilingDoc(page.Title, s.opts.Collection, doc)
+		if jobID != "" {
+			return fmt.Sprintf("%s\n\n[filing in '%s' in the background (job %s)]\n\n%s", page.Title, s.opts.Collection, jobID, content), nil
 		}
+		return fmt.Sprintf("%s\n\n[filing in '%s' in the background]\n\n%s", page.Title, s.opts.Collection, content), nil
 	}
 	return fmt.Sprintf("%s\n\n%s", page.Title, content), nil
 }

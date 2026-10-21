@@ -46,6 +46,15 @@ oneapi:
   provider_name: "one-api"
   vector_dim: 1024
   vector_distance: "Cosine"
+  # embed_timeout_seconds is the INTERACTIVE budget (a recall has a user
+  # waiting); bulk_embed_timeout_seconds is the BACKGROUND budget (index jobs,
+  # web ingests), which sits above one-api's channel-failover window so a slow
+  # channel is survived instead of aborting a document. 0 = 180.
+  embed_timeout_seconds: 180
+  bulk_embed_timeout_seconds: 180
+  # How many background embedding requests may be in flight at once. The
+  # interactive query path has its own slot. 0 = 2.
+  bulk_concurrency: 2
 
 chunking:
   chunk_size: 500

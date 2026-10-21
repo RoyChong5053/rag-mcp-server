@@ -42,11 +42,11 @@ func TestEmbeddingLimiterSerializes(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	go func() { c.acquire(); close(entered); <-release; c.release() }()
+	go func() { c.acquire(classBulk); close(entered); <-release; c.release(classBulk) }()
 	<-entered
 
 	second := make(chan struct{})
-	go func() { c.acquire(); close(second); c.release() }()
+	go func() { c.acquire(classBulk); close(second); c.release(classBulk) }()
 
 	select {
 	case <-second:
@@ -59,5 +59,25 @@ func TestEmbeddingLimiterSerializes(t *testing.T) {
 	case <-second:
 	case <-time.After(time.Second):
 		t.Fatal("second acquire did not proceed after release")
+	}
+}
+
+// A query embed has its own slot: a background job holding every bulk slot
+// must not delay it. Before the split, a recall could wait minutes behind a
+// batch queue.
+func TestQueryEmbedDoesNotWaitForBulk(t *testing.T) {
+	c := NewEmbeddingClient("http://127.0.0.1:0", "", "m", "")
+	c.SetConcurrencyProvider(func() int { return 1 })
+
+	// Fill the single bulk slot.
+	c.acquire(classBulk)
+	defer c.release(classBulk)
+
+	done := make(chan struct{})
+	go func() { c.acquire(classQuery); close(done); c.release(classQuery) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("query acquire blocked behind a bulk slot")
 	}
 }

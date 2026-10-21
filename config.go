@@ -87,8 +87,18 @@ type OneAPIConfig struct {
 	// channel-failover window (RELAY_TIMEOUT x retries): if rag-mcp cancels
 	// mid-flight, one-api treats it as a client abort, stops failing over and
 	// never penalizes the bad channel. 0 = default 180.
-	EmbedTimeoutSeconds  int `yaml:"embed_timeout_seconds"`
-	RerankTimeoutSeconds int `yaml:"rerank_timeout_seconds"`
+	//
+	// EmbedTimeoutSeconds is the INTERACTIVE budget: a recall has a user
+	// waiting, so it stays short. BulkEmbedTimeoutSeconds is the background
+	// budget for index jobs and web ingests, where nobody waits and a slow
+	// channel should be survived rather than abort a whole document.
+	EmbedTimeoutSeconds     int `yaml:"embed_timeout_seconds"`
+	BulkEmbedTimeoutSeconds int `yaml:"bulk_embed_timeout_seconds"`
+	RerankTimeoutSeconds    int `yaml:"rerank_timeout_seconds"`
+	// BulkConcurrency is how many BACKGROUND embedding requests may be in
+	// flight at once. The interactive query path has its own slot, so
+	// one-api sees at most this + 1 concurrent requests. 0 = default 2.
+	BulkConcurrency int `yaml:"bulk_concurrency"`
 	// SearchBudgetSeconds bounds one whole search (embed + stores + rerank)
 	// so the server answers before the caller's outer fail-safe (TavernLab
 	// mcp_timeout 180s). Checked only at stage boundaries; an in-flight HTTP
@@ -213,16 +223,18 @@ func DefaultConfig() *Config {
 			VectraDir: "Vectra",
 		},
 		OneAPI: OneAPIConfig{
-			BaseURL:              "http://192.168.100.20:3000",
-			BackupURL:            "http://192.168.10.2:3000",
-			EmbedModel:           "embedding",
-			RerankModel:          "reranker",
-			ProviderName:         "one-api",
-			VectorDim:            1024,
-			VectorDistance:       "Cosine",
-			EmbedTimeoutSeconds:  180,
-			RerankTimeoutSeconds: 180,
-			SearchBudgetSeconds:  170,
+			BaseURL:                 "http://192.168.100.20:3000",
+			BackupURL:               "http://192.168.10.2:3000",
+			EmbedModel:              "embedding",
+			RerankModel:             "reranker",
+			ProviderName:            "one-api",
+			VectorDim:               1024,
+			VectorDistance:          "Cosine",
+			EmbedTimeoutSeconds:     180,
+			BulkEmbedTimeoutSeconds: 180,
+			RerankTimeoutSeconds:    180,
+			SearchBudgetSeconds:     170,
+			BulkConcurrency:         2,
 		},
 		Chunking: ChunkingConfig{
 			ChunkSize:      500,
