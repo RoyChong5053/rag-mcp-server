@@ -88,7 +88,7 @@ func main() {
 		case "serve":
 			os.Args = append(os.Args[:1], os.Args[2:]...)
 		case "index-verify", "index-prune", "index-import", "verify-deep",
-			"docs-migrate", "docs-verify", "docs-search":
+			"docs-migrate", "docs-verify", "docs-repair", "docs-search":
 			runMaintenance(os.Args[1], os.Args[2:])
 			return
 		default:

@@ -1070,6 +1070,36 @@ func (f *FileStore) DeleteCollection(name string) error {
 	return nil
 }
 
+// SourceInfo is one source file of a collection: where it was indexed from
+// and what it looked like.
+type SourceInfo struct {
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	SHA256    string `json:"sha256,omitempty"`
+	Chunks    int    `json:"chunks"`
+	IndexedAt string `json:"indexed_at,omitempty"`
+}
+
+// ListSources returns the source files of a collection.
+func (f *FileStore) ListSources(collection string) ([]SourceInfo, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	cat, err := f.loadCatalog(collection)
+	if err != nil {
+		return nil, err
+	}
+	if cat == nil {
+		return nil, fmt.Errorf("collection '%s' not found", collection)
+	}
+	out := make([]SourceInfo, 0, len(cat.Sources))
+	for name, m := range cat.Sources {
+		out = append(out, SourceInfo{
+			Name: name, Key: m.Key, SHA256: m.SHA256, Chunks: m.Chunks, IndexedAt: m.IndexedAt,
+		})
+	}
+	return out, nil
+}
+
 // RenameSource moves a source reference inside a collection: the catalog
 // key, the index folder and the source_file/source_rel of every chunk that
 // came from it.
