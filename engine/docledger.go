@@ -57,7 +57,11 @@ type docLedger struct {
 	// byRaw indexes the hash of the text as it was handed over. An index
 	// built from a file records that one, so the repair needs it to find
 	// the document again.
-	byRaw   map[string]DocEntry
+	byRaw map[string]DocEntry
+	// byID indexes the short id of a document. The id is the first bytes of
+	// the body hash and it is part of the file name, so a path that points
+	// at a document that has been renamed can still be resolved.
+	byID    map[string]DocEntry
 	ordered []DocEntry
 }
 
@@ -76,6 +80,7 @@ func newDocLedger(root string, windowDays int) (*docLedger, error) {
 		window: time.Duration(windowDays) * 24 * time.Hour,
 		bySHA:  map[string]DocEntry{},
 		byRaw:  map[string]DocEntry{},
+		byID:   map[string]DocEntry{},
 	}
 	l.load()
 	return l, nil
@@ -103,6 +108,9 @@ func (l *docLedger) Append(entry DocEntry) {
 	if entry.RawSHA256 != "" {
 		l.byRaw[entry.RawSHA256] = entry
 	}
+	if entry.ID != "" {
+		l.byID[entry.ID] = entry
+	}
 	l.ordered = append(l.ordered, entry)
 	l.trimLocked()
 }
@@ -118,12 +126,16 @@ func (l *docLedger) trimLocked() {
 	l.ordered = append(l.ordered[:0], l.ordered[drop:]...)
 	l.bySHA = make(map[string]DocEntry, len(l.ordered))
 	l.byRaw = make(map[string]DocEntry, len(l.ordered))
+	l.byID = make(map[string]DocEntry, len(l.ordered))
 	for _, en := range l.ordered {
 		if en.SHA256 != "" {
 			l.bySHA[en.SHA256] = en
 		}
 		if en.RawSHA256 != "" {
 			l.byRaw[en.RawSHA256] = en
+		}
+		if en.ID != "" {
+			l.byID[en.ID] = en
 		}
 	}
 }
@@ -151,6 +163,18 @@ func (l *docLedger) LookupRaw(sha string) (DocEntry, bool) {
 	return e, ok
 }
 
+// LookupID finds a document by its short id (the first bytes of the body
+// hash, and part of its file name).
+func (l *docLedger) LookupID(id string) (DocEntry, bool) {
+	if l == nil || id == "" {
+		return DocEntry{}, false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	e, ok := l.byID[id]
+	return e, ok
+}
+
 // Entries returns the known documents, newest first.
 func (l *docLedger) Entries() []DocEntry {
 	if l == nil {
@@ -175,6 +199,7 @@ func (l *docLedger) reload() error {
 	defer l.mu.Unlock()
 	l.bySHA = map[string]DocEntry{}
 	l.byRaw = map[string]DocEntry{}
+	l.byID = map[string]DocEntry{}
 	l.ordered = nil
 	l.loadLocked()
 	return nil
@@ -257,6 +282,9 @@ func (l *docLedger) loadFile(path string, cutoff time.Time) {
 		l.bySHA[entry.SHA256] = entry
 		if entry.RawSHA256 != "" {
 			l.byRaw[entry.RawSHA256] = entry
+		}
+		if entry.ID != "" {
+			l.byID[entry.ID] = entry
 		}
 		l.ordered = append(l.ordered, entry)
 	}

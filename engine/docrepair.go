@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -27,6 +28,20 @@ type RepairReport struct {
 	ChunksRepointed int      `json:"chunks_repointed"`
 	Unresolved      []string `json:"unresolved,omitempty"`
 	Errors          []string `json:"errors,omitempty"`
+}
+
+// vaultDocIDRe matches the short id in a vault file name:
+// <HHMMSS>-<sha8>-<slug>.<ext>
+var vaultDocIDRe = regexp.MustCompile(`\d{6}-([0-9a-f]{8})-`)
+
+// vaultDocID extracts the short id from a path inside the vault.
+func vaultDocID(path string) string {
+	base := filepath.Base(filepath.FromSlash(path))
+	m := vaultDocIDRe.FindStringSubmatch(base)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
 }
 
 // sourceFileExists reports whether the file a collection was indexed from is
@@ -89,19 +104,23 @@ func (e *Engine) RepairSources() (*RepairReport, error) {
 				continue // the file is still where the index says
 			}
 			rep.Missing++
-			if s.SHA256 == "" {
-				rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no hash)")
-				continue
-			}
 			// The index recorded the hash of the text it indexed: the
 			// trimmed body for text, the raw bytes for a file. The vault
-			// knows both.
+			// knows both. When the index has no hash at all, the id in the
+			// file name is the last way to find the document.
 			entry, ok := e.ledger.Lookup(s.SHA256)
 			if !ok || entry.Path == "" {
 				entry, ok = e.ledger.LookupRaw(s.SHA256)
 			}
 			if !ok || entry.Path == "" {
-				rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no document with that hash)")
+				entry, ok = e.ledger.LookupID(vaultDocID(s.Name))
+			}
+			if !ok || entry.Path == "" {
+				if s.SHA256 == "" {
+					rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no hash)")
+				} else {
+					rep.Unresolved = append(rep.Unresolved, c.Name+": "+s.Name+" (no document with that hash)")
+				}
 				continue
 			}
 			moves[s.Name] = filepath.Join(e.documentsDir(), filepath.FromSlash(entry.Path))
