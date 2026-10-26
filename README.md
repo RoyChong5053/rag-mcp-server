@@ -306,16 +306,20 @@ search_memory(query)→  recall what was searched before, with its dates
   credits — the provider has already fetched (and billed for) the full pages
   by the time the results come back; it only shortens the embedding work and
   throws material away.
-- **Providers** are tried in order (`search.providers`); the first one that
-  answers wins, so a dead or rate-limited provider fails over to the next:
+- **Providers** are tried in order (`search.providers`) **only when the
+  default provider is empty** ("failover chain"): the first one that answers
+  wins, so a dead or rate-limited provider fails over to the next:
   `deepseek` (search + fetch in one request, with publication date and a
   source-authority tier), `tavily` (page-level chunks), `firecrawl` (anti-bot
   scraping, news results), `searxng` (self-hosted, free, no key).
-- **One default provider, set in the dashboard.** The *Search Defaults* panel
-  has a "web search provider" dropdown; `web_search` uses it when the caller
-  names no provider. A frontend that only wants "search the web" — a slash
-  command, a button — then does not have to carry provider names around.
-  Changing it takes effect immediately, no restart.
+- **One default provider, set in the dashboard, and it is authoritative.**
+  The *Search Defaults* panel has a "web search provider" dropdown;
+  `web_search` uses it when the caller names no provider. If that provider is
+  not configured, the call fails with an error naming it — it never switches
+  to another backend behind the caller's back, because then the answer would
+  look like it came from a provider that never ran. Select *(failover chain)*
+  in the dropdown to opt into the ordered fallback explicitly. Changing the
+  setting takes effect immediately, no restart.
 - **API keys** come from environment variables (`api_key_env`), never from
   the tracked config file.
 
@@ -331,6 +335,44 @@ search:
     base_url: "https://api.deepseek.com"
     api_key_env: "DEEPSEEK_API_KEY"
 ```
+
+### Self-hosting SearXNG
+
+SearXNG is the free, key-less member of the chain. Two settings decide whether
+it works at all: its `json` output format (off by default) and its bind
+address. Deploy it as a container next to the server, on loopback only —
+`web_search` runs on the same host, so nothing else needs to reach it:
+
+```yaml
+# docker-compose.yml (pin the image to the commit you read the docs for)
+services:
+  core:
+    image: docker.io/searxng/searxng:2026.10.25-54ca1d9cf
+    restart: unless-stopped
+    ports: ["127.0.0.1:8899:8899"]
+    env_file: ./.env          # SEARXNG_PORT=8899, SEARXNG_SECRET=<random>
+    volumes: ["./core-config/:/etc/searxng/:rw"]
+```
+
+```yaml
+# core-config/settings.yml
+use_default_settings: true
+search:
+  formats: [html, json]       # without json the API returns an HTML page
+server:
+  limiter: false              # private instance; no valkey needed
+  method: "GET"               # the Go client uses GET
+engines:
+  - name: bing
+    disabled: false           # disabled by default in recent releases
+```
+
+Then point `search.searxng.base_url` at it (`http://127.0.0.1:8899`) and
+restart the server. Engine availability depends on the host's egress IP: the
+`unresponsive_engines` list in the JSON response is logged, and `/stats` in
+SearXNG's own UI shows per-engine reliability. Preferences set in that UI are
+cookie-scoped and do **not** affect API calls — an engine has to be enabled in
+`settings.yml` to be used by `web_search`.
 
 ## Management dashboard
 

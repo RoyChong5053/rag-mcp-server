@@ -141,5 +141,7 @@ search:
     api_key_env: "FIRECRAWL_API_KEY"
     country: "MY"
   searxng:
-    base_url: ""
+    # Self-hosted instance bound to loopback; json format must be enabled in
+    # its settings.yml.
+    base_url: "http://127.0.0.1:8899"
     categories: "general"

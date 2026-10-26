@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,8 +55,17 @@ type searxngResponse struct {
 		Category      string  `json:"category"`
 		PublishedDate string  `json:"publishedDate"`
 	} `json:"results"`
-	Answers      []string `json:"answers"`
-	Unresponsive []string `json:"unresponsive_engines"`
+	// Answers is a list of objects ({"answer": ..., "url": ...}), not plain
+	// strings. Declaring []string here broke the whole decode as soon as an
+	// answerer (calculator, time, unit conversion, ...) contributed one.
+	Answers []struct {
+		Answer string `json:"answer"`
+		URL    string `json:"url"`
+	} `json:"answers"`
+	// Unresponsive is a list of [engine, error] pairs and is non-empty
+	// whenever any upstream engine failed, which is routine. It must not
+	// break the decode of the results that did come back.
+	Unresponsive [][]string `json:"unresponsive_engines"`
 }
 
 // Search implements Provider.
@@ -94,6 +104,12 @@ func (p *SearXNGProvider) Search(ctx context.Context, q Query) ([]Result, error)
 	if err := getJSON(ctx, p.Client, endpoint, nil, &resp); err != nil {
 		return nil, errProvider(p.Name(), err)
 	}
+	// Engines fail all the time (captchas, rate limits, markup changes).
+	// Surface that for the operator without failing the call: the results
+	// below are still good.
+	if len(resp.Unresponsive) > 0 {
+		log.Printf("searxng: unresponsive engines: %v", resp.Unresponsive)
+	}
 	out := make([]Result, 0, len(resp.Results))
 	for i, r := range resp.Results {
 		link := strings.TrimSpace(r.URL)
@@ -115,6 +131,9 @@ func (p *SearXNGProvider) Search(ctx context.Context, q Query) ([]Result, error)
 			Score:       score,
 			Provider:    p.Name(),
 		})
+	}
+	if len(out) > count {
+		out = out[:count]
 	}
 	return out, nil
 }

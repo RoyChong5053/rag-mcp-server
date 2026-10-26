@@ -211,7 +211,10 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		lang = s.opts.Lang
 	}
 	domains := getStringSliceArg(args, "domains")
-	providerName := s.resolveProvider(strings.TrimSpace(getStringArg(args, "provider", "")))
+	providerName, err := s.resolveProvider(strings.TrimSpace(getStringArg(args, "provider", "")))
+	if err != nil {
+		return nil, err
+	}
 
 	collection := s.opts.Collection
 
@@ -327,23 +330,31 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 }
 
 // resolveProvider picks the provider for one call. An explicit argument
-// always wins and is validated by the caller; otherwise the operator's
-// default provider is used when it is reachable, and the failover chain
-// covers everything else. The default is a preference, never a requirement:
-// a provider without a key must not take the whole search down.
-func (s *WebService) resolveProvider(explicit string) string {
+// always wins and is validated by the caller. Otherwise the operator's
+// default provider is used, and only that one: when it is configured but
+// not reachable the call fails with an explanation instead of silently
+// falling through to another provider. A silent switch would make the
+// output look like a provider it never used, and the operator would have
+// no way to tell which backend actually answered.
+//
+// An empty default means "failover chain". That is an explicit choice in
+// the dashboard, not a fallback for a broken configuration.
+func (s *WebService) resolveProvider(explicit string) (string, error) {
 	if explicit != "" {
-		return explicit
+		return explicit, nil
 	}
 	def := strings.TrimSpace(s.eng.Settings().Get().DefaultSearchProvider)
 	if def == "" {
-		return ""
+		return "", nil
 	}
-	if p := s.chain.Get(def); p != nil && p.Available() {
-		return def
+	p := s.chain.Get(def)
+	if p == nil {
+		return "", fmt.Errorf("default web search provider %q is not in the configured chain (configured: %s)", def, strings.Join(s.Providers(), ", "))
 	}
-	log.Printf("web_search: default provider %q is not available, using the failover chain", def)
-	return ""
+	if !p.Available() {
+		return "", fmt.Errorf("default web search provider %q is not configured: set its base_url/API key in config.yaml, or pick another provider in the dashboard", def)
+	}
+	return def, nil
 }
 
 // startFiling queues the results of a search for background filing and

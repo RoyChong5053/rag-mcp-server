@@ -149,6 +149,7 @@ search:
     country: "MY"
   searxng:
     # Self-hosted instance; the json format must be enabled in its settings.yml.
-    base_url: ""
+    # The container is bound to loopback only (see deploy notes in README).
+    base_url: "http://127.0.0.1:8899"
     language: ""
     categories: "general"
