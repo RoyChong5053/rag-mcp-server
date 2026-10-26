@@ -44,7 +44,6 @@ func buildEngine(cfg *Config, cfgDir string) (*engine.Engine, error) {
 		DefaultSearchLang:          cfg.Search.Lang,
 		DefaultSearchStore:         cfg.Search.Store,
 		DefaultSearchIngest:        cfg.Search.IngestTopN,
-		DefaultSearchMaxChars:      cfg.Search.MaxContentChars,
 		DeepSeekMaxCount:           cfg.Search.DeepSeek.MaxCount,
 		TavilySearchDepth:          cfg.Search.Tavily.SearchDepth,
 		TavilyCountry:              cfg.Search.Tavily.Country,

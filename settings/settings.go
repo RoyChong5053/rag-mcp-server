@@ -83,8 +83,6 @@ type Settings struct {
 	// DefaultSearchIngest is how many of the returned results get filed.
 	// 0 = all of them.
 	DefaultSearchIngest int `json:"default_search_ingest"`
-	// DefaultSearchMaxChars caps how much of one page body is stored.
-	DefaultSearchMaxChars int `json:"default_search_max_chars"`
 
 	// DeepSeekMaxCount caps the result count requested from DeepSeek
 	// (the API allows 1-50).
@@ -145,7 +143,6 @@ type Patch struct {
 	DefaultSearchLang          *string   `json:"default_search_lang"`
 	DefaultSearchStore         *bool     `json:"default_search_store"`
 	DefaultSearchIngest        *int      `json:"default_search_ingest"`
-	DefaultSearchMaxChars      *int      `json:"default_search_max_chars"`
 	DeepSeekMaxCount           *int      `json:"deepseek_max_count"`
 	TavilySearchDepth          *string   `json:"tavily_search_depth"`
 	TavilyCountry              *string   `json:"tavily_country"`
@@ -281,9 +278,6 @@ func (s *Store) Update(p Patch) error {
 	}
 	if p.DefaultSearchIngest != nil {
 		s.data.DefaultSearchIngest = nonNegative(*p.DefaultSearchIngest)
-	}
-	if p.DefaultSearchMaxChars != nil {
-		s.data.DefaultSearchMaxChars = nonNegative(*p.DefaultSearchMaxChars)
 	}
 	if p.DeepSeekMaxCount != nil {
 		v := *p.DeepSeekMaxCount

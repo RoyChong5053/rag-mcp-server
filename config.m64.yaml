@@ -115,13 +115,14 @@ search:
     - firecrawl
     - searxng
   count: 10
-  # 0 = every result: whatever was searched goes into the collection.
+  # File every search into the collection as one dated document per call.
+  store: true
+  # 0 = every result goes into that document.
   ingest_top_n: 0
   # Default age limit on search results: 0 = no limit.
   freshness_days: 0
   # A recalled web page older than this is flagged as stale (still returned).
   stale_after_days: 7
-  max_content_chars: 20000
   timeout_seconds: 45
   topic: "general"
   lang: ""

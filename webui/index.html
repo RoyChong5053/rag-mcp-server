@@ -59,6 +59,11 @@ input[type=number] { width: 110px; }
 select { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; background: #222; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
 .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: end; min-width: 0; max-width: 100%; }
 .row > span, .row > label { min-width: 0; max-width: 100%; }
+.prov-block { border: 1px solid #2c333b; background: #101418; border-radius: 8px; padding: 8px 12px 10px; margin-top: 12px; }
+.prov-title { font-size: 13px; font-weight: 600; color: #9cc; }
+.prov-block .row { margin-top: 6px; }
+.panel.websearch { border-color: #3a5a3a; }
+.panel.websearch .panel-head h2 { color: #9c9; }
 #results div, #killed div, #preview-out div { border-left: 3px solid #468; margin: 8px 0; padding: 4px 8px; background: #181818; font-size: 13px; white-space: pre-wrap; }
 #killed div { border-color: #a80; }
 #audit { background: #000; color: #9d9; font: 12px monospace; padding: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }
@@ -163,12 +168,11 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
 <button onclick="withBusy(this, () => refreshHealth())" title="probe backends + one-api on demand (no automatic probing)">test</button>
 
 <div class="panel">
-  <div class="panel-head"><h2>Search Defaults</h2><span class="prov">served to every frontend · saved to settings.json (wins over config.yaml, which only seeds first run)</span></div>
+  <div class="panel-head"><h2>Retrieval &amp; Embedding Defaults</h2><span class="prov">served to every frontend · saved to settings.json (wins over config.yaml, which only seeds first run)</span></div>
   <div id="settings-panel">
   <div class="row">
     <span>backend <span class="badge b-vec">vectra</span> <small class="dim">single-backend server</small></span>
     <span>default collection <select id="s-col-qdrant"></select></span>
-
   </div>
   <div class="row">
     <span>top_k <input type="number" id="s-topk" min="1" max="100"></span>
@@ -182,34 +186,62 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <span>provider <select id="s-provider"><option value="">one-api (config)</option></select></span>
     <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>
+  <div id="s-status" class="prov"></div>
+  </div>
+</div>
+
+<div class="panel websearch">
+  <div class="panel-head"><h2>Web Search</h2><span class="prov">web_search uses exactly the selected provider · every call is filed as one dated document</span></div>
+
   <div class="row">
-    <span>web search provider <select id="s-wprovider"><option value="">(choose one)</option></select></span>
-    <span>web results <input type="number" id="s-wcount" min="1" max="50" title="How many results web_search asks for. 0 = 10"></span>
+    <span>provider <select id="s-wprovider"><option value="">(choose one)</option></select></span>
+    <span>results <input type="number" id="s-wcount" min="1" max="50" title="How many results web_search asks for. 0 = 10"></span>
     <span>freshness <input type="number" id="s-wfresh" min="0" title="Only results published in the last N days. 0 = no limit"></span>
     <span>topic <select id="s-wtopic"><option value="general">general</option><option value="news">news</option></select></span>
     <span>lang <input type="text" id="s-wlang" placeholder="e.g. en, zh-CN" size="8" title="ISO 639-1 language bias. Empty = provider default"></span>
     <label style="display:inline"><input type="checkbox" id="s-wstore"> store results</label>
-    <span>ingest <input type="number" id="s-wingest" min="0" title="How many of the results get filed. 0 = all of them"></span>
-    <span>max chars <input type="number" id="s-wmax" min="0" title="Cap on the body text stored per page. 0 = unlimited"></span>
+    <span>ingest <input type="number" id="s-wingest" min="0" title="How many results make it into the document. 0 = all of them"></span>
   </div>
   <div class="row">
-    <span class="dim">web_search calls this provider only. No failover: an empty or unavailable selection is an error.</span>
+    <span class="dim">No failover: web_search calls this provider only; an empty or unavailable selection is an error.</span>
   </div>
+
+  <div class="prov-block">
+    <div class="prov-title">DeepSeek</div>
+    <div class="row">
+      <span>max count <input type="number" id="s-ds-max" min="0" max="50" title="DeepSeek result cap (1-50). 0 = 50"></span>
+    </div>
+  </div>
+
+  <div class="prov-block">
+    <div class="prov-title">Tavily</div>
+    <div class="row">
+      <span>depth <select id="s-tv-depth"><option value="basic">basic (1 credit)</option><option value="advanced">advanced (2 credits)</option><option value="fast">fast</option></select></span>
+      <span>country <input type="text" id="s-tv-country" placeholder="MY" size="4" title="Only used with topic=general"></span>
+    </div>
+  </div>
+
+  <div class="prov-block">
+    <div class="prov-title">Firecrawl</div>
+    <div class="row">
+      <span>country <input type="text" id="s-fc-country" placeholder="MY" size="4" title="ISO 3166-1 alpha-2"></span>
+      <span>location <input type="text" id="s-fc-location" placeholder="Kuala Lumpur" size="12"></span>
+    </div>
+  </div>
+
+  <div class="prov-block">
+    <div class="prov-title">SearXNG</div>
+    <div class="row">
+      <span>language <input type="text" id="s-sx-lang" placeholder="e.g. en" size="8" title="Empty = use the common lang above"></span>
+      <span>categories <input type="text" id="s-sx-cats" placeholder="general" size="12"></span>
+      <span>safesearch <select id="s-sx-safe"><option value="0">0 off</option><option value="1">1 moderate</option><option value="2">2 strict</option></select></span>
+      <span>engines <input type="text" id="s-sx-engines" placeholder="bing,brave (empty = all)" size="16"></span>
+    </div>
+  </div>
+
   <div class="row">
-    <span>deepseek max count <input type="number" id="s-ds-max" min="0" max="50" title="DeepSeek result cap (1-50). 0 = 50"></span>
-    <span>tavily depth <select id="s-tv-depth"><option value="basic">basic (1 credit)</option><option value="advanced">advanced (2 credits)</option><option value="fast">fast</option></select></span>
-    <span>tavily country <input type="text" id="s-tv-country" placeholder="MY" size="4" title="ISO 3166-1 alpha-2. Only used with topic=general"></span>
-    <span>firecrawl country <input type="text" id="s-fc-country" placeholder="MY" size="4" title="ISO 3166-1 alpha-2"></span>
-    <span>firecrawl location <input type="text" id="s-fc-location" placeholder="Kuala Lumpur" size="12"></span>
-  </div>
-  <div class="row">
-    <span>searxng language <input type="text" id="s-sx-lang" placeholder="e.g. en" size="8" title="Empty = use the common lang above"></span>
-    <span>searxng categories <input type="text" id="s-sx-cats" placeholder="general" size="12"></span>
-    <span>searxng safesearch <select id="s-sx-safe"><option value="0">0 off</option><option value="1">1 moderate</option><option value="2">2 strict</option></select></span>
-    <span>searxng engines <input type="text" id="s-sx-engines" placeholder="bing,brave (empty = all)" size="16"></span>
-    <span class="dim">provider options: only the selected provider's block is read; the others are kept for switching.</span>
-  </div>
-  <div id="s-status" class="prov"></div>
+    <span class="dim">Only the selected provider's block is read; the others are kept for switching.</span>
+    <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>
 </div>
 
@@ -825,7 +857,6 @@ async function loadSettings() {
   document.getElementById('s-wlang').value = s.default_search_lang || '';
   document.getElementById('s-wstore').checked = s.default_search_store !== false;
   document.getElementById('s-wingest').value = s.default_search_ingest ?? 0;
-  document.getElementById('s-wmax').value = s.default_search_max_chars ?? 0;
   document.getElementById('s-ds-max').value = s.deepseek_max_count ?? 50;
   document.getElementById('s-tv-depth').value = s.tavily_search_depth || 'basic';
   document.getElementById('s-tv-country').value = s.tavily_country || '';
@@ -861,7 +892,6 @@ async function saveSettings() {
       default_search_lang: document.getElementById('s-wlang').value.trim(),
       default_search_store: document.getElementById('s-wstore').checked,
       default_search_ingest: +document.getElementById('s-wingest').value || 0,
-      default_search_max_chars: +document.getElementById('s-wmax').value || 0,
       deepseek_max_count: +document.getElementById('s-ds-max').value || 0,
       tavily_search_depth: document.getElementById('s-tv-depth').value,
       tavily_country: document.getElementById('s-tv-country').value.trim(),

@@ -130,7 +130,7 @@ frontends share and that take effect immediately, without a restart:
   runes, head kept, `0` = unlimited), `doc_max_chars` (rerank document
   truncation, runes)
 
-Edit these from the dashboard's **Search Defaults** panel; `config.yaml` only
+Edit these from the dashboard's **Retrieval &amp; Embedding Defaults** panel; `config.yaml` only
 seeds the initial values. A default collection that does not exist in its own
 backend is rejected loudly, so a typo can never silently widen searches into a
 global scan. A pre-existing single `default_collection` key is migrated to
@@ -312,7 +312,7 @@ search_memory(query)→  recall what was searched before, with its dates
   scraping, news results, country/location), `searxng` (self-hosted, free, no
   key). `search.providers` in config.yaml only says which modules to build;
   order is irrelevant.
-- **No failover.** The *Search Defaults* panel has a "web search provider"
+- **No failover.** The *Web Search* panel has a "provider"
   dropdown, and `web_search` calls exactly that provider. An empty selection
   is an error telling the operator to choose; a selected provider that is not
   configured fails with its name. The call never switches to another backend
@@ -333,10 +333,9 @@ search:
   collection: "web_cache"      # keep web content apart from personal memory
   providers: [deepseek, tavily, firecrawl, searxng]  # modules to build; order irrelevant
   store: true                # seed for the WebUI toggle
-  ingest_top_n: 0           # 0 = store every result
+  ingest_top_n: 0           # 0 = every result goes into the one dated document
   freshness_days: 0         # default age limit on search results (0 = none)
   stale_after_days: 7       # older than this is flagged stale when recalled
-  max_content_chars: 20000
   topic: "general"
   lang: ""
   deepseek:
@@ -410,10 +409,10 @@ cookie-scoped and do **not** affect API calls — an engine has to be enabled in
 
 Admin UI + JSON API on `:8198` (defaults to `0.0.0.0` so every LAN device can
 reach it; there is no TLS — restrict the bind or firewall it on untrusted
-networks). Includes a **Search Defaults** panel (active backend, per-backend
+networks). Includes a **Retrieval &amp; Embedding Defaults** panel (active backend, per-backend
 default collections, failover toggle, top_k, threshold, rerank/recall, truncation
-limits) shared live by every frontend, plus the full web-search panel —
-provider, results, freshness, topic, language, store/ingest, max chars and the
+limits) shared live by every frontend, plus a separate **Web Search** panel —
+provider, results, freshness, topic, language, store/ingest and one block per
 per-provider options (DeepSeek max count, Tavily depth/country, Firecrawl
 country/location, SearXNG language/categories/safesearch/engines):
 list/search collections, edit metadata, backfill payloads, recall test with

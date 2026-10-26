@@ -34,10 +34,11 @@ type WebDocument struct {
 }
 
 // WebIngestOptions tunes one ingest call.
-type WebIngestOptions struct {
-	// MaxChars caps how much of the page body is stored.
-	MaxChars int
-}
+//
+// There is deliberately no length cap here. Whatever the provider returned is
+// what gets stored: the body is only chunked (which is bounded anyway) and a
+// hard cut would silently drop paid-for content for no real benefit.
+type WebIngestOptions struct{}
 
 // WebIngestResult reports what happened to one document.
 type WebIngestResult struct {
@@ -74,7 +75,7 @@ type WebIngestResult struct {
 // embedded and the provenance/dimension gates passed, so a slow or failing
 // embed never leaves the reader with neither version. Content that is already
 // indexed (same content hash) is not embedded again at all.
-func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts WebIngestOptions) (*WebIngestResult, error) {
+func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, _ WebIngestOptions) (*WebIngestResult, error) {
 	collectionID = strings.TrimSpace(collectionID)
 	if collectionID == "" {
 		return nil, fmt.Errorf("collection_id is required")
@@ -82,13 +83,6 @@ func (e *Engine) IngestWebDocument(collectionID string, doc WebDocument, opts We
 	text := strings.TrimSpace(doc.Text)
 	if text == "" {
 		return nil, fmt.Errorf("document has no text")
-	}
-	if opts.MaxChars > 0 {
-		// Cut on a rune boundary: a byte cut can split a multi-byte
-		// character in half and leave a replacement rune in the chunk.
-		if r := []rune(text); len(r) > opts.MaxChars {
-			text = string(r[:opts.MaxChars])
-		}
 	}
 	if doc.CanonicalURL == "" {
 		doc.CanonicalURL = doc.URL

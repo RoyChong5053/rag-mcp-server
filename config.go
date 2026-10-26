@@ -250,8 +250,6 @@ type SearchConfig struct {
 	// knowing that something is old is more useful than not knowing it
 	// exists.
 	StaleAfterDays int `yaml:"stale_after_days"`
-	// MaxContentChars seeds the cap on how much of a page body is stored.
-	MaxContentChars int `yaml:"max_content_chars"`
 	// TimeoutSeconds bounds one provider request.
 	TimeoutSeconds int `yaml:"timeout_seconds"`
 	// Topic seeds the default search topic ("general" or "news").
@@ -313,22 +311,21 @@ func DefaultConfig() *Config {
 			DocMaxChars:   1000,
 		},
 		Search: SearchConfig{
-			Enabled:         true,
-			Collection:      "web_cache",
-			Providers:       []string{"deepseek", "tavily", "firecrawl", "searxng"},
-			Count:           10,
-			IngestTopN:      0,
-			Store:           true,
-			FreshnessDays:   7,
-			MaxContentChars: 20000,
-			TimeoutSeconds:  45,
-			Topic:           "general",
-			Lang:            "",
-			Tags:            []string{"web"},
-			DeepSeek:        DeepSeekConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.deepseek.com"}, MaxCount: 50},
-			Tavily:          TavilyConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.tavily.com"}, SearchDepth: "basic"},
-			Firecrawl:       FirecrawlConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2"}, Country: "MY"},
-			SearXNG:         SearXNGConfig{Categories: "general"},
+			Enabled:        true,
+			Collection:     "web_cache",
+			Providers:      []string{"deepseek", "tavily", "firecrawl", "searxng"},
+			Count:          10,
+			IngestTopN:     0,
+			Store:          true,
+			FreshnessDays:  7,
+			TimeoutSeconds: 45,
+			Topic:          "general",
+			Lang:           "",
+			Tags:           []string{"web"},
+			DeepSeek:       DeepSeekConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.deepseek.com"}, MaxCount: 50},
+			Tavily:         TavilyConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.tavily.com"}, SearchDepth: "basic"},
+			Firecrawl:      FirecrawlConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2"}, Country: "MY"},
+			SearXNG:        SearXNGConfig{Categories: "general"},
 		},
 		Documents: DocumentsConfig{
 			SearchBackend:    "auto",

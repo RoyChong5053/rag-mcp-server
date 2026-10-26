@@ -6,7 +6,6 @@ import (
 	"log"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/RoyChong5053/rag-mcp-server/engine"
@@ -41,11 +40,6 @@ type WebService struct {
 	registry *search.Registry
 	opts     WebOptions
 	jobs     *jobs.Manager
-
-	// inflight holds the canonical URLs that are being filed right now, so a
-	// repeated search does not queue the same page twice.
-	mu       sync.Mutex
-	inflight map[string]bool
 }
 
 // NewWebService builds the service.
@@ -56,7 +50,7 @@ func NewWebService(eng *engine.Engine, registry *search.Registry, opts WebOption
 	if opts.Timeout <= 0 {
 		opts.Timeout = 45 * time.Second
 	}
-	return &WebService{eng: eng, registry: registry, opts: opts, inflight: map[string]bool{}}
+	return &WebService{eng: eng, registry: registry, opts: opts}
 }
 
 // WithJobs wires the background job registry, so the pages a search found
@@ -126,10 +120,6 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	if ingest < 0 {
 		ingest = 0
 	}
-	maxChars := st.DefaultSearchMaxChars
-	if maxChars < 0 {
-		maxChars = 0
-	}
 
 	// Strict selection: the selected provider is the called provider. An
 	// empty selection is an operator error, not an invitation to guess.
@@ -173,7 +163,7 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	var jobID string
 	var queued int
 	if store {
-		jobID, queued = s.startFiling(query, collection, results, ingest, maxChars, lang)
+		jobID, queued = s.startFiling(query, collection, results, ingest, lang)
 	}
 
 	var b strings.Builder
@@ -204,19 +194,19 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 			summary = r.Snippet
 		}
 		if summary != "" {
-			fmt.Fprintf(&b, "   %s\n", truncateText(summary, 400))
+			fmt.Fprintf(&b, "   %s\n", summary)
 		}
 		b.WriteString("\n")
 	}
 	if store {
 		switch {
 		case queued == 0:
-			b.WriteString("Nothing to file: every result is already being filed by another search, or the provider returned no text.")
+			b.WriteString("Nothing to file: the provider returned no text.")
 		case jobID != "":
-			fmt.Fprintf(&b, "Filing %d result(s) into '%s' in the background (job %s).\n", queued, collection, jobID)
+			fmt.Fprintf(&b, "Filing %d result(s) into '%s' as one document in the background (job %s).\n", queued, collection, jobID)
 			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context. Do not search the same material again while the filing is running.")
 		default:
-			fmt.Fprintf(&b, "Filing %d result(s) into '%s' in the background.\n", queued, collection)
+			fmt.Fprintf(&b, "Filing %d result(s) into '%s' as one document in the background.\n", queued, collection)
 			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context.")
 		}
 	} else {
@@ -225,40 +215,24 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 	return b.String(), nil
 }
 
-// startFiling queues the results of a search for background filing and
-// returns the job id (empty when no job registry is wired) and how many
-// results were queued.
+// startFiling queues one search for background filing and returns the job id
+// (empty when no job registry is wired) and how many results went into the
+// bundle.
 //
-// Pages that are already being filed are dropped: the same article found by
-// two searches does not need to be embedded twice.
-func (s *WebService) startFiling(query, collection string, results []search.Result, ingest, maxChars int, lang string) (string, int) {
-	if ingest <= 0 {
+// There is no cross-search dedup. Every call becomes its own dated document,
+// even when a different provider finds the same keyword: the body carries the
+// search timestamp, which is what keeps the documents distinct.
+func (s *WebService) startFiling(query, collection string, results []search.Result, ingest int, lang string) (string, int) {
+	if ingest <= 0 || ingest > len(results) {
 		ingest = len(results)
 	}
-	if ingest > len(results) {
-		ingest = len(results)
-	}
-	pending := make([]search.Result, 0, ingest)
-	keys := make([]string, 0, ingest)
-	s.mu.Lock()
-	for i := 0; i < ingest; i++ {
-		key := filingKey(results[i].URL)
-		if key == "" || s.inflight[key] {
-			continue
-		}
-		s.inflight[key] = true
-		pending = append(pending, results[i])
-		keys = append(keys, key)
-	}
-	s.mu.Unlock()
+	pending := results[:ingest]
 	if len(pending) == 0 {
 		return "", 0
 	}
-
 	label := query
 	run := func(prog func(jobs.WebProgress)) (any, error) {
-		defer s.releaseKeys(keys)
-		return s.fileResults(collection, pending, maxChars, lang, prog)
+		return s.fileResults(collection, query, pending, lang, prog)
 	}
 	return s.submitFiling(label, collection, run), len(pending)
 }
@@ -279,36 +253,68 @@ func (s *WebService) submitFiling(label, collection string, run func(prog func(j
 	return ""
 }
 
-// releaseKeys frees the in-flight marks of a finished filing.
-func (s *WebService) releaseKeys(keys []string) {
-	s.mu.Lock()
-	for _, k := range keys {
-		if k != "" {
-			delete(s.inflight, k)
-		}
-	}
-	s.mu.Unlock()
-}
-
-// filingKey is the identity of a page for the in-flight check.
-func filingKey(rawURL string) string {
-	if k := search.CanonicalizeURL(rawURL); k != "" {
-		return k
-	}
-	return strings.TrimSpace(rawURL)
-}
-
-// fileResults chunks and embeds what the provider returned, in rank order:
-// the most relevant material lands first, so an early recall already finds
-// the good stuff.
+// buildWebBundle renders everything one search returned as a single markdown
+// document: the provider's summaries at the top, then each hit's raw text.
 //
-// Nothing is fetched here. A provider that only returned a snippet files the
-// snippet; a provider that returned full text files that; a provider that
-// returned nothing is skipped. web_search has no second network call, so the
-// selected provider remains the only backend that was used.
-func (s *WebService) fileResults(collection string, results []search.Result, maxChars int, lang string, prog func(jobs.WebProgress)) (any, error) {
-	pages, chunks, skipped, unchanged := 0, 0, 0, 0
+// Nothing is transformed or truncated here. Whatever the provider returned is
+// written verbatim, because it was paid for and the chunker downstream is what
+// makes it retrievable.
+func buildWebBundle(query string, results []search.Result, now time.Time) (title, url, body string) {
+	provider := ""
+	if len(results) > 0 {
+		provider = results[0].Provider
+	}
+	title = "web_search: " + query
+	// The synthetic URL only names the vault file; the timestamp keeps every
+	// call its own document.
+	url = fmt.Sprintf("web_search://%s/%s/%s",
+		orDefault(provider, "unknown"), now.Format("20060102T150405"), strings.TrimSpace(query))
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# web_search: %s\n\n", query)
+	fmt.Fprintf(&b, "- provider: %s\n", orDefault(provider, "unknown"))
+	fmt.Fprintf(&b, "- searched_at: %s\n", now.Format(time.RFC3339))
+	fmt.Fprintf(&b, "- results: %d\n\n", len(results))
+
+	// Summaries first: the model-readable gist of every hit, together.
+	b.WriteString("## Summary\n\n")
 	for i, r := range results {
+		summary := strings.TrimSpace(r.Summary)
+		if summary == "" {
+			summary = strings.TrimSpace(r.Snippet)
+		}
+		fmt.Fprintf(&b, "%d. %s\n", i+1, orDefault(r.Title, r.URL))
+		if r.URL != "" {
+			fmt.Fprintf(&b, "   %s\n", r.URL)
+		}
+		if summary != "" {
+			fmt.Fprintf(&b, "   %s\n", summary)
+		}
+		b.WriteString("\n")
+	}
+
+	// Then the raw text, per hit, in rank order.
+	b.WriteString("## Results\n\n")
+	for i, r := range results {
+		fmt.Fprintf(&b, "### %d. %s\n\n", i+1, orDefault(r.Title, r.URL))
+		if r.URL != "" {
+			fmt.Fprintf(&b, "- url: %s\n", r.URL)
+		}
+		if r.PublishedAt.IsZero() {
+			b.WriteString("- published: unknown\n")
+		} else {
+			fmt.Fprintf(&b, "- published: %s\n", r.PublishedAt.UTC().Format(time.RFC3339))
+		}
+		if r.Authority >= 0 {
+			fmt.Fprintf(&b, "- authority: %d/4\n", r.Authority)
+		}
+		if r.Score != 0 {
+			fmt.Fprintf(&b, "- score: %.4f\n", r.Score)
+		}
+		if r.Provider != "" {
+			fmt.Fprintf(&b, "- provider: %s\n", r.Provider)
+		}
+		b.WriteString("\n")
 		content := strings.TrimSpace(r.Content)
 		if content == "" {
 			content = strings.TrimSpace(r.Summary)
@@ -317,42 +323,47 @@ func (s *WebService) fileResults(collection string, results []search.Result, max
 			content = strings.TrimSpace(r.Snippet)
 		}
 		if content == "" {
-			log.Printf("web filing: no text for %s (provider %s returned neither content, summary nor snippet)", r.URL, r.Provider)
-			skipped++
-			prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
+			b.WriteString("_(the provider returned no text for this hit)_\n\n")
 			continue
 		}
-		doc := engine.WebDocument{
-			URL:          r.URL,
-			CanonicalURL: search.CanonicalizeURL(r.URL),
-			Title:        r.Title,
-			SiteName:     siteNameOf(r.URL),
-			Text:         content,
-			Provider:     r.Provider,
-			PublishedAt:  r.PublishedAt,
-			Authority:    r.Authority,
-			Score:        r.Score,
-			Lang:         lang,
-			Tags:         s.opts.Tags,
-		}
-		res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{
-			MaxChars: maxChars,
-		})
-		if err != nil {
-			log.Printf("web filing: ingest %s failed: %v", r.URL, err)
-			skipped++
-			prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
-			continue
-		}
-		pages++
-		if res.Unchanged {
-			unchanged++
-		}
-		chunks += res.ChunksIndexed
-		prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
+		b.WriteString(content)
+		b.WriteString("\n\n")
 	}
-	log.Printf("web filing done: %d page(s), %d chunk(s), %d unchanged, %d skipped", pages, chunks, unchanged, skipped)
-	return map[string]any{"pages": pages, "chunks": chunks, "unchanged": unchanged, "skipped": skipped}, nil
+	return title, url, b.String()
+}
+
+// fileResults stores one search as one document. The whole result set is
+// embedded in a single call, so the vault grows by one file per search instead
+// of one file per hit.
+func (s *WebService) fileResults(collection, query string, results []search.Result, lang string, prog func(jobs.WebProgress)) (any, error) {
+	provider := ""
+	if len(results) > 0 {
+		provider = results[0].Provider
+	}
+	title, url, body := buildWebBundle(query, results, time.Now())
+	doc := engine.WebDocument{
+		URL:          url,
+		CanonicalURL: url,
+		Title:        title,
+		Text:         body,
+		Provider:     provider,
+		Authority:    -1,
+		Lang:         lang,
+		Tags:         s.opts.Tags,
+	}
+	res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{})
+	if err != nil {
+		log.Printf("web filing: ingest bundle for %q failed: %v", query, err)
+		prog(jobs.WebProgress{PagesDone: 1, PagesTotal: 1})
+		return map[string]any{"pages": 0, "chunks": 0, "unchanged": 0, "skipped": 1}, nil
+	}
+	unchanged := 0
+	if res.Unchanged {
+		unchanged = 1
+	}
+	prog(jobs.WebProgress{PagesDone: 1, PagesTotal: 1, Chunks: res.ChunksIndexed})
+	log.Printf("web filing done: 1 document (%d result(s)), %d chunk(s), unchanged=%d", len(results), res.ChunksIndexed, unchanged)
+	return map[string]any{"pages": 1, "chunks": res.ChunksIndexed, "unchanged": unchanged, "skipped": 0}, nil
 }
 
 // rejectUnknownArgs enforces the tool's schema. Older clients used to send
@@ -378,27 +389,6 @@ func rejectUnknownArgs(args map[string]any, allowed ...string) error {
 	sort.Strings(unknown)
 	return fmt.Errorf("unknown argument(s): %s. web_search accepts only %s; configure the rest in the dashboard",
 		strings.Join(unknown, ", "), strings.Join(allowed, ", "))
-}
-
-// siteNameOf returns the hostname of a URL for display purposes.
-func siteNameOf(raw string) string {
-	s := raw
-	if i := strings.Index(s, "://"); i >= 0 {
-		s = s[i+3:]
-	}
-	if i := strings.IndexAny(s, "/?#"); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-// truncateText cuts s to at most n runes.
-func truncateText(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
 }
 
 // orDefault returns value when it is not empty, otherwise fallback.
