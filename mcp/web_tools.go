@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,49 +14,33 @@ import (
 	"github.com/RoyChong5053/rag-mcp-server/search"
 )
 
-// WebOptions configures the web-search tools.
+// WebOptions configures the web-search tool. Everything behavioural (count,
+// freshness, store, ingest, provider options, ...) lives in the WebUI
+// settings and is read live on every call; only values that cannot change at
+// runtime are here.
 type WebOptions struct {
-	// Collection is where fetched pages are vectorized.
+	// Collection is where returned pages are vectorized.
 	Collection string
-	// Count is the default number of results to request.
-	Count int
-	// IngestTopN is how many ranked results get fetched and stored.
-	// 0 = every result.
-	IngestTopN int
-	// FreshnessDays is the default age limit on search results. 0 = no limit.
-	FreshnessDays int
-	// StaleAfterDays is the age after which a recalled web page is flagged
-	// as stale. 0 = never flag.
-	StaleAfterDays int
-	// MaxContentChars caps how much of a page body is stored.
-	MaxContentChars int
 	// Timeout bounds one provider request.
 	Timeout time.Duration
-	// Topic is the default search topic.
-	Topic string
-	// Lang is the default language bias.
-	Lang string
 	// Tags are attached to every ingested chunk.
 	Tags []string
 }
 
-// WebService wires the external search providers to the RAG engine.
+// WebService wires the external search provider modules to the RAG engine.
 //
-// The design rule is that the agent never has to know which provider is
-// configured: it calls web_search, and the server picks a provider (the
-// one the operator made the default, or the failover chain).
+// There is no failover chain. web_search resolves exactly the provider
+// selected in the dashboard, calls it, and reports its answer or its error.
+// A silent switch would make the output look like a provider that never ran.
 //
-// The filing of what was found is NOT part of the answer. A search that
-// returns ten pages used to spend an hour vectorizing them before the tool
-// replied, which meant the caller's timeout expired long before the result
-// arrived and the fresh material was lost even though the server had it.
-// Now the search answers with the provider's hits, and the pages are filed in
-// the background, one worker at a time, while the user keeps talking.
+// Filing is not part of the answer: the tool returns the provider's hits as
+// soon as they arrive, and the text is chunked and embedded in the
+// background.
 type WebService struct {
-	eng   *engine.Engine
-	chain *search.Chain
-	opts  WebOptions
-	jobs  *jobs.Manager
+	eng      *engine.Engine
+	registry *search.Registry
+	opts     WebOptions
+	jobs     *jobs.Manager
 
 	// inflight holds the canonical URLs that are being filed right now, so a
 	// repeated search does not queue the same page twice.
@@ -64,20 +49,14 @@ type WebService struct {
 }
 
 // NewWebService builds the service.
-func NewWebService(eng *engine.Engine, chain *search.Chain, opts WebOptions) *WebService {
+func NewWebService(eng *engine.Engine, registry *search.Registry, opts WebOptions) *WebService {
 	if opts.Collection == "" {
 		opts.Collection = "web_cache"
-	}
-	if opts.Count <= 0 {
-		opts.Count = 10
-	}
-	if opts.IngestTopN < 0 {
-		opts.IngestTopN = 0
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 45 * time.Second
 	}
-	return &WebService{eng: eng, chain: chain, opts: opts, inflight: map[string]bool{}}
+	return &WebService{eng: eng, registry: registry, opts: opts, inflight: map[string]bool{}}
 }
 
 // WithJobs wires the background job registry, so the pages a search found
@@ -87,24 +66,24 @@ func (s *WebService) WithJobs(mgr *jobs.Manager) *WebService {
 	return s
 }
 
-// Providers lists the configured provider chain in order.
+// Providers lists the provider modules this server was built with.
 func (s *WebService) Providers() []string {
-	if s == nil || s.chain == nil {
+	if s == nil || s.registry == nil {
 		return nil
 	}
-	return s.chain.Names()
+	return s.registry.Names()
 }
 
-// Register adds the web tools to an MCP server.
+// Register adds web_search to an MCP server.
 func (s *WebService) Register(server *Server) {
 	server.RegisterTool(Tool{
 		Name: "web_search",
-		Description: "Search the live web and return what the search provider found. " +
+		Description: "Search the live web and return what the selected provider found. " +
 			"This always queries the live web: it never answers from stored material, so the results are current. " +
-			"The pages it finds are also vectorized into the web collection in the BACKGROUND, so later turns can recall them with search_memory instead of searching again. " +
+			"The provider is fixed by the operator in the dashboard; web_search does not choose one and never falls back to another provider. " +
+			"By default the returned pages are also vectorized into the web collection in the BACKGROUND, so later turns can recall them with search_memory instead of searching again. " +
 			"Every hit carries its publication date (or 'unknown'), because a reader has to be able to tell yesterday's news from today's. " +
-			"Returns a ranked list with title, url, publication date and snippet; use fetch_url for the full text of one page. " +
-			"The call returns as soon as the provider answered: the filing continues afterwards, so a later recall may still be incomplete for a while.",
+			"The call returns as soon as the provider answered: filing continues afterwards, so a later recall may still be incomplete for a while.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -112,174 +91,94 @@ func (s *WebService) Register(server *Server) {
 					"type":        "string",
 					"description": "The search query. Supports site:/after:/lang: style operators, which are forwarded to the provider.",
 				},
-				"count": map[string]any{
-					"type":        "integer",
-					"description": "Optional: how many results to return. Defaults to the server setting.",
-				},
-				"store": map[string]any{
-					"type":        "boolean",
-					"description": "Optional: also vectorize the pages into the web collection so later turns can recall them. Default true. Set false to search without filing anything.",
-				},
-				"ingest": map[string]any{
-					"type":        "integer",
-					"description": "Optional: how many of the results to fetch and vectorize into the web collection. 0 = store all of them. Ignored when store=false.",
-				},
-				"freshness_days": map[string]any{
-					"type":        "integer",
-					"description": "Optional: only return results published in the last N days. 0 = no limit.",
-				},
-				"provider": map[string]any{
-					"type":        "string",
-					"description": "Optional: force one provider instead of the failover chain.",
-				},
-				"topic": map[string]any{
-					"type":        "string",
-					"description": "Optional: 'general' or 'news'.",
-				},
-				"lang": map[string]any{
-					"type":        "string",
-					"description": "Optional: ISO 639-1 language code to bias results by language.",
-				},
-				"domains": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "Optional: restrict results to these hostnames.",
-				},
 			},
-			"required": []string{"query"},
+			"required":             []string{"query"},
+			"additionalProperties": false,
 		},
 	}, s.handleWebSearch)
-
-	server.RegisterTool(Tool{
-		Name: "fetch_url",
-		Description: "Fetch one web page and return it as markdown. " +
-			"With save=true the page is also vectorized into the web collection so it can be recalled later. " +
-			"Use this when you already know the URL and need its actual content.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"url": map[string]any{
-					"type":        "string",
-					"description": "The page URL (http or https).",
-				},
-				"save": map[string]any{
-					"type":        "boolean",
-					"description": "Optional: also vectorize the page into the web collection. Default true.",
-				},
-				"max_chars": map[string]any{
-					"type":        "integer",
-					"description": "Optional: cap the returned text length.",
-				},
-			},
-			"required": []string{"url"},
-		},
-	}, s.handleFetchURL)
 }
 
 // handleWebSearch is the web_search tool handler.
 func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
+	if err := rejectUnknownArgs(args, "query"); err != nil {
+		return nil, err
+	}
 	query := strings.TrimSpace(getStringArg(args, "query", ""))
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
+
+	// Every default is read from the live settings, so the dashboard is
+	// authoritative and a change takes effect on the next call.
 	st := s.eng.Settings().Get()
-	countDefault := s.opts.Count
-	if st.DefaultSearchCount > 0 {
-		countDefault = st.DefaultSearchCount
-	}
-	count := getIntArg(args, "count", countDefault)
+	count := st.DefaultSearchCount
 	if count <= 0 {
-		count = countDefault
+		count = 10
 	}
-	// store=false searches without filing anything. ingest is how many of
-	// the results get filed; 0 = all of them.
-	store := getBoolArg(args, "store", true)
-	ingest := getIntArg(args, "ingest", s.opts.IngestTopN)
-	if ingest < 0 {
-		ingest = 0
-	}
-	freshness := getIntArg(args, "freshness_days", s.opts.FreshnessDays)
+	freshness := st.DefaultSearchFreshnessDays
 	if freshness < 0 {
 		freshness = 0
 	}
-	topic := strings.TrimSpace(getStringArg(args, "topic", ""))
-	if topic == "" {
-		topic = s.opts.Topic
+	topic := strings.TrimSpace(st.DefaultSearchTopic)
+	lang := strings.TrimSpace(st.DefaultSearchLang)
+	store := st.DefaultSearchStore
+	ingest := st.DefaultSearchIngest
+	if ingest < 0 {
+		ingest = 0
 	}
-	lang := strings.TrimSpace(getStringArg(args, "lang", ""))
-	if lang == "" {
-		lang = s.opts.Lang
-	}
-	domains := getStringSliceArg(args, "domains")
-	providerName, err := s.resolveProvider(strings.TrimSpace(getStringArg(args, "provider", "")))
-	if err != nil {
-		return nil, err
+	maxChars := st.DefaultSearchMaxChars
+	if maxChars < 0 {
+		maxChars = 0
 	}
 
-	collection := s.opts.Collection
+	// Strict selection: the selected provider is the called provider. An
+	// empty selection is an operator error, not an invitation to guess.
+	providerName := strings.TrimSpace(st.DefaultSearchProvider)
+	available := s.Providers()
+	if providerName == "" {
+		return nil, fmt.Errorf("no web search provider is selected: choose one in the dashboard (available: %s)", orDefault(strings.Join(available, ", "), "none"))
+	}
+	p := s.registry.Get(providerName)
+	if p == nil {
+		return nil, fmt.Errorf("selected web search provider %q is not built on this server (available: %s)", providerName, orDefault(strings.Join(available, ", "), "none"))
+	}
+	if !p.Available() {
+		return nil, fmt.Errorf("selected web search provider %q is unavailable: set its base_url/API key in config.yaml, or choose another provider in the dashboard", providerName)
+	}
 
-	// web_search always goes to the live web and reports what the provider
-	// returned. It never answers from the library: a tool named web_search
-	// that silently serves stored material lies to its caller, and yesterday's
-	// news is not today's news. Recalling what was searched before is
-	// search_memory's job, and the caller decides when to ask for fresh truth.
 	q := search.Query{
 		Text:          query,
 		Count:         count,
 		NeedContent:   store,
 		FreshnessDays: freshness,
-		Domains:       domains,
 		Lang:          lang,
 		Topic:         topic,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.opts.Timeout)
 	defer cancel()
 
-	var results []search.Result
-	var usedProvider string
-	if providerName != "" {
-		p := s.chain.Get(providerName)
-		if p == nil {
-			return nil, fmt.Errorf("unknown provider '%s' (configured: %s)", providerName, strings.Join(s.Providers(), ", "))
-		}
-		if !p.Available() {
-			return nil, fmt.Errorf("provider '%s' is not configured", providerName)
-		}
-		res, err := p.Search(ctx, q)
-		if err != nil {
-			return nil, fmt.Errorf("provider '%s' failed: %w", providerName, err)
-		}
-		results = res
-		usedProvider = p.Name()
-	} else {
-		res, err := s.chain.Search(ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		results = res
-		if len(results) > 0 {
-			usedProvider = results[0].Provider
-		}
+	results, err := p.Search(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("web search failed with provider %q: %w", p.Name(), err)
 	}
 
+	collection := s.opts.Collection
 	if len(results) == 0 {
-		return fmt.Sprintf("No live web results for %q (provider: %s).", query, orDefault(usedProvider, "none")), nil
+		return fmt.Sprintf("No live web results for %q (provider: %s).", query, p.Name()), nil
 	}
 
 	// File what was found so the next turn can recall it. The filing happens
 	// in the background: the caller gets the hits now, and the library fills
-	// up while the conversation continues. A search that vectorizes before it
-	// answers used to outlast every caller timeout, and the fresh material
-	// was lost even though the server had it.
+	// up while the conversation continues.
 	var jobID string
 	var queued int
 	if store {
-		jobID, queued = s.startFiling(query, collection, results, ingest)
+		jobID, queued = s.startFiling(query, collection, results, ingest, maxChars, lang)
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Live web results for %q (provider: %s, %d hits, fetched %s)\n\n",
-		query, orDefault(usedProvider, "none"), len(results), time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	fmt.Fprintf(&b, "Live web results for %q (provider: %s, %d hits, searched %s)\n\n",
+		query, p.Name(), len(results), time.Now().UTC().Format("2006-01-02 15:04 UTC"))
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, orDefault(r.Title, r.URL))
 		fmt.Fprintf(&b, "   url: %s\n", r.URL)
@@ -307,63 +206,32 @@ func (s *WebService) handleWebSearch(args map[string]any) (any, error) {
 		if summary != "" {
 			fmt.Fprintf(&b, "   %s\n", truncateText(summary, 400))
 		}
-		if r.Content != "" {
-			fmt.Fprintf(&b, "   [full text available — use fetch_url]\n")
-		}
 		b.WriteString("\n")
 	}
 	if store {
 		switch {
 		case queued == 0:
-			b.WriteString("Nothing to file: every result is already being filed by another search.")
+			b.WriteString("Nothing to file: every result is already being filed by another search, or the provider returned no text.")
 		case jobID != "":
-			fmt.Fprintf(&b, "Filing %d page(s) into '%s' in the background (job %s).\n", queued, collection, jobID)
+			fmt.Fprintf(&b, "Filing %d result(s) into '%s' in the background (job %s).\n", queued, collection, jobID)
 			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context. Do not search the same material again while the filing is running.")
 		default:
-			fmt.Fprintf(&b, "Filing %d page(s) into '%s' in the background.\n", queued, collection)
+			fmt.Fprintf(&b, "Filing %d result(s) into '%s' in the background.\n", queued, collection)
 			b.WriteString("They become recallable with search_memory as they land; the hits above are already in context.")
 		}
 	} else {
-		b.WriteString("Not stored (store=false): these pages were not vectorized, so they cannot be recalled later.")
+		b.WriteString("Not stored (store is off): these results were not vectorized, so they cannot be recalled later.")
 	}
 	return b.String(), nil
 }
 
-// resolveProvider picks the provider for one call. An explicit argument
-// always wins and is validated by the caller. Otherwise the operator's
-// default provider is used, and only that one: when it is configured but
-// not reachable the call fails with an explanation instead of silently
-// falling through to another provider. A silent switch would make the
-// output look like a provider it never used, and the operator would have
-// no way to tell which backend actually answered.
-//
-// An empty default means "failover chain". That is an explicit choice in
-// the dashboard, not a fallback for a broken configuration.
-func (s *WebService) resolveProvider(explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	def := strings.TrimSpace(s.eng.Settings().Get().DefaultSearchProvider)
-	if def == "" {
-		return "", nil
-	}
-	p := s.chain.Get(def)
-	if p == nil {
-		return "", fmt.Errorf("default web search provider %q is not in the configured chain (configured: %s)", def, strings.Join(s.Providers(), ", "))
-	}
-	if !p.Available() {
-		return "", fmt.Errorf("default web search provider %q is not configured: set its base_url/API key in config.yaml, or pick another provider in the dashboard", def)
-	}
-	return def, nil
-}
-
 // startFiling queues the results of a search for background filing and
 // returns the job id (empty when no job registry is wired) and how many
-// pages were queued.
+// results were queued.
 //
 // Pages that are already being filed are dropped: the same article found by
 // two searches does not need to be embedded twice.
-func (s *WebService) startFiling(query, collection string, results []search.Result, ingest int) (string, int) {
+func (s *WebService) startFiling(query, collection string, results []search.Result, ingest, maxChars int, lang string) (string, int) {
 	if ingest <= 0 {
 		ingest = len(results)
 	}
@@ -390,29 +258,9 @@ func (s *WebService) startFiling(query, collection string, results []search.Resu
 	label := query
 	run := func(prog func(jobs.WebProgress)) (any, error) {
 		defer s.releaseKeys(keys)
-		return s.fileResults(collection, pending, prog)
+		return s.fileResults(collection, pending, maxChars, lang, prog)
 	}
 	return s.submitFiling(label, collection, run), len(pending)
-}
-
-// startFilingDoc queues one already-fetched page for background filing.
-func (s *WebService) startFilingDoc(label, collection string, doc engine.WebDocument) (string, int) {
-	key := filingKey(doc.URL)
-	s.mu.Lock()
-	if key != "" && s.inflight[key] {
-		s.mu.Unlock()
-		return "", 0
-	}
-	if key != "" {
-		s.inflight[key] = true
-	}
-	s.mu.Unlock()
-
-	run := func(prog func(jobs.WebProgress)) (any, error) {
-		defer s.releaseKeys([]string{key})
-		return s.fileDoc(collection, doc, prog)
-	}
-	return s.submitFiling(label, collection, run), 1
 }
 
 // submitFiling hands the work to the job registry (so the dashboard shows
@@ -450,32 +298,26 @@ func filingKey(rawURL string) string {
 	return strings.TrimSpace(rawURL)
 }
 
-// fileResults fetches (when the provider gave only a snippet), chunks and
-// embeds the pages, in rank order: the most relevant material lands first,
-// so an early recall already finds the good stuff.
-func (s *WebService) fileResults(collection string, results []search.Result, prog func(jobs.WebProgress)) (any, error) {
+// fileResults chunks and embeds what the provider returned, in rank order:
+// the most relevant material lands first, so an early recall already finds
+// the good stuff.
+//
+// Nothing is fetched here. A provider that only returned a snippet files the
+// snippet; a provider that returned full text files that; a provider that
+// returned nothing is skipped. web_search has no second network call, so the
+// selected provider remains the only backend that was used.
+func (s *WebService) fileResults(collection string, results []search.Result, maxChars int, lang string, prog func(jobs.WebProgress)) (any, error) {
 	pages, chunks, skipped, unchanged := 0, 0, 0, 0
 	for i, r := range results {
-		content := r.Content
-		if strings.TrimSpace(content) == "" {
-			// The provider returned a snippet only: fetch the page itself.
-			// The fetch runs on its own context: the caller's request is
-			// long gone and its deadline must not kill the filing.
-			ctx, cancel := context.WithTimeout(context.Background(), s.opts.Timeout)
-			page, err := s.chain.Fetch(ctx, r.URL)
-			cancel()
-			if err != nil {
-				log.Printf("web filing: fetch %s failed: %v", r.URL, err)
-				skipped++
-				prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
-				continue
-			}
-			content = page.Content
-			if strings.TrimSpace(page.Title) != "" && strings.TrimSpace(r.Title) == "" {
-				r.Title = page.Title
-			}
+		content := strings.TrimSpace(r.Content)
+		if content == "" {
+			content = strings.TrimSpace(r.Summary)
 		}
-		if strings.TrimSpace(content) == "" {
+		if content == "" {
+			content = strings.TrimSpace(r.Snippet)
+		}
+		if content == "" {
+			log.Printf("web filing: no text for %s (provider %s returned neither content, summary nor snippet)", r.URL, r.Provider)
 			skipped++
 			prog(jobs.WebProgress{PagesDone: i + 1, PagesTotal: len(results), Chunks: chunks})
 			continue
@@ -490,11 +332,11 @@ func (s *WebService) fileResults(collection string, results []search.Result, pro
 			PublishedAt:  r.PublishedAt,
 			Authority:    r.Authority,
 			Score:        r.Score,
-			Lang:         s.opts.Lang,
+			Lang:         lang,
 			Tags:         s.opts.Tags,
 		}
 		res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{
-			MaxChars: s.opts.MaxContentChars,
+			MaxChars: maxChars,
 		})
 		if err != nil {
 			log.Printf("web filing: ingest %s failed: %v", r.URL, err)
@@ -513,60 +355,29 @@ func (s *WebService) fileResults(collection string, results []search.Result, pro
 	return map[string]any{"pages": pages, "chunks": chunks, "unchanged": unchanged, "skipped": skipped}, nil
 }
 
-// fileDoc files one already-fetched page.
-func (s *WebService) fileDoc(collection string, doc engine.WebDocument, prog func(jobs.WebProgress)) (any, error) {
-	res, err := s.eng.IngestWebDocument(collection, doc, engine.WebIngestOptions{
-		MaxChars: s.opts.MaxContentChars,
-	})
-	if err != nil {
-		return nil, err
+// rejectUnknownArgs enforces the tool's schema. Older clients used to send
+// count/store/freshness/provider and friends; silently ignoring them would
+// make the caller believe a knob worked when it did not.
+func rejectUnknownArgs(args map[string]any, allowed ...string) error {
+	if len(args) == 0 {
+		return nil
 	}
-	prog(jobs.WebProgress{PagesDone: 1, PagesTotal: 1, Chunks: res.ChunksIndexed})
-	return map[string]any{"pages": 1, "chunks": res.ChunksIndexed, "unchanged": res.Unchanged}, nil
-}
-
-// handleFetchURL is the fetch_url tool handler.
-func (s *WebService) handleFetchURL(args map[string]any) (any, error) {
-	url := strings.TrimSpace(getStringArg(args, "url", ""))
-	if url == "" {
-		return nil, fmt.Errorf("url is required")
+	ok := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		ok[k] = true
 	}
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return nil, fmt.Errorf("url must start with http:// or https://")
-	}
-	save := getBoolArg(args, "save", true)
-	maxChars := getIntArg(args, "max_chars", 0)
-
-	ctx, cancel := context.WithTimeout(context.Background(), s.opts.Timeout)
-	defer cancel()
-
-	page, err := s.chain.Fetch(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	content := page.Content
-	if maxChars > 0 && len(content) > maxChars {
-		content = content[:maxChars]
-	}
-	if save {
-		doc := engine.WebDocument{
-			URL:          orDefault(page.URL, url),
-			CanonicalURL: search.CanonicalizeURL(orDefault(page.URL, url)),
-			Title:        page.Title,
-			SiteName:     siteNameOf(orDefault(page.URL, url)),
-			Text:         page.Content,
-			Provider:     "fetch",
-			Tags:         s.opts.Tags,
+	unknown := make([]string, 0, len(args))
+	for k := range args {
+		if !ok[k] {
+			unknown = append(unknown, k)
 		}
-		// The vectorization happens in the background: the caller asked for
-		// the page, not for a wait. The text is returned right away.
-		jobID, _ := s.startFilingDoc(page.Title, s.opts.Collection, doc)
-		if jobID != "" {
-			return fmt.Sprintf("%s\n\n[filing in '%s' in the background (job %s)]\n\n%s", page.Title, s.opts.Collection, jobID, content), nil
-		}
-		return fmt.Sprintf("%s\n\n[filing in '%s' in the background]\n\n%s", page.Title, s.opts.Collection, content), nil
 	}
-	return fmt.Sprintf("%s\n\n%s", page.Title, content), nil
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("unknown argument(s): %s. web_search accepts only %s; configure the rest in the dashboard",
+		strings.Join(unknown, ", "), strings.Join(allowed, ", "))
 }
 
 // siteNameOf returns the hostname of a URL for display purposes.

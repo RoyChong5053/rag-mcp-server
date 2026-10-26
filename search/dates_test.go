@@ -27,21 +27,21 @@ func TestParseDateFromText(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseDateFromText(tc.in)
+			got := ParseDateFromText(tc.in)
 			if tc.want == "" {
 				if !got.IsZero() {
-					t.Fatalf("parseDateFromText(%q) = %v, want no date", tc.in, got)
+					t.Fatalf("ParseDateFromText(%q) = %v, want no date", tc.in, got)
 				}
 				return
 			}
 			if got.IsZero() {
-				t.Fatalf("parseDateFromText(%q) = no date, want %s", tc.in, tc.want)
+				t.Fatalf("ParseDateFromText(%q) = no date, want %s", tc.in, tc.want)
 			}
 			if got.Format("2006-01-02") != tc.want {
-				t.Fatalf("parseDateFromText(%q) = %s, want %s", tc.in, got.Format("2006-01-02"), tc.want)
+				t.Fatalf("ParseDateFromText(%q) = %s, want %s", tc.in, got.Format("2006-01-02"), tc.want)
 			}
 			if got.Location() != time.UTC {
-				t.Fatalf("parseDateFromText(%q) is not UTC: %v", tc.in, got.Location())
+				t.Fatalf("ParseDateFromText(%q) is not UTC: %v", tc.in, got.Location())
 			}
 		})
 	}
@@ -57,7 +57,7 @@ func TestParseDateFromTextIgnoresLateDates(t *testing.T) {
 		body += "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor "
 	}
 	body += "\n\n2026-10-16\n"
-	if got := parseDateFromText(body); !got.IsZero() {
+	if got := ParseDateFromText(body); !got.IsZero() {
 		t.Fatalf("a date below the scan window was picked up: %v", got)
 	}
 }

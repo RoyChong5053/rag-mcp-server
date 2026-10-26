@@ -1,6 +1,9 @@
 package search
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestCanonicalizeURL(t *testing.T) {
 	cases := []struct {
@@ -23,32 +26,46 @@ func TestCanonicalizeURL(t *testing.T) {
 }
 
 func TestParseDate(t *testing.T) {
-	if parseDate("2026-10-17T00:00:00+00:00").IsZero() {
+	if ParseDate("2026-10-17T00:00:00+00:00").IsZero() {
 		t.Fatal("RFC3339 date should parse")
 	}
-	if parseDate("2026-10-17").IsZero() {
+	if ParseDate("2026-10-17").IsZero() {
 		t.Fatal("plain date should parse")
 	}
-	if !parseDate("not a date").IsZero() {
+	if !ParseDate("not a date").IsZero() {
 		t.Fatal("garbage should yield the zero time")
 	}
-	if !parseDate("").IsZero() {
+	if !ParseDate("").IsZero() {
 		t.Fatal("empty should yield the zero time")
 	}
 }
 
-func TestChainSkipsUnavailableProviders(t *testing.T) {
-	c := NewChain(NewDeepSeek("https://example.invalid", "", 0))
-	if len(c.Providers()) != 1 {
-		t.Fatalf("expected 1 provider, got %d", len(c.Providers()))
+type stubProvider struct {
+	name      string
+	available bool
+}
+
+func (p stubProvider) Name() string    { return p.name }
+func (p stubProvider) Available() bool { return p.available }
+func (p stubProvider) Search(_ context.Context, _ Query) ([]Result, error) {
+	return nil, nil
+}
+
+func TestRegistryLookup(t *testing.T) {
+	r := NewRegistry(
+		stubProvider{name: "deepseek", available: false},
+		stubProvider{name: "searxng", available: true},
+	)
+	if len(r.Providers()) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(r.Providers()))
 	}
-	if c.Providers()[0].Available() {
-		t.Fatal("a provider without a key must not be available")
+	if got := r.Names(); len(got) != 2 || got[0] != "deepseek" || got[1] != "searxng" {
+		t.Fatalf("Names() = %v", got)
 	}
-	if c.Get("deepseek") == nil {
-		t.Fatal("Get should find the provider by name")
+	if p := r.Get("SEARXNG"); p == nil || p.Name() != "searxng" {
+		t.Fatalf("Get should match case-insensitively, got %v", p)
 	}
-	if c.Get("nope") != nil {
+	if r.Get("nope") != nil {
 		t.Fatal("Get should return nil for an unknown name")
 	}
 }

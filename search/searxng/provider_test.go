@@ -1,4 +1,4 @@
-package search
+package searxng
 
 import (
 	"context"
@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/RoyChong5053/rag-mcp-server/search"
+	"github.com/RoyChong5053/rag-mcp-server/settings"
 )
 
 // A live SearXNG answer carries two shapes that are not plain strings:
@@ -14,7 +17,7 @@ import (
 // [engine, error] pairs. Decoding must survive both: one captcha'd engine
 // otherwise takes the whole search down, and the results that did come back
 // are perfectly usable.
-func TestSearXNGSearchDecodesRealResponse(t *testing.T) {
+func TestSearchDecodesRealResponse(t *testing.T) {
 	const body = `{
 	  "query": "opencode",
 	  "number_of_results": 0,
@@ -34,8 +37,8 @@ func TestSearXNGSearchDecodesRealResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewSearXNG(srv.URL, 5*time.Second)
-	res, err := p.Search(context.Background(), Query{Text: "opencode", Count: 1})
+	p := New(Config{BaseURL: srv.URL, Timeout: 5 * time.Second}, nil)
+	res, err := p.Search(context.Background(), search.Query{Text: "opencode", Count: 1})
 	if err != nil {
 		t.Fatalf("Search() must not fail on a real response: %v", err)
 	}
@@ -62,18 +65,59 @@ func TestSearXNGSearchDecodesRealResponse(t *testing.T) {
 
 // A result without a score still has to be orderable: SearXNG does not rank
 // the way the other providers do.
-func TestSearXNGSearchPositionalScore(t *testing.T) {
+func TestSearchPositionalScore(t *testing.T) {
 	const body = `{"results":[{"url":"https://example.com/a","title":"A","score":0}],"answers":[],"unresponsive_engines":[]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 
-	res, err := NewSearXNG(srv.URL, 5*time.Second).Search(context.Background(), Query{Text: "x", Count: 10})
+	res, err := New(Config{BaseURL: srv.URL, Timeout: 5 * time.Second}, nil).
+		Search(context.Background(), search.Query{Text: "x", Count: 10})
 	if err != nil {
 		t.Fatalf("Search(): %v", err)
 	}
 	if len(res) != 1 || res[0].Score != 1.0 {
 		t.Fatalf("res = %+v, want one result scored 1.0", res)
+	}
+}
+
+// The WebUI options are read on every call and mapped onto SearXNG's query
+// string. The provider's own language wins over the common one.
+func TestSearchUsesLiveOptions(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	st := settings.New("", settings.Settings{
+		SearXNGLanguage:   "zh-CN",
+		SearXNGCategories: "general,news",
+		SearXNGSafeSearch: 2,
+		SearXNGEngines:    []string{"bing", "brave"},
+	})
+	p := New(Config{BaseURL: srv.URL, Timeout: 5 * time.Second}, st)
+	if _, err := p.Search(context.Background(), search.Query{
+		Text: "opencode", Count: 5, Lang: "en", FreshnessDays: 2,
+	}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if got.Get("language") != "zh-CN" {
+		t.Fatalf("language = %q, want zh-CN (provider option wins)", got.Get("language"))
+	}
+	if got.Get("categories") != "general,news" {
+		t.Fatalf("categories = %q", got.Get("categories"))
+	}
+	if got.Get("safesearch") != "2" {
+		t.Fatalf("safesearch = %q", got.Get("safesearch"))
+	}
+	if got.Get("engines") != "bing,brave" {
+		t.Fatalf("engines = %q", got.Get("engines"))
+	}
+	if got.Get("time_range") != "month" {
+		t.Fatalf("time_range = %q", got.Get("time_range"))
 	}
 }

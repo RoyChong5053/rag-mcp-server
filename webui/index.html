@@ -183,9 +183,31 @@ tr.sel { background: #1e2a3a; box-shadow: inset 3px 0 0 #6af; }
     <button onclick="withBusy(this, () => saveSettings())">Save settings</button>
   </div>
   <div class="row">
-    <span>web search provider <select id="s-wprovider"><option value="">(failover chain)</option></select></span>
-    <span>web results <input type="number" id="s-wcount" min="1" max="50" title="How many results web_search asks for when the caller does not say. 0 = server default"></span>
-    <span class="dim">used by web_search when the caller names no provider — slash commands and other frontends do not need to carry provider names</span>
+    <span>web search provider <select id="s-wprovider"><option value="">(choose one)</option></select></span>
+    <span>web results <input type="number" id="s-wcount" min="1" max="50" title="How many results web_search asks for. 0 = 10"></span>
+    <span>freshness <input type="number" id="s-wfresh" min="0" title="Only results published in the last N days. 0 = no limit"></span>
+    <span>topic <select id="s-wtopic"><option value="general">general</option><option value="news">news</option></select></span>
+    <span>lang <input type="text" id="s-wlang" placeholder="e.g. en, zh-CN" size="8" title="ISO 639-1 language bias. Empty = provider default"></span>
+    <label style="display:inline"><input type="checkbox" id="s-wstore"> store results</label>
+    <span>ingest <input type="number" id="s-wingest" min="0" title="How many of the results get filed. 0 = all of them"></span>
+    <span>max chars <input type="number" id="s-wmax" min="0" title="Cap on the body text stored per page. 0 = unlimited"></span>
+  </div>
+  <div class="row">
+    <span class="dim">web_search calls this provider only. No failover: an empty or unavailable selection is an error.</span>
+  </div>
+  <div class="row">
+    <span>deepseek max count <input type="number" id="s-ds-max" min="0" max="50" title="DeepSeek result cap (1-50). 0 = 50"></span>
+    <span>tavily depth <select id="s-tv-depth"><option value="basic">basic (1 credit)</option><option value="advanced">advanced (2 credits)</option><option value="fast">fast</option></select></span>
+    <span>tavily country <input type="text" id="s-tv-country" placeholder="MY" size="4" title="ISO 3166-1 alpha-2. Only used with topic=general"></span>
+    <span>firecrawl country <input type="text" id="s-fc-country" placeholder="MY" size="4" title="ISO 3166-1 alpha-2"></span>
+    <span>firecrawl location <input type="text" id="s-fc-location" placeholder="Kuala Lumpur" size="12"></span>
+  </div>
+  <div class="row">
+    <span>searxng language <input type="text" id="s-sx-lang" placeholder="e.g. en" size="8" title="Empty = use the common lang above"></span>
+    <span>searxng categories <input type="text" id="s-sx-cats" placeholder="general" size="12"></span>
+    <span>searxng safesearch <select id="s-sx-safe"><option value="0">0 off</option><option value="1">1 moderate</option><option value="2">2 strict</option></select></span>
+    <span>searxng engines <input type="text" id="s-sx-engines" placeholder="bing,brave (empty = all)" size="16"></span>
+    <span class="dim">provider options: only the selected provider's block is read; the others are kept for switching.</span>
   </div>
   <div id="s-status" class="prov"></div>
   </div>
@@ -795,9 +817,24 @@ async function loadSettings() {
   provSel.innerHTML = '<option value="">one-api (config)</option>' + (s.embed_providers || []).map(p => '<option value="' + esc(p.id) + '">' + esc(p.id) + (p.model ? ' · ' + esc(p.model) : '') + '</option>').join('');
   provSel.value = s.active_embed_provider || '';
   const wprov = document.getElementById('s-wprovider');
-  wprov.innerHTML = '<option value="">(failover chain)</option>' + (s.search_providers || []).map(p => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
+  wprov.innerHTML = '<option value="">(choose one)</option>' + (s.search_providers || []).map(p => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
   wprov.value = s.default_search_provider || '';
-  document.getElementById('s-wcount').value = s.default_search_count || 0;
+  document.getElementById('s-wcount').value = s.default_search_count ?? 0;
+  document.getElementById('s-wfresh').value = s.default_search_freshness_days ?? 0;
+  document.getElementById('s-wtopic').value = s.default_search_topic || 'general';
+  document.getElementById('s-wlang').value = s.default_search_lang || '';
+  document.getElementById('s-wstore').checked = s.default_search_store !== false;
+  document.getElementById('s-wingest').value = s.default_search_ingest ?? 0;
+  document.getElementById('s-wmax').value = s.default_search_max_chars ?? 0;
+  document.getElementById('s-ds-max').value = s.deepseek_max_count ?? 50;
+  document.getElementById('s-tv-depth').value = s.tavily_search_depth || 'basic';
+  document.getElementById('s-tv-country').value = s.tavily_country || '';
+  document.getElementById('s-fc-country').value = s.firecrawl_country ?? '';
+  document.getElementById('s-fc-location').value = s.firecrawl_location || '';
+  document.getElementById('s-sx-lang').value = s.searxng_language || '';
+  document.getElementById('s-sx-cats').value = s.searxng_categories ?? 'general';
+  document.getElementById('s-sx-safe').value = String(s.searxng_safesearch ?? 0);
+  document.getElementById('s-sx-engines').value = (s.searxng_engines || []).join(',');
   st.textContent = '';
 }
 async function saveSettings() {
@@ -818,7 +855,22 @@ async function saveSettings() {
       bm25_enabled: document.getElementById('s-bm25').checked,
       active_embed_provider: document.getElementById('s-provider').value,
       default_search_provider: document.getElementById('s-wprovider').value,
-      default_search_count: +document.getElementById('s-wcount').value || 0
+      default_search_count: +document.getElementById('s-wcount').value || 0,
+      default_search_freshness_days: +document.getElementById('s-wfresh').value || 0,
+      default_search_topic: document.getElementById('s-wtopic').value,
+      default_search_lang: document.getElementById('s-wlang').value.trim(),
+      default_search_store: document.getElementById('s-wstore').checked,
+      default_search_ingest: +document.getElementById('s-wingest').value || 0,
+      default_search_max_chars: +document.getElementById('s-wmax').value || 0,
+      deepseek_max_count: +document.getElementById('s-ds-max').value || 0,
+      tavily_search_depth: document.getElementById('s-tv-depth').value,
+      tavily_country: document.getElementById('s-tv-country').value.trim(),
+      firecrawl_country: document.getElementById('s-fc-country').value.trim(),
+      firecrawl_location: document.getElementById('s-fc-location').value.trim(),
+      searxng_language: document.getElementById('s-sx-lang').value.trim(),
+      searxng_categories: document.getElementById('s-sx-cats').value.trim(),
+      searxng_safesearch: +document.getElementById('s-sx-safe').value,
+      searxng_engines: document.getElementById('s-sx-engines').value.split(',').map(v => v.trim()).filter(Boolean)
     });
     // Saved regardless of backend reachability; a backend that was offline
     // shows up as an advisory warning, not a failed save (failover must stay

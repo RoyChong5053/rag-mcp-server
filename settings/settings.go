@@ -55,20 +55,56 @@ type Settings struct {
 	// FusionMethod picks how the vector and BM25 lists merge: "rrf" (default)
 	// or "weighted".
 	FusionMethod string `json:"fusion_method"`
-	// SearchProviders lists the web-search providers this server was built
-	// with. It is seeded from the config and is not editable: it reports
-	// what the server can actually reach, so the dashboard can offer the
-	// choice without inventing providers that would fail.
+	// SearchProviders lists the web-search provider modules this server was
+	// built with. It is seeded from config.yaml and restored on every load;
+	// it is not editable, so the dashboard reports what the server can
+	// actually call instead of inventing providers that would fail.
 	SearchProviders []string `json:"search_providers,omitempty"`
-	// DefaultSearchProvider is the provider web_search uses when the caller
-	// does not name one. Empty = walk the configured chain in order, first
-	// answer wins. Frontends that only want "search the web" (a slash
-	// command, say) set this once instead of carrying provider lists
-	// around.
+	// DefaultSearchProvider is the provider web_search uses. There is no
+	// failover chain: an empty value is a configuration error, and a
+	// selected provider that is unavailable fails the call instead of
+	// switching to another one.
 	DefaultSearchProvider string `json:"default_search_provider"`
 	// DefaultSearchCount is how many results web_search asks for when the
 	// caller does not specify. 0 = use the server default.
 	DefaultSearchCount int `json:"default_search_count"`
+	// DefaultSearchFreshnessDays is the default age limit on results.
+	// 0 = no limit.
+	DefaultSearchFreshnessDays int `json:"default_search_freshness_days"`
+	// DefaultSearchTopic is "general" or "news".
+	DefaultSearchTopic string `json:"default_search_topic"`
+	// DefaultSearchLang is the ISO 639-1 language bias. Empty = provider
+	// default.
+	DefaultSearchLang string `json:"default_search_lang"`
+	// DefaultSearchStore files what a search returned into the web
+	// collection. False searches without filing anything (and the
+	// providers are not asked for full text).
+	DefaultSearchStore bool `json:"default_search_store"`
+	// DefaultSearchIngest is how many of the returned results get filed.
+	// 0 = all of them.
+	DefaultSearchIngest int `json:"default_search_ingest"`
+	// DefaultSearchMaxChars caps how much of one page body is stored.
+	DefaultSearchMaxChars int `json:"default_search_max_chars"`
+
+	// DeepSeekMaxCount caps the result count requested from DeepSeek
+	// (the API allows 1-50).
+	DeepSeekMaxCount int `json:"deepseek_max_count"`
+	// TavilySearchDepth is "basic", "advanced" or "fast".
+	TavilySearchDepth string `json:"tavily_search_depth"`
+	// TavilyCountry is the ISO 3166-1 alpha-2 geo bias (general topic only).
+	TavilyCountry string `json:"tavily_country"`
+	// FirecrawlCountry / FirecrawlLocation bias Firecrawl results.
+	FirecrawlCountry  string `json:"firecrawl_country"`
+	FirecrawlLocation string `json:"firecrawl_location"`
+	// SearXNGLanguage / SearXNGCategories restrict the SearXNG search.
+	// Empty language falls back to DefaultSearchLang.
+	SearXNGLanguage   string `json:"searxng_language"`
+	SearXNGCategories string `json:"searxng_categories"`
+	// SearXNGSafeSearch is 0 (off), 1 (moderate) or 2 (strict).
+	SearXNGSafeSearch int `json:"searxng_safesearch"`
+	// SearXNGEngines restricts the search to these engines. Empty = all
+	// engines enabled in the instance's settings.yml.
+	SearXNGEngines []string `json:"searxng_engines,omitempty"`
 }
 
 // EmbedProvider describes one embedding endpoint. APIKeyEnv names an
@@ -103,6 +139,22 @@ type Patch struct {
 	FusionMethod            *string          `json:"fusion_method"`
 	DefaultSearchProvider   *string          `json:"default_search_provider"`
 	DefaultSearchCount      *int             `json:"default_search_count"`
+
+	DefaultSearchFreshnessDays *int      `json:"default_search_freshness_days"`
+	DefaultSearchTopic         *string   `json:"default_search_topic"`
+	DefaultSearchLang          *string   `json:"default_search_lang"`
+	DefaultSearchStore         *bool     `json:"default_search_store"`
+	DefaultSearchIngest        *int      `json:"default_search_ingest"`
+	DefaultSearchMaxChars      *int      `json:"default_search_max_chars"`
+	DeepSeekMaxCount           *int      `json:"deepseek_max_count"`
+	TavilySearchDepth          *string   `json:"tavily_search_depth"`
+	TavilyCountry              *string   `json:"tavily_country"`
+	FirecrawlCountry           *string   `json:"firecrawl_country"`
+	FirecrawlLocation          *string   `json:"firecrawl_location"`
+	SearXNGLanguage            *string   `json:"searxng_language"`
+	SearXNGCategories          *string   `json:"searxng_categories"`
+	SearXNGSafeSearch          *int      `json:"searxng_safesearch"`
+	SearXNGEngines             *[]string `json:"searxng_engines"`
 }
 
 // Store is a concurrency-safe runtime settings store backed by a JSON file.
@@ -128,6 +180,10 @@ func (s *Store) load() {
 	if err != nil {
 		return
 	}
+	// SearchProviders reports what this build actually registered. It is
+	// seeded from config.yaml, never from settings.json, so a stale file
+	// cannot make the dashboard offer a provider that no longer exists.
+	registered := append([]string(nil), s.data.SearchProviders...)
 	// Pre-dual-backend files used a single "default_collection" key, which was
 	// the qdrant scope. Migrate it to default_collection_qdrant so existing
 	// settings.json files keep working without manual edits.
@@ -136,6 +192,7 @@ func (s *Store) load() {
 	}
 	_ = json.Unmarshal(raw, &legacy)
 	_ = json.Unmarshal(raw, &s.data)
+	s.data.SearchProviders = registered
 	if s.data.DefaultCollectionQdrant == "" && legacy.DefaultCollection != nil {
 		s.data.DefaultCollectionQdrant = *legacy.DefaultCollection
 	}
@@ -210,8 +267,103 @@ func (s *Store) Update(p Patch) error {
 			s.data.DefaultSearchCount = *p.DefaultSearchCount
 		}
 	}
+	if p.DefaultSearchFreshnessDays != nil {
+		s.data.DefaultSearchFreshnessDays = nonNegative(*p.DefaultSearchFreshnessDays)
+	}
+	if p.DefaultSearchTopic != nil {
+		s.data.DefaultSearchTopic = strings.TrimSpace(*p.DefaultSearchTopic)
+	}
+	if p.DefaultSearchLang != nil {
+		s.data.DefaultSearchLang = strings.TrimSpace(*p.DefaultSearchLang)
+	}
+	if p.DefaultSearchStore != nil {
+		s.data.DefaultSearchStore = *p.DefaultSearchStore
+	}
+	if p.DefaultSearchIngest != nil {
+		s.data.DefaultSearchIngest = nonNegative(*p.DefaultSearchIngest)
+	}
+	if p.DefaultSearchMaxChars != nil {
+		s.data.DefaultSearchMaxChars = nonNegative(*p.DefaultSearchMaxChars)
+	}
+	if p.DeepSeekMaxCount != nil {
+		v := *p.DeepSeekMaxCount
+		if v < 0 {
+			v = 0
+		}
+		if v > 50 {
+			v = 50
+		}
+		s.data.DeepSeekMaxCount = v
+	}
+	if p.TavilySearchDepth != nil {
+		s.data.TavilySearchDepth = normalizeSearchDepth(*p.TavilySearchDepth)
+	}
+	if p.TavilyCountry != nil {
+		s.data.TavilyCountry = upperCountry(*p.TavilyCountry)
+	}
+	if p.FirecrawlCountry != nil {
+		s.data.FirecrawlCountry = upperCountry(*p.FirecrawlCountry)
+	}
+	if p.FirecrawlLocation != nil {
+		s.data.FirecrawlLocation = strings.TrimSpace(*p.FirecrawlLocation)
+	}
+	if p.SearXNGLanguage != nil {
+		s.data.SearXNGLanguage = strings.TrimSpace(*p.SearXNGLanguage)
+	}
+	if p.SearXNGCategories != nil {
+		s.data.SearXNGCategories = strings.TrimSpace(*p.SearXNGCategories)
+	}
+	if p.SearXNGSafeSearch != nil {
+		v := *p.SearXNGSafeSearch
+		if v < 0 {
+			v = 0
+		}
+		if v > 2 {
+			v = 2
+		}
+		s.data.SearXNGSafeSearch = v
+	}
+	if p.SearXNGEngines != nil {
+		s.data.SearXNGEngines = cleanList(*p.SearXNGEngines)
+	}
 
 	return s.save()
+}
+
+func nonNegative(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+func normalizeSearchDepth(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "advanced":
+		return "advanced"
+	case "fast":
+		return "fast"
+	default:
+		return "basic"
+	}
+}
+
+func upperCountry(v string) string {
+	return strings.ToUpper(strings.TrimSpace(v))
+}
+
+func cleanList(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func (s *Store) save() error {

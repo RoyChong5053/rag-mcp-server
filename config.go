@@ -159,7 +159,9 @@ type RerankConfig struct {
 	DocMaxChars   int `yaml:"doc_max_chars"`
 }
 
-// ProviderConfig configures one external search provider.
+// ProviderConfig is the connection information shared by the key-based
+// providers. Behavioural parameters live in the per-provider structs below,
+// and at runtime in the WebUI settings.
 //
 // The API key is read from api_key_env first and only falls back to the
 // inline api_key. The environment variable is the preferred form because
@@ -170,9 +172,6 @@ type ProviderConfig struct {
 	APIKey string `yaml:"api_key"`
 	// APIKeyEnv names an environment variable holding the key.
 	APIKeyEnv string `yaml:"api_key_env"`
-	// Country / Location bias geo-targeted results (ISO 3166-1 alpha-2).
-	Country  string `yaml:"country"`
-	Location string `yaml:"location"`
 }
 
 // Key resolves the provider's API key.
@@ -185,6 +184,30 @@ func (p ProviderConfig) Key() string {
 	return strings.TrimSpace(p.APIKey)
 }
 
+// DeepSeekConfig configures DeepSeek's search module.
+type DeepSeekConfig struct {
+	ProviderConfig `yaml:",inline"`
+	// MaxCount seeds the WebUI's DeepSeek max count (1-50).
+	MaxCount int `yaml:"max_count"`
+}
+
+// TavilyConfig configures Tavily's search module.
+type TavilyConfig struct {
+	ProviderConfig `yaml:",inline"`
+	// SearchDepth seeds the WebUI: basic, advanced or fast.
+	SearchDepth string `yaml:"search_depth"`
+	// Country seeds the WebUI's geo bias (general topic only).
+	Country string `yaml:"country"`
+}
+
+// FirecrawlConfig configures Firecrawl's search module.
+type FirecrawlConfig struct {
+	ProviderConfig `yaml:",inline"`
+	// Country / Location seed the WebUI's geo bias.
+	Country  string `yaml:"country"`
+	Location string `yaml:"location"`
+}
+
 // SearXNGConfig configures a self-hosted SearXNG instance. It needs no API
 // key, only a reachable base URL with the json format enabled.
 type SearXNGConfig struct {
@@ -193,49 +216,55 @@ type SearXNGConfig struct {
 	Language string `yaml:"language"`
 	// Categories restricts which engine groups run ("general").
 	Categories string `yaml:"categories"`
+	// SafeSearch is 0 (off), 1 (moderate) or 2 (strict).
+	SafeSearch int `yaml:"safesearch"`
+	// Engines restricts the search to these engines. Empty = all engines
+	// enabled in the instance's settings.yml.
+	Engines []string `yaml:"engines"`
 }
 
-// SearchConfig configures the web-search side of the server: which providers
-// are tried in which order, where the fetched pages are stored, and how
-// aggressively duplicates are filtered out.
+// SearchConfig configures the web-search side of the server. The values here
+// seed settings.json on first run; the WebUI is authoritative afterwards.
 type SearchConfig struct {
 	// Enabled turns the web tools on. When false, web_search reports that
 	// the feature is off instead of calling out.
 	Enabled bool `yaml:"enabled"`
 	// Collection is where ingested pages are vectorized.
 	Collection string `yaml:"collection"`
-	// Providers is the ordered failover chain ("deepseek", "tavily",
-	// "firecrawl", "searxng"). The first one that answers wins.
+	// Providers lists which provider modules to build. Order is irrelevant:
+	// web_search calls exactly the one selected in the WebUI and never
+	// falls back to another.
 	Providers []string `yaml:"providers"`
-	// Count is the default number of results to request.
+	// Count seeds the default number of results.
 	Count int `yaml:"count"`
-	// IngestTopN is how many of the ranked results get fetched and stored.
+	// IngestTopN seeds how many of the ranked results get filed.
 	// 0 = every result.
 	IngestTopN int `yaml:"ingest_top_n"`
-	// FreshnessDays is the default age limit on search results: 0 = no
-	// limit. It is only a default; web_search's freshness_days argument
-	// overrides it per call.
+	// Store seeds whether web_search files its results at all.
+	Store bool `yaml:"store"`
+	// FreshnessDays seeds the default age limit on search results.
+	// 0 = no limit.
 	FreshnessDays int `yaml:"freshness_days"`
 	// StaleAfterDays is the age after which a recalled web page is
 	// flagged as stale. 0 = never flag. Flagging never hides a page:
 	// knowing that something is old is more useful than not knowing it
 	// exists.
 	StaleAfterDays int `yaml:"stale_after_days"`
-	// MaxContentChars caps how much of a page body is stored.
+	// MaxContentChars seeds the cap on how much of a page body is stored.
 	MaxContentChars int `yaml:"max_content_chars"`
 	// TimeoutSeconds bounds one provider request.
 	TimeoutSeconds int `yaml:"timeout_seconds"`
-	// Topic is the default search topic ("general" or "news").
+	// Topic seeds the default search topic ("general" or "news").
 	Topic string `yaml:"topic"`
-	// Lang is the default language bias passed to the providers.
+	// Lang seeds the default language bias passed to the providers.
 	Lang string `yaml:"lang"`
 	// Tags are attached to every ingested chunk.
 	Tags []string `yaml:"tags"`
 
-	DeepSeek  ProviderConfig `yaml:"deepseek"`
-	Tavily    ProviderConfig `yaml:"tavily"`
-	Firecrawl ProviderConfig `yaml:"firecrawl"`
-	SearXNG   SearXNGConfig  `yaml:"searxng"`
+	DeepSeek  DeepSeekConfig  `yaml:"deepseek"`
+	Tavily    TavilyConfig    `yaml:"tavily"`
+	Firecrawl FirecrawlConfig `yaml:"firecrawl"`
+	SearXNG   SearXNGConfig   `yaml:"searxng"`
 }
 
 func DefaultConfig() *Config {
@@ -289,15 +318,16 @@ func DefaultConfig() *Config {
 			Providers:       []string{"deepseek", "tavily", "firecrawl", "searxng"},
 			Count:           10,
 			IngestTopN:      0,
+			Store:           true,
 			FreshnessDays:   7,
 			MaxContentChars: 20000,
 			TimeoutSeconds:  45,
 			Topic:           "general",
 			Lang:            "",
 			Tags:            []string{"web"},
-			DeepSeek:        ProviderConfig{BaseURL: "https://api.deepseek.com"},
-			Tavily:          ProviderConfig{BaseURL: "https://api.tavily.com"},
-			Firecrawl:       ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2", Country: "MY"},
+			DeepSeek:        DeepSeekConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.deepseek.com"}, MaxCount: 50},
+			Tavily:          TavilyConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.tavily.com"}, SearchDepth: "basic"},
+			Firecrawl:       FirecrawlConfig{ProviderConfig: ProviderConfig{BaseURL: "https://api.firecrawl.dev/v2"}, Country: "MY"},
 			SearXNG:         SearXNGConfig{Categories: "general"},
 		},
 		Documents: DocumentsConfig{

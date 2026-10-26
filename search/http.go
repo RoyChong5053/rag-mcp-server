@@ -11,25 +11,20 @@ import (
 	"time"
 )
 
-// maxErrorBodyBytes caps how much of a provider's error body is read into the
-// error message. Provider error bodies are usually a short JSON object, but
-// some gateways return HTML pages.
-const maxErrorBodyBytes = 4 << 10
-
-// httpClient is the shared client for provider calls. Per-request timeouts are
-// applied with context deadlines, so the client itself only needs a sane
-// ceiling for slow/hanging bodies.
-func httpClient(timeout time.Duration) *http.Client {
+// NewHTTPClient is the shared client for provider calls. Per-request
+// timeouts are applied with context deadlines, so the client itself only
+// needs a sane ceiling for slow/hanging bodies.
+func NewHTTPClient(timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	return &http.Client{Timeout: timeout}
 }
 
-// postJSON sends body as JSON to url with the given auth header and decodes
-// the JSON response into out. A non-2xx status becomes an error carrying a
+// PostJSON sends body as JSON to url with the given headers and decodes the
+// JSON response into out. A non-2xx status becomes an error carrying a
 // truncated slice of the response body.
-func postJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, body any, out any) error {
+func PostJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, body any, out any) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
@@ -64,8 +59,8 @@ func postJSON(ctx context.Context, client *http.Client, url string, headers map[
 	return nil
 }
 
-// getJSON issues a GET and decodes the JSON response into out.
-func getJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, out any) error {
+// GetJSON issues a GET and decodes the JSON response into out.
+func GetJSON(ctx context.Context, client *http.Client, url string, headers map[string]string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)

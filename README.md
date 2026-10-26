@@ -213,8 +213,7 @@ scope can fall back to a local vectra collection:
 | `read_document` | Read one document out of the vault (optionally a line range) |
 | `list_documents` | List the documents of the vault, newest first. Reads the index, not the corpus, so it stays fast at any size |
 | `documents_import` | File a folder of raw material into the vault: every text file is dated, categorized and named after its content hash; files that are already there are skipped |
-| `web_search` | Search the live web and return what the provider found. It always queries the live web — it never answers from stored material — and every hit carries its publication date. The pages it finds are also vectorized into the web collection, so later turns can recall them with `search_memory`. Pass `store:false` to search without filing anything |
-| `fetch_url` | Fetch one page as markdown, optionally vectorizing it into the web collection |
+| `web_search` | Search the live web with the provider selected in the dashboard, and return its hits. It always queries the live web — it never answers from stored material — and every hit carries its publication date. The result text is also vectorized into the web collection in the background, so later turns can recall it with `search_memory`. The tool takes only `query`; count, freshness, topic, language, store, ingest and the provider are set in the dashboard |
 
 ### The documents vault
 
@@ -297,29 +296,34 @@ search_memory(query)→  recall what was searched before, with its dates
   date their results at all (Firecrawl's web source never does); the server
   makes a best effort at recovering the date from the page itself and leaves
   it `unknown` when it cannot.
-- **Everything that was searched is stored** (`ingest_top_n: 0` stores all of
-  it). Deciding what is worth keeping is the caller's job; a server that
-  silently drops material makes the knowledge base impossible to reason
-  about. One page lives per canonical URL, so re-searching the same article
-  replaces it instead of piling up. `store:false` opts out entirely.
-  Lowering `ingest_top_n` or `max_content_chars` does NOT save search-API
-  credits — the provider has already fetched (and billed for) the full pages
-  by the time the results come back; it only shortens the embedding work and
-  throws material away.
-- **Providers** are tried in order (`search.providers`) **only when the
-  default provider is empty** ("failover chain"): the first one that answers
-  wins, so a dead or rate-limited provider fails over to the next:
-  `deepseek` (search + fetch in one request, with publication date and a
-  source-authority tier), `tavily` (page-level chunks), `firecrawl` (anti-bot
-  scraping, news results), `searxng` (self-hosted, free, no key).
-- **One default provider, set in the dashboard, and it is authoritative.**
-  The *Search Defaults* panel has a "web search provider" dropdown;
-  `web_search` uses it when the caller names no provider. If that provider is
-  not configured, the call fails with an error naming it — it never switches
-  to another backend behind the caller's back, because then the answer would
-  look like it came from a provider that never ran. Select *(failover chain)*
-  in the dropdown to opt into the ordered fallback explicitly. Changing the
-  setting takes effect immediately, no restart.
+- **Everything the selected provider returned is stored** (`ingest` in the
+  WebUI, 0 = all of it). Deciding what is worth keeping is the operator's
+  job; a server that silently drops material makes the knowledge base
+  impossible to reason about. One page lives per canonical URL, so
+  re-searching the same article replaces it instead of piling up. Turning
+  `store` off searches without filing anything. Lowering `ingest` or
+  `max chars` does NOT save search-API credits — the provider has already
+  fetched (and billed for) the full pages by the time the results come back;
+  it only shortens the embedding work and throws material away.
+- **The selected provider is the only provider called.** The four providers
+  are independent modules: `deepseek` (search + full text in one request,
+  with publication date and a source-authority tier), `tavily` (page-level
+  chunks and a `search_depth` cost trade-off), `firecrawl` (anti-bot
+  scraping, news results, country/location), `searxng` (self-hosted, free, no
+  key). `search.providers` in config.yaml only says which modules to build;
+  order is irrelevant.
+- **No failover.** The *Search Defaults* panel has a "web search provider"
+  dropdown, and `web_search` calls exactly that provider. An empty selection
+  is an error telling the operator to choose; a selected provider that is not
+  configured fails with its name. The call never switches to another backend
+  behind the caller's back, because then the answer would look like it came
+  from a provider that never ran. Changing the setting takes effect
+  immediately, no restart.
+- **Provider options live in the WebUI too**: DeepSeek max count, Tavily
+  search depth and country, Firecrawl country and location, SearXNG language,
+  categories, safesearch and engines. Only the selected provider's block is
+  read; the others are kept for switching. API keys and base URLs stay in
+  config.yaml/env and never enter `settings.json`.
 - **API keys** come from environment variables (`api_key_env`), never from
   the tracked config file.
 
@@ -327,18 +331,44 @@ search_memory(query)→  recall what was searched before, with its dates
 search:
   enabled: true
   collection: "web_cache"      # keep web content apart from personal memory
-  providers: [deepseek, tavily, firecrawl, searxng]
+  providers: [deepseek, tavily, firecrawl, searxng]  # modules to build; order irrelevant
+  store: true                # seed for the WebUI toggle
   ingest_top_n: 0           # 0 = store every result
   freshness_days: 0         # default age limit on search results (0 = none)
   stale_after_days: 7       # older than this is flagged stale when recalled
+  max_content_chars: 20000
+  topic: "general"
+  lang: ""
   deepseek:
     base_url: "https://api.deepseek.com"
     api_key_env: "DEEPSEEK_API_KEY"
+    max_count: 50
+  tavily:
+    base_url: "https://api.tavily.com"
+    api_key_env: "TAVILY_API_KEY"
+    search_depth: "basic"
+    country: ""
+  firecrawl:
+    base_url: "https://api.firecrawl.dev/v2"
+    api_key_env: "FIRECRAWL_API_KEY"
+    country: "MY"
+    location: ""
+  searxng:
+    base_url: "http://127.0.0.1:8899"
+    language: ""
+    categories: "general"
+    safesearch: 0
+    engines: []
 ```
+
+These values only seed `settings.json` on first run. After that the
+dashboard is authoritative: changing the provider, count, freshness, topic,
+language, store/ingest, max chars or any per-provider option takes effect on
+the next `web_search`, without a restart.
 
 ### Self-hosting SearXNG
 
-SearXNG is the free, key-less member of the chain. Two settings decide whether
+SearXNG is the free, key-less provider module. Two settings decide whether
 it works at all: its `json` output format (off by default) and its bind
 address. Deploy it as a container next to the server, on loopback only —
 `web_search` runs on the same host, so nothing else needs to reach it:
@@ -372,7 +402,9 @@ restart the server. Engine availability depends on the host's egress IP: the
 `unresponsive_engines` list in the JSON response is logged, and `/stats` in
 SearXNG's own UI shows per-engine reliability. Preferences set in that UI are
 cookie-scoped and do **not** affect API calls — an engine has to be enabled in
-`settings.yml` to be used by `web_search`.
+`settings.yml` to be used by `web_search`. The dashboard's SearXNG options
+(`language`, `categories`, `safesearch`, `engines`) narrow the search further;
+`engines` is the quickest way to exclude a flaky upstream.
 
 ## Management dashboard
 
@@ -380,7 +412,10 @@ Admin UI + JSON API on `:8198` (defaults to `0.0.0.0` so every LAN device can
 reach it; there is no TLS — restrict the bind or firewall it on untrusted
 networks). Includes a **Search Defaults** panel (active backend, per-backend
 default collections, failover toggle, top_k, threshold, rerank/recall, truncation
-limits) shared live by every frontend, plus:
+limits) shared live by every frontend, plus the full web-search panel —
+provider, results, freshness, topic, language, store/ingest, max chars and the
+per-provider options (DeepSeek max count, Tavily depth/country, Firecrawl
+country/location, SearXNG language/categories/safesearch/engines):
 list/search collections, edit metadata, backfill payloads, recall test with
 threshold-kill report, and an audit tail.
 Collection metadata lives in `collections.json` (server-local, gitignored).

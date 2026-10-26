@@ -167,3 +167,17 @@ func TestPatchFieldsAreApplied(t *testing.T) {
 		}
 	}
 }
+
+// The dashboard's provider list must reflect what this build registered, not
+// a stale settings.json from an older config.
+func TestSearchProvidersAlwaysComeFromBuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"search_providers":["ghost"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(path, Settings{SearchProviders: []string{"searxng"}})
+	got := s.Get().SearchProviders
+	if len(got) != 1 || got[0] != "searxng" {
+		t.Fatalf("search providers = %v, want [searxng]", got)
+	}
+}

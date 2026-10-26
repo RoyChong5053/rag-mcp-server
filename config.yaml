@@ -111,18 +111,21 @@ search:
   # Collection the fetched pages are vectorized into. Keep it separate from
   # the personal-memory collection so web content never outranks your own facts.
   collection: "web_cache"
-  # Ordered failover chain. The first provider that answers wins.
+  # Provider modules to build. Order is irrelevant: web_search calls exactly
+  # the provider selected in the WebUI and never falls back to another.
   providers:
     - deepseek
     - tavily
     - firecrawl
     - searxng
   count: 10
-  # How many of the ranked results get fetched and vectorized. 0 = all of
-  # them: whatever was searched goes into the collection.
+  # The values below seed settings.json on first run; the WebUI wins after
+  # that, so edits there take effect on the next call without a restart.
+  # How many of the returned results get filed. 0 = all of them.
   ingest_top_n: 0
-  # Default age limit on search results: 0 = no limit. The web_search
-  # argument freshness_days overrides it per call.
+  # Whether web_search files its results at all.
+  store: true
+  # Default age limit on search results: 0 = no limit.
   freshness_days: 0
   # A recalled web page older than this is flagged as stale (it is still
   # returned — knowing something is old beats not knowing it exists).
@@ -138,18 +141,24 @@ search:
     base_url: "https://api.deepseek.com"
     api_key: ""
     api_key_env: "DEEPSEEK_API_KEY"
+    max_count: 50
   tavily:
     base_url: "https://api.tavily.com"
     api_key: ""
     api_key_env: "TAVILY_API_KEY"
+    search_depth: "basic"
+    country: ""
   firecrawl:
     base_url: "https://api.firecrawl.dev/v2"
     api_key: ""
     api_key_env: "FIRECRAWL_API_KEY"
     country: "MY"
+    location: ""
   searxng:
     # Self-hosted instance; the json format must be enabled in its settings.yml.
     # The container is bound to loopback only (see deploy notes in README).
     base_url: "http://127.0.0.1:8899"
     language: ""
     categories: "general"
+    safesearch: 0
+    engines: []

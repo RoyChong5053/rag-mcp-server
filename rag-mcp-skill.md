@@ -182,6 +182,13 @@ opencode v2.1.2 有 `tool_output` 配置：`max_bytes` 默认 **51200**、`max_l
 要召回「之前搜过什么」，用 `search_memory`，不是 `web_search`。
 每个 web 命中都带发布日期（或 `unknown`）。
 
+工具只收 `query` 一个参数；`count`、`freshness`、`topic`、`lang`、
+`store`、`ingest`、`max chars` 和用哪家 provider 都在 WebUI 的
+Search Defaults 里设。**选中的 provider 就是唯一被调用的那家**：没有
+failover，没配好或没选就报错，不会偷偷换一家。抓单页的 `fetch_url`
+已经删掉，搜索结果由 provider 直接返回正文/摘要/片段；归档时按
+`content → summary → snippet` 取有内容的那一层，不再二次请求网页。
+
 ---
 
 ## 七、怎么找到这份文档
@@ -209,8 +216,7 @@ search_document(query="rag-mcp-skill", limit=5)      # 搜内容，不是文件�
 | 读一段 | `read_document(path, from_line, to_line)` ← **务必带行号** |
 | 看最近来了什么 | `list_documents(limit=50, channel)` |
 | 归档一个目录 | `documents_import(path, collection, reindex, max_files)` |
-| 查实时网页 | `web_search(query, count, domains, freshness_days, store, provider, lang, topic)` |
-| 抓单页 | `fetch_url(url, ...)` |
+| 查实时网页 | `web_search(query)`（其余参数在 WebUI 配） |
 | 看集合 | `list_collections()` / `collection_info(collection_id)` |
 | 改记忆 | `update_memory(collection_id, ids\|filter, new_text, metadata, dry_run)` |
 | 健康检查 | `health_check()` |

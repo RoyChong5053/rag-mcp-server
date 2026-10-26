@@ -1,14 +1,16 @@
-// Package search wraps external web-search providers behind one interface.
+// Package search holds the provider-agnostic web-search contract: the query
+// the tool layer sends, the result it gets back, and the small registry that
+// maps a provider name to its module.
 //
-// The rag-mcp-server uses it for one job: pull live web pages in and turn them
-// into vectors. The provider details (query operators, result shapes, credit
-// rules) differ wildly between services, so everything service-specific lives
-// behind Provider and the caller only ever sees Result.
+// Each provider lives in its own subpackage (deepseek, tavily, firecrawl,
+// searxng) and owns its URL, authentication, request body, response shape,
+// parameters and error mapping. The APIs change independently, so no provider
+// logic is shared here: a change to Tavily's payload touches only
+// search/tavily.
 package search
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -16,13 +18,10 @@ import (
 	"time"
 )
 
-// ErrUnsupported is returned by a provider that cannot do the requested
-// operation (e.g. SearXNG has no fetch endpoint). Callers treat it as "this
-// provider cannot serve that need" and move on to the next one.
-var ErrUnsupported = errors.New("operation not supported by provider")
-
-// Query is the provider-agnostic search request. Each provider maps what it
-// can honour and ignores the rest.
+// Query is the provider-agnostic request built by web_search. Each provider
+// maps the fields it can honour and ignores the rest. Provider-specific
+// knobs (Tavily's search_depth, SearXNG's categories, ...) are deliberately
+// absent: each module reads its own settings.
 type Query struct {
 	// Text is the search query. Providers that support operators (site:,
 	// after:, lang:) receive it verbatim so callers can steer the search.
@@ -34,8 +33,6 @@ type Query struct {
 	NeedContent bool
 	// FreshnessDays restricts results to the last N days (0 = no limit).
 	FreshnessDays int
-	// Domains restricts results to these hosts (empty = no restriction).
-	Domains []string
 	// Lang is an ISO 639-1 code used to bias/filter results by language.
 	Lang string
 	// Topic is a provider-specific bucket: "general" (default) or "news".
@@ -66,27 +63,18 @@ type Result struct {
 	Provider string
 }
 
-// Page is a fetched web page.
-type Page struct {
-	Title   string
-	URL     string
-	Content string
-}
-
-// Provider is one external search service.
+// Provider is one external search service. Each implementation lives in its
+// own subpackage and is wired in main.go from config.
 type Provider interface {
-	// Name is the short identifier used in logs, metadata and config.
+	// Name is the short identifier used in logs, metadata and settings.
 	Name() string
 	// Available reports whether the provider is configured and usable
-	// (e.g. an API key is present). Unavailable providers are skipped by
-	// the chain instead of failing the call.
+	// (e.g. an API key is present). An unavailable provider is never
+	// silently replaced by another one.
 	Available() bool
 	// Search runs the query. It returns an empty slice when the provider
 	// worked but found nothing; that is not an error.
 	Search(ctx context.Context, q Query) ([]Result, error)
-	// Fetch retrieves one page as markdown. Providers without that ability
-	// return ErrUnsupported.
-	Fetch(ctx context.Context, url string) (Page, error)
 }
 
 // CanonicalizeURL strips tracking parameters and fragments so the same article
@@ -148,27 +136,9 @@ func CanonicalizeURL(raw string) string {
 	return s
 }
 
-// hostOf returns the lowercase hostname of a URL, or "" when there is none.
-func hostOf(raw string) string {
-	s := raw
-	if i := strings.Index(s, "://"); i >= 0 {
-		s = s[i+3:]
-	}
-	if i := strings.IndexAny(s, "/?#"); i >= 0 {
-		s = s[:i]
-	}
-	if i := strings.IndexByte(s, '@'); i >= 0 {
-		s = s[i+1:]
-	}
-	if i := strings.IndexByte(s, ':'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.ToLower(s)
-}
-
-// joinTitle builds a display title from a provider's title and site name
-// when the title is missing.
-func joinTitle(title, site string) string {
+// JoinTitle builds a display title from a provider's title and site name when
+// the title is missing. Providers use it to normalize their own response.
+func JoinTitle(title, site string) string {
 	t := strings.TrimSpace(title)
 	if t != "" {
 		return t
@@ -180,7 +150,7 @@ func joinTitle(title, site string) string {
 }
 
 // truncateRunes cuts s to at most n runes, appending an ellipsis marker when
-// it had to cut. Used to keep provider payloads bounded.
+// it had to cut. Used to keep provider payloads bounded in error messages.
 func truncateRunes(s string, n int) string {
 	if n <= 0 {
 		return s
@@ -192,9 +162,9 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// parseDate tries the date layouts providers use. It returns the zero time
+// ParseDate tries the date layouts providers use. It returns the zero time
 // when nothing parses.
-func parseDate(s string) time.Time {
+func ParseDate(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}
@@ -219,8 +189,8 @@ func parseDate(s string) time.Time {
 	return time.Time{}
 }
 
-// errProvider builds a provider-scoped error.
-func errProvider(name string, err error) error {
+// ProviderError builds a provider-scoped error.
+func ProviderError(name string, err error) error {
 	return fmt.Errorf("%s: %w", name, err)
 }
 
@@ -245,7 +215,7 @@ var monthNames = map[string]time.Month{
 	"dec": time.December, "december": time.December,
 }
 
-// parseDateFromText makes a best effort at finding a publication date in the
+// ParseDateFromText makes a best effort at finding a publication date in the
 // head of a page body.
 //
 // Some search sources do not date their results at all — Firecrawl's web
@@ -257,7 +227,7 @@ var monthNames = map[string]time.Month{
 // match has to look like a date rather than any number, and a year outside
 // 2000-2099 is rejected. Nothing is guessed when nothing matches: a wrong
 // date is worse than no date.
-func parseDateFromText(text string) time.Time {
+func ParseDateFromText(text string) time.Time {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return time.Time{}
