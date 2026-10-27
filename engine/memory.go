@@ -177,22 +177,22 @@ func (e *Engine) VerifyDeep(collectionID, sourcePath string, sampleN int) (*Veri
 		if strings.TrimSpace(sourcePath) != "" {
 			if data, err := os.ReadFile(sourcePath); err == nil {
 				used := e.ResolveChunkOptions(nil)
-				chunks := chunking.Split(string(data), chunking.Options{Strategy: used.Strategy, Size: used.Size, Overlap: used.Overlap})
-				matched := 0
-				for _, c := range chunks {
-					if stored[ContentSHA(c)] {
-						matched++
+				matched, total, want := textCoverage(string(data), used, stored)
+				// A vault document carries a front matter the index never
+				// saw (the index was built from the raw file). Re-chunking
+				// the file as-is would then report zero coverage for text
+				// that is perfectly intact, so measure the body too and keep
+				// the better reading.
+				if body, ok := stripFrontMatter(string(data)); ok {
+					if m2, t2, w2 := textCoverage(body, used, stored); t2 > 0 && (total == 0 || float64(m2)/float64(t2) > float64(matched)/float64(total)) {
+						matched, total, want = m2, t2, w2
 					}
 				}
-				res.TextMatched, res.TextTotal = matched, len(chunks)
-				if len(chunks) > 0 {
-					res.TextCoverage = float64(matched) / float64(len(chunks))
+				res.TextMatched, res.TextTotal = matched, total
+				if total > 0 {
+					res.TextCoverage = float64(matched) / float64(total)
 				}
 				// Orphans: stored cards not in the re-chunked set.
-				want := map[string]bool{}
-				for _, c := range chunks {
-					want[ContentSHA(c)] = true
-				}
 				for sha := range stored {
 					if !want[sha] {
 						res.OrphanCards++
@@ -213,6 +213,45 @@ func (e *Engine) VerifyDeep(collectionID, sourcePath string, sampleN int) (*Veri
 	}
 	res.OK = res.StructureOK && (res.TextCoverage < 0 || res.TextCoverage >= 0.7) && (res.VectorSamples == 0 || res.VectorMedian >= 0.8)
 	return res, nil
+}
+
+// textCoverage re-chunks text the way the collection was chunked and reports
+// how many chunks the store already holds. total counts chunks, not distinct
+// hashes: repeated text really is repeated work, and the ratio must not
+// exceed 1. want is the deduped hash set used to count orphans.
+func textCoverage(text string, used ResolvedChunkOptions, stored map[string]bool) (matched, total int, want map[string]bool) {
+	chunks := chunking.Split(text, chunking.Options{Strategy: used.Strategy, Size: used.Size, Overlap: used.Overlap})
+	want = make(map[string]bool, len(chunks))
+	for _, c := range chunks {
+		sha := ContentSHA(c)
+		want[sha] = true
+		if stored[sha] {
+			matched++
+		}
+	}
+	return matched, len(chunks), want
+}
+
+// stripFrontMatter returns the body of a document that opens with a YAML
+// front-matter block, and whether one was found.
+func stripFrontMatter(text string) (string, bool) {
+	s := strings.TrimPrefix(text, "\ufeff")
+	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
+		return text, false
+	}
+	// Skip the opening delimiter line, then look for the closing one.
+	rest := s[strings.IndexByte(s, '\n')+1:]
+	for {
+		i := strings.IndexByte(rest, '\n')
+		if i < 0 {
+			return text, false
+		}
+		line := strings.TrimSpace(rest[:i])
+		rest = rest[i+1:]
+		if line == "---" {
+			return rest, true
+		}
+	}
 }
 
 func (e *Engine) chunkOptionsForVerify(collectionID string) (size, overlap int, strategy string) {

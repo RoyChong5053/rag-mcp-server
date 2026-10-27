@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -314,5 +315,101 @@ func TestFileStoreSearchFilter(t *testing.T) {
 	res, err = fs.Search("col", []float32{1, 0}, 10, 0, nil)
 	if err != nil || len(res) != 2 {
 		t.Fatalf("unfiltered search: %v %+v", err, res)
+	}
+}
+
+// A catalog whose key points at a folder that is not there used to return an
+// empty result, indistinguishable from "nothing matched for this query".
+// That is how a collection can be dead for days without anyone noticing, so
+// it must be a loud error instead.
+func TestSearchReportsDanglingCatalogKey(t *testing.T) {
+	fs, docs, vectra := newTestStore(t)
+	if err := fs.CreateCollection("col"); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(docs, "chat_history", "A.md")
+	if err := fs.UpsertPoints("col", []Point{pt(1, src, []float32{1, 0, 0}, "alpha")}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the interrupted migration: the catalog still names the source
+	// key, the folder it names is gone.
+	idxDir := filepath.Join(vectra, "col", "chat_history", "A.md")
+	if err := os.Rename(idxDir, idxDir+"-stale"); err != nil {
+		t.Fatal(err)
+	}
+	fs.InvalidateCollection("col")
+
+	_, err := fs.Search("col", []float32{1, 0, 0}, 5, 0, nil)
+	if err == nil {
+		t.Fatal("Search must fail loudly when the catalog key has no index")
+	}
+	if !strings.Contains(err.Error(), "no index could be loaded") {
+		t.Fatalf("error should name the broken pointer, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "verify-deep") {
+		t.Fatalf("error should say how to diagnose it, got: %v", err)
+	}
+}
+
+// One unreadable source among readable ones degrades recall, it does not
+// abort the whole search: the readable sources still answer.
+func TestSearchKeepsReadableSourcesWhenOneIsMissing(t *testing.T) {
+	fs, docs, vectra := newTestStore(t)
+	if err := fs.CreateCollection("col"); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(docs, "chat_history", "A.md")
+	b := filepath.Join(docs, "chat_history", "B.md")
+	if err := fs.UpsertPoints("col", []Point{
+		pt(1, a, []float32{1, 0, 0}, "alpha"),
+		pt(2, b, []float32{1, 0, 0}, "beta"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(vectra, "col", "chat_history", "B.md")); err != nil {
+		t.Fatal(err)
+	}
+	fs.InvalidateCollection("col")
+
+	res, err := fs.Search("col", []float32{1, 0, 0}, 10, 0, nil)
+	if err != nil {
+		t.Fatalf("a partial index must not abort the search: %v", err)
+	}
+	if len(res) != 1 || res[0].Payload["text"] != "alpha" {
+		t.Fatalf("expected the readable source to answer, got %+v", res)
+	}
+}
+
+// A rename must never point the catalog at a folder that does not exist: if
+// the old folder is gone and the new one was never written, the old key is
+// the only one that can still be repaired.
+func TestRenameSourcesKeepsCatalogKeyWhenFolderIsGone(t *testing.T) {
+	fs, docs, vectra := newTestStore(t)
+	if err := fs.CreateCollection("col"); err != nil {
+		t.Fatal(err)
+	}
+	oldSource := filepath.Join(docs, "chat_history", "A.md")
+	newSource := filepath.Join(docs, "chat_history", "B.md")
+	if err := fs.UpsertPoints("col", []Point{pt(1, oldSource, []float32{1, 0, 0}, "alpha")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(vectra, "col", "chat_history", "A.md")); err != nil {
+		t.Fatal(err)
+	}
+	fs.InvalidateCollection("col")
+
+	if _, err := fs.RenameSources("col", map[string]string{oldSource: newSource}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := fs.loadCatalog("col")
+	if err != nil || cat == nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	meta, ok := cat.Sources[newSource]
+	if !ok {
+		t.Fatalf("source was not renamed: %+v", cat.Sources)
+	}
+	if meta.Key != "chat_history/A.md" {
+		t.Fatalf("catalog key %q points at a folder that does not exist; want the old key", meta.Key)
 	}
 }

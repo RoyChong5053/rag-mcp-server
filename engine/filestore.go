@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -475,13 +476,28 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 	}
 
 	var out []StoreSearchResult
+	claimed, loaded, dimSkips := 0, 0, 0
+	var broken []string
 	for source, meta := range cat.Sources {
+		claimed += meta.Chunks
 		idx, err := f.loadIndex(collection, meta.Key)
 		if err != nil || idx == nil {
+			// An empty source legitimately has no index; a source the
+			// catalog says holds chunks and that cannot be read is a broken
+			// pointer, and must never be reported as "no results".
+			if meta.Chunks > 0 {
+				detail := "index.json missing"
+				if err != nil {
+					detail = err.Error()
+				}
+				broken = append(broken, fmt.Sprintf("%s (%s)", meta.Key, detail))
+			}
 			continue
 		}
+		loaded += len(idx.Items)
 		for _, it := range idx.Items {
 			if len(it.Vector) != len(vector) {
+				dimSkips++
 				continue
 			}
 			payload := cloneAnyMap(it.Metadata)
@@ -506,11 +522,34 @@ func (f *FileStore) Search(collection string, vector []float32, limit int, thres
 		}
 	}
 
+	// A catalog that claims chunks but yields none is a broken pointer, not
+	// an empty result. Returning "no results" here is how a collection can
+	// be dead for days without anyone noticing.
+	if loaded == 0 && claimed > 0 {
+		return nil, fmt.Errorf("collection '%s': catalog lists %d chunks but no index could be loaded (%s): the catalog points at folders that are not there; run 'rag-mcp-server verify-deep %s'", collection, claimed, summarizeKeys(broken), collection)
+	}
+	if len(broken) > 0 {
+		log.Printf("WARN search '%s': %d catalogued source(s) could not be loaded, results may be incomplete: %s", collection, len(broken), summarizeKeys(broken))
+	}
+	if loaded > 0 && dimSkips == loaded {
+		return nil, fmt.Errorf("collection '%s': every stored vector differs in dimension from the query vector (%d-d); rebuild the collection or switch embedding models", collection, len(vector))
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// summarizeKeys renders the first few broken source keys so one log line or
+// error stays readable when a collection has hundreds of sources.
+func summarizeKeys(keys []string) string {
+	const max = 3
+	if len(keys) <= max {
+		return strings.Join(keys, "; ")
+	}
+	return fmt.Sprintf("%s; and %d more", strings.Join(keys[:max], "; "), len(keys)-max)
 }
 
 // KeywordSearch implements BM25 over a collection's stored chunk text by
@@ -1167,6 +1206,13 @@ func (f *FileStore) RenameSources(collection string, moves map[string]string) (i
 						newKey = m.Key
 					}
 				}
+			} else if _, err := os.Stat(newPath); err != nil {
+				// Nothing to move: the catalog points at a folder that is
+				// not there, and the new key has no folder either. Pointing
+				// the catalog at newKey anyway would make the collection
+				// silently unsearchable, so keep the old key and say so.
+				log.Printf("WARN rename source '%s' in '%s': index folder %q is missing, keeping the catalog key %q", name, collection, m.Key, m.Key)
+				newKey = m.Key
 			}
 		}
 		if newKey == "" {

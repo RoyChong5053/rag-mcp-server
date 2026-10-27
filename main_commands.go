@@ -54,6 +54,48 @@ func usage() {
 `)
 }
 
+// parseMaintenanceArgs parses one maintenance command's flags and returns
+// the positional arguments. The stdlib flag package stops at the first
+// non-flag token, which silently dropped flags written after the collection
+// name (`verify-deep osho-book -source x`) even though the usage text
+// advertises them. Unknown flags are still left to the stdlib, which reports
+// them.
+func parseMaintenanceArgs(fs *flag.FlagSet, args []string) []string {
+	boolFlag := map[string]bool{}
+	valueFlag := map[string]bool{}
+	fs.VisitAll(func(f *flag.Flag) {
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			boolFlag[f.Name] = true
+			return
+		}
+		valueFlag[f.Name] = true
+	})
+
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") || boolFlag[name] {
+			continue
+		}
+		if valueFlag[name] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	_ = fs.Parse(flags)
+	return positional
+}
+
 // runMaintenance runs one maintenance command.
 func runMaintenance(cmd string, args []string) {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
@@ -64,7 +106,7 @@ func runMaintenance(cmd string, args []string) {
 	query := fs.String("query", "", "Search text")
 	mode := fs.String("mode", "literal", "Search mode: literal or regex")
 	channel := fs.String("channel", "", "Restrict to one channel")
-	fs.Parse(args)
+	positional := parseMaintenanceArgs(fs, args)
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
@@ -79,7 +121,6 @@ func runMaintenance(cmd string, args []string) {
 		fatal("create engine: %v", err)
 	}
 
-	positional := fs.Args()
 	switch cmd {
 	case "index-verify":
 		if len(positional) > 0 && strings.TrimSpace(positional[0]) != "" {
